@@ -127,7 +127,7 @@ const KTReleaseView = (() => {
     const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
     const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
     const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-    return `<section class="ktr-section"><h2>作成途中です</h2><p>完成した内容は残っています。残りを作成してから、全体を確認します。</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+    return `<section class="ktr-section"><h2>作成途中です</h2><p>${finished.length ? "完成した内容は残っています。残りを作成してから、全体を確認します。" : "作成は完了していません。残っている内容を作成してから、全体を確認します。"}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
   }
   function runHtml(run, options = {}, historical = false) {
     if (!run) return '<p>反映の記録はありません。</p>';

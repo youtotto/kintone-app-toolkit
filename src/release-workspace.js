@@ -12,7 +12,7 @@ const KTReleaseWorkspace = (() => {
     return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2, '0')).join('');
   }
   const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
-  const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。できた内容は残っています。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
+  const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
   const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back']);
   const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
   const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };

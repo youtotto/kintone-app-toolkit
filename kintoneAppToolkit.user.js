@@ -13318,7 +13318,7 @@
       return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2, '0')).join('');
     }
     const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
-    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。できた内容は残っています。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
+    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
     const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back']);
     const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
     const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
@@ -14031,7 +14031,7 @@
       const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
       const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
       const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-      return `<section class="ktr-section"><h2>作成途中です</h2><p>完成した内容は残っています。残りを作成してから、全体を確認します。</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+      return `<section class="ktr-section"><h2>作成途中です</h2><p>${finished.length ? "完成した内容は残っています。残りを作成してから、全体を確認します。" : "作成は完了していません。残っている内容を作成してから、全体を確認します。"}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
     }
     function runHtml(run, options = {}, historical = false) {
       if (!run) return '<p>反映の記録はありません。</p>';
