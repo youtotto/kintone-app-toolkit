@@ -2,12 +2,12 @@
  * the former conversation/review/dual-pane state is not part of this path. */
 'use strict';
 function mountReleaseWorkspace(host, d) {
-  const session = d.session || KTAiClient.createSession({ store: d.settings });
   const settings = d.settings || KTAiClient.createSettingsStore();
+  const session = d.session || KTAiClient.createSession({ store: settings });
   const budget = d.budget || KTAiBudget.create();
   let capability = { available: false, features: {} }, healthAt = 0, healthPromise = null, latestBase = null, view = null;
   let baseQueue = Promise.resolve();
-  let connectionError = '', initialHealth = d.initialHealth || null;
+  let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false;
   const esc = KTReleaseView.escape;
   const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
   host.style.overflow = 'auto';
@@ -30,6 +30,7 @@ function mountReleaseWorkspace(host, d) {
       message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
   };
   async function refreshCapability(force = false) {
+    if (connectionSettingsFailed) return capability;
     if (healthPromise) return healthPromise;
     if (!force && healthAt && Date.now() - healthAt < KTAiClient.HEALTH_TTL_MS) return capability;
     healthPromise = (async () => {
@@ -115,7 +116,9 @@ function mountReleaseWorkspace(host, d) {
       el.addEventListener('close', () => resolve(agreed), { once: true });
     });
   }
-  let flow = null;
+  let flow = null, connectionBusy = false;
+  const connectionDialogs = new Set();
+  const updateConnections = () => { for (const render of connectionDialogs) render(); };
   function verificationSettings(el) {
     const panel = el.querySelector('[data-budget-panel]');
     if (!panel) return;
@@ -151,14 +154,68 @@ function mountReleaseWorkspace(host, d) {
     render();
   }
   function connectionDialog() {
-    const status = session.status();
-    const verification = typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の利用上限</summary><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
-    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p>接続先: ' + esc(status.apiBase) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
+    const staging = 'https://appinsight-ai-api-staging.black-waterfall-157a.workers.dev';
+    const verification = typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の設定</summary><p data-staging-note></p><button type="button" data-staging-select>検証用の接続先（staging）に切り替える</button><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
+    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
     verificationSettings(el);
     const message = t => { el.querySelector('[data-message]').textContent = t; };
-    el.querySelector('[data-refresh]').addEventListener('click', async () => { await refreshCapability(true); message(connection().message); });
-    el.querySelector('[data-disconnect]').addEventListener('click', async () => { flow?.cancel(); await session.disconnect(); capability = { available: false, features: {} }; healthAt = 0; connectionError = ''; message('接続を解除しました。作成した内容はこの画面に残っています。'); view.render(); });
+    const stagingReason = () => {
+      const status = session.status(), saved = settings.load(), state = controller.getState();
+      if (status.apiBase === staging && saved.apiBase === staging && !connectionSettingsFailed) return '検証用の接続先（staging）が設定されています。変更は不要です。';
+      if (connectionBusy || healthPromise || flow?.isRunning() || budget.summary().inFlight > 0) return '処理が終わってから接続先を切り替えてください。';
+      // An expired refresh or a live in-memory access token must never move to another service.
+      if (status.connected || status.accessExpiresAt || saved.refreshToken || saved.refreshAttempt) return '接続情報が残っています。接続を解除してから切り替えてください。';
+      if (state.phase !== 'idle' || state.messages.length) return '会話を終え、新しい相談を始める前に接続先を切り替えてください。';
+      return '';
+    };
+    const render = () => {
+      el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
+      el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
+      el.querySelector('[data-refresh]').disabled = connectionBusy || connectionSettingsFailed;
+      el.querySelector('[data-disconnect]').disabled = connectionBusy;
+      const select = el.querySelector('[data-staging-select]');
+      if (select) {
+        const reason = stagingReason();
+        select.disabled = !!reason;
+        el.querySelector('[data-staging-note]').textContent = reason || '未接続で会話を始める前だけ切り替えられます。切り替えた後に［接続する］を押してください。';
+      }
+    };
+    el.querySelector('[data-staging-select]')?.addEventListener('click', () => {
+      if (stagingReason()) { render(); return; }
+      try {
+        // Save only the endpoint: neither credentials nor refresh-in-progress state are copied.
+        if (settings.save({ apiBase: staging }) !== true) throw new Error('Settings were not saved');
+        const saved = settings.load();
+        if (saved.apiBase !== staging || session.status().apiBase !== staging || saved.refreshToken || saved.refreshAttempt || saved.scope || saved.connectedAt || saved.refreshExpiresAt) throw new Error('Settings readback differs');
+        connectionSettingsFailed = false;
+        capability = { available: false, features: {} }; healthAt = 0; initialHealth = null; connectionError = '';
+        message('検証用の接続先（staging）に切り替えました。［接続する］から接続してください。');
+      } catch (_) {
+        connectionSettingsFailed = true;
+        capability = { available: false, features: {} }; healthAt = 0; initialHealth = null;
+        connectionError = '接続先の保存を確認できませんでした。接続は開始していません。保存できる状態か確認し、もう一度切り替えてください。';
+        message(connectionError);
+      }
+      render(); view.render();
+    });
+    el.querySelector('[data-refresh]').addEventListener('click', async () => {
+      if (connectionBusy || connectionSettingsFailed) return;
+      connectionBusy = true; render();
+      try { await refreshCapability(true); message(connection().message); }
+      finally { connectionBusy = false; updateConnections(); }
+    });
+    el.querySelector('[data-disconnect]').addEventListener('click', async () => {
+      if (connectionBusy) return;
+      connectionBusy = true; render();
+      try {
+        flow?.cancel(); await session.disconnect();
+        capability = { available: false, features: {} }; healthAt = 0; initialHealth = null; connectionError = '';
+        message('接続を解除しました。作成した内容はこの画面に残っています。'); view.render();
+      } finally { connectionBusy = false; updateConnections(); }
+    });
     el.querySelector('[data-connect]').addEventListener('click', async () => {
+      if (connectionBusy || healthPromise || connectionSettingsFailed) return;
+      connectionBusy = true; render();
       let popup = null;
       try { popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null; } catch (_) {}
       flow = flow || KTAiClient.createConnectFlow({ session, openUrl: url => {
@@ -166,10 +223,15 @@ function mountReleaseWorkspace(host, d) {
         const area = el.querySelector('[data-link]'), link = el.ownerDocument.createElement('a');
         link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = '承認ページを開く'; area.replaceChildren(link); return false;
       } });
-      try { await flow.start({ onState: state => message(state.phase === 'pending' ? '開いたページで接続を承認してください。' : '接続を準備しています。') }); await refreshCapability(true); message(connection().message); }
+      try { await flow.start({ onState: state => { message(state.phase === 'pending' ? '開いたページで接続を承認してください。' : '接続を準備しています。'); render(); } }); await refreshCapability(true); message(connection().message); }
       catch (e) { message(KTAiClient.errorText(e.code) || '接続を完了できませんでした。'); try { popup?.close(); } catch (_) {} }
+      finally { connectionBusy = false; flow = null; updateConnections(); }
     });
-    el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); flow = null; });
+    const offState = controller.subscribe(render), offBudget = budget.subscribe(render);
+    connectionDialogs.add(render);
+    window.addEventListener('storage', render);
+    el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); else flow = null; connectionDialogs.delete(render); offState(); offBudget(); window.removeEventListener('storage', render); });
+    render();
   }
   function documents({ request, canRequest, hasDraft }) {
     const templates = [
