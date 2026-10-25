@@ -13318,7 +13318,7 @@
       return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2, '0')).join('');
     }
     const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
-    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
+    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
     const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back']);
     const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
     const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
@@ -13336,7 +13336,7 @@
     }
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], error: null, progress: '', rollback: null };
+      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], error: null, progress: '', rollback: null };
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [];
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -13422,29 +13422,34 @@
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
         if (!state.goal) state.goal = value;
+        const unresolved = state.proposalPending;
         invalidate(); message('user', value);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-        Object.assign(state, { plan: null, adopted: null, artifacts: [] });
+        Object.assign(state, { plan: null, adopted: null, artifacts: [], proposalPending: true });
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
-          const response = await services.propose({ text: value, previous: clone(state.proposal), pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          const response = await services.propose({ text: value, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
           if (!live()) return;
           if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
           message('assistant', response.reply, response.facts);
           for (const answer of response.turn?.answers || []) {
-            const question = (state.proposal?.decisions || []).find(q => q.id === answer.id);
+            const question = (state.proposal?.decisions || []).find(q => q.id === answer.id) || state.answers.find(a => a.id === answer.id);
             if (question && answer.text) state.answers = state.answers.filter(a => a.id !== answer.id).concat({ id: answer.id, key: question.key, label: question.label, question: question.question || question.text || question.label, answer: answer.text, kind: answer.kind });
           }
+          const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
+          state.answers = state.answers.filter(a => !rejected.has(a.id));
           if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.version++; }
+          // Retired question identifiers are never reused within the same conversation.
+          state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
           base = fresh; pendingPlanQuestions = [];
           // Model intent never authorizes plan generation or a kintone write.
-          set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [] });
+          set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [], proposalPending: response.proposal && !response.proposalUnchanged ? false : unresolved });
         }, state.proposal ? 'proposal' : 'idle');
       }
       async function adopt() {
-        if (!state.proposal || questions(state.proposal, state.answers).length || !available()) return false;
+        if (!state.proposal || state.proposalPending || questions(state.proposal, state.answers).length || !available()) return false;
         invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -13514,7 +13519,7 @@
         send, adopt, resume, apply, requestRollback, rollback,
         async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -13580,11 +13585,11 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
+    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], base }) {
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], question: text, app: appOf(base),
         focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
-          itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
+          itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
     // Proposal answers retain Q identifiers. The planner/generator contract uses D
     // identifiers; derive that identifier only, never infer a topic from the answer.
@@ -13951,7 +13956,8 @@
         ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
         ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
-        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+        ${!options.readOnly && state.proposalPending ? '<p class="ktr-note">送信した内容を案に反映できていません。相談内容をもう一度送信し、更新された案を確認してください。</p>' : ''}
+        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
     }
     function codeHtml(state) {
       const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -14055,6 +14061,13 @@
       const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
       return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
     }
+    function diagnosticHtml(error) {
+      if (error?.code !== 'MODEL_OUTPUT_INVALID') return '';
+      const detail = error.detail?.error?.detail || error.detail;
+      const rows = [...(Array.isArray(detail?.errors) ? detail.errors : []), ...(Array.isArray(detail?.warnings) ? detail.warnings : [])]
+        .map(row => ['code', 'path', 'message'].map(key => typeof row?.[key] === 'string' ? row[key] : '').filter(Boolean).join('：')).filter(Boolean);
+      return rows.length ? '<details data-release-panel="response-diagnostics"><summary>問題の詳細（技術者向け）</summary>' + list(rows) + '</details>' : '';
+    }
     function render(state, options = {}) {
       const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
       const notice = options.notice || '';
@@ -14070,7 +14083,7 @@
       else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
       else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
       const stage = stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
-      const support = historical ? '' : `${codeHtml(state)}${verificationHtml(state)}`;
+      const support = historical ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
       return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの変更')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '資料を作成')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}

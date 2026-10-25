@@ -51,11 +51,11 @@ const KTReleaseContext = (() => {
       reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
-  function proposal({ text, previous, pendingPlanQuestions = [], answers = [], requests = [], base }) {
+  function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], base }) {
     return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], question: text, app: appOf(base),
       focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
-        itemIdFloor: { Q: Math.max(0, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
+        itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
   }
   // Proposal answers retain Q identifiers. The planner/generator contract uses D
   // identifiers; derive that identifier only, never infer a topic from the answer.

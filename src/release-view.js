@@ -47,7 +47,8 @@ const KTReleaseView = (() => {
       ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
       ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
       ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
-      ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+      ${!options.readOnly && state.proposalPending ? '<p class="ktr-note">送信した内容を案に反映できていません。相談内容をもう一度送信し、更新された案を確認してください。</p>' : ''}
+      ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
   }
   function codeHtml(state) {
     const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -151,6 +152,13 @@ const KTReleaseView = (() => {
     const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
     return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
   }
+  function diagnosticHtml(error) {
+    if (error?.code !== 'MODEL_OUTPUT_INVALID') return '';
+    const detail = error.detail?.error?.detail || error.detail;
+    const rows = [...(Array.isArray(detail?.errors) ? detail.errors : []), ...(Array.isArray(detail?.warnings) ? detail.warnings : [])]
+      .map(row => ['code', 'path', 'message'].map(key => typeof row?.[key] === 'string' ? row[key] : '').filter(Boolean).join('：')).filter(Boolean);
+    return rows.length ? '<details data-release-panel="response-diagnostics"><summary>問題の詳細（技術者向け）</summary>' + list(rows) + '</details>' : '';
+  }
   function render(state, options = {}) {
     const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
     const notice = options.notice || '';
@@ -166,7 +174,7 @@ const KTReleaseView = (() => {
     else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
     else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
     const stage = stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
-    const support = historical ? '' : `${codeHtml(state)}${verificationHtml(state)}`;
+    const support = historical ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
     const runHistory = state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
     return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの変更')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('free-context', '資料を作成')}${button('details', 'アプリの情報を見る')}</nav></div></header>
       ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}

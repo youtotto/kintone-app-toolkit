@@ -414,6 +414,11 @@ for (const next of ['newTask', 'adopt']) test(`中断した計画の質問を${n
   await built(f);
   const sending = f.controller.send('備考を表示してください。'); await entered.promise;
   f.controller.cancel(); gate.resolve(); await sending;
+  if (next === 'adopt') {
+    assert.equal(await f.controller.adopt(), false, '中断した相談が未解決の間は採用できない');
+    await f.controller.send('備考を表示してください。');
+    assert.deepEqual(attempts.at(-1).pendingPlanQuestions, p.questions);
+  }
   await f.controller[next]();
   await f.controller.send('次の案を相談します。');
   assert.deepEqual(attempts.at(-1).pendingPlanQuestions, []);
