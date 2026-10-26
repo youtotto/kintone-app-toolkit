@@ -13338,6 +13338,12 @@
       !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
       (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
       (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
+    // Selection is a local draft, never an adoption or a new interpretation of text.
+    function suggestionRequest(state) {
+      const ids = new Set(state.selectedSuggestionIds || []);
+      const items = (state.proposal?.behaviors || []).filter(b => b.origin === 'suggestion' && ids.has(b.id));
+      return items.length ? '選んだ追加提案を現在の案に取り込み、案を更新してください。\n\n' + items.map(b => '- ' + b.text).join('\n') : '';
+    }
     // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
     function mainPlan(value) {
       const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -13353,7 +13359,7 @@
     const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -13436,7 +13442,21 @@
         if (prepared.ok) base = fresh;
         set({ prepared, progress: '', phase: !prepared.ok ? 'blocked' : prepared.changes?.length ? 'review' : 'unchanged' });
       }
-      async function send(text, { documentOnly = false } = {}) {
+      const matchesProposal = reference => reference?.taskId === state.taskId && reference?.version === state.version;
+      function selectSuggestion(id, checked, reference) {
+        if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available() || typeof checked !== 'boolean') return false;
+        const items = (state.proposal?.behaviors || []).filter(b => b.id === id && b.origin === 'suggestion' && typeof b.text === 'string' && b.text.trim());
+        if (items.length !== 1) return false;
+        const selected = new Set(state.selectedSuggestionIds);
+        if (checked) selected.add(id); else selected.delete(id);
+        set({ selectedSuggestionIds: [...selected] }); return true;
+      }
+      async function updateSuggestions(reference) {
+        if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
+        const request = suggestionRequest(state);
+        return request ? send(request, { requireProposalUpdate: true }) : false;
+      }
+      async function send(text, { documentOnly = false, requireProposalUpdate = false } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
         const unresolved = state.proposalPending;
@@ -13499,7 +13519,7 @@
         invalidate(); message('user', value);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-        Object.assign(state, { plan: null, adopted: null, artifacts: [], proposalPending: true });
+        Object.assign(state, { plan: null, adopted: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
@@ -13517,7 +13537,7 @@
             const activePlan = previousWork.plan && previousWork.phase !== 'result';
             const changedBase = activePlan && stampOf(fresh) !== stampOf(previousBase);
             base = activePlan ? previousBase : fresh;
-            set({ ...previousWork, proposalPending: unresolved, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
+            set({ ...previousWork, proposalPending: unresolved || requireProposalUpdate, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
               error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
             return;
           }
@@ -13534,11 +13554,11 @@
           state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
           base = fresh; pendingPlanQuestions = [];
           // Model intent never authorizes plan generation or a kintone write.
-          set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [], proposalPending: response.proposal && !response.proposalUnchanged ? false : unresolved });
+          set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [], proposalPending: response.proposal && !response.proposalUnchanged ? false : unresolved || requireProposalUpdate });
         }, state.proposal ? 'proposal' : 'idle');
       }
       async function adopt() {
-        if (!state.proposal || state.proposalPending || questions(state.proposal, state.answers).length || !available()) return false;
+        if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
         invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -13625,12 +13645,12 @@
       }
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-        send, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
+        send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
         showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { set({ explanationId: null }); return true; },
         async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -13642,7 +13662,7 @@
         },
       };
     }
-    return { create, hash, stampOf, generatedBody, questions, canReprepare };
+    return { create, hash, stampOf, generatedBody, questions, canReprepare, suggestionRequest };
   })();
 
   /* Current application facts, existing Deps results and explicitly accepted input.
@@ -14178,7 +14198,7 @@
     }[phase] || 'empty');
     const stageLabel = { proposal: ['01', '提案を相談する'], working: ['↻', '処理中'], review: ['02', '反映前の確認'], result: ['▤', '結果'], attention: ['!', '確認が必要です'], empty: ['○', 'ここに変更案を表示します'], explanation: ['≡', '説明を読む'] };
     const activity = '<span class="ktr-activity" aria-hidden="true"><i></i><i></i><i></i></span>';
-    const draftActions = new Set(['adopt', 'resume', 'apply', 'rollback', 'reprepare']);
+    const draftActions = new Set(['adopt', 'resume', 'apply', 'rollback', 'reprepare', 'update-suggestions']);
     const draftPending = options => !!String(options.draft || '').trim() || !!options.sending;
     const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>入力した内容を送信するか、消してから操作してください。</p>`;
     const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
@@ -14252,14 +14272,16 @@
       const pending = (p.decisions || []).filter(q => q.blocking && !q.answer && !answered.has(q.id));
       const behaviors = (p.behaviors || []).filter(b => b.origin !== 'suggestion'), suggestions = (p.behaviors || []).filter(b => b.origin === 'suggestion');
       const latest = (state.messages || []).filter(m => m.role !== 'user').at(-1);
-      const conn = connectionOf(options);
+      const conn = connectionOf(options), selected = new Set(state.selectedSuggestionIds || []);
+      const suggestionEditable = !options.readOnly && !options.sending && state.phase === 'proposal' && !state.proposalPending;
+      const suggestionRef = ` data-release-task="${esc(state.taskId)}" data-release-version="${esc(state.version)}"`;
       return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? list(behaviors) : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
-        ${suggestions.length ? `<section data-release-panel="suggestions"><h3>あわせて検討できること</h3>${list(suggestions)}<p class="ktr-note">この案の作成には含めません。追加したいものを相談欄で伝えてください。</p></section>` : ''}
+        ${suggestions.length ? `<section data-release-panel="suggestions"><h3>あわせて検討できること</h3><p class="ktr-note">必要なものだけ選べます。チェックするだけでは、案の更新やAIの呼び出しは行いません。</p><div class="ktr-suggestion-choices">${suggestions.map(item => `<label class="ktr-suggestion-choice"><input type="checkbox" data-release-suggestion="${esc(item.id)}"${suggestionRef}${selected.has(item.id) ? ' checked' : ''}${!suggestionEditable ? ' disabled' : ''}><span>${esc(textOf(item))}</span></label>`).join('')}</div>${!options.readOnly ? `<div class="ktr-actions">${button('update-suggestions', '選んだ内容で案を更新', { primary: selected.size > 0, disabled: !suggestionEditable || !selected.size || conn.connected === false || conn.available === false, blockedByDraft: draftPending(options), extra: suggestionRef })}</div>${selected.size ? '<p class="ktr-note">選んだ追加提案は、案を更新してから内容を確認してください。</p>' : ''}` : ''}</section>` : ''}
         ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
         ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
         ${!options.readOnly && state.proposalPending ? '<p class="ktr-note">送信した内容を案に反映できていません。相談内容をもう一度送信し、更新された案を確認してください。</p>' : ''}
-        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
     }
     function codeHtml(state) {
       const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -14410,6 +14432,8 @@
         const input = host.querySelector?.('#kt-release-input'), focused = !!input && host.ownerDocument?.activeElement === input;
         if (input) draft = input.value;
         const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
+        const activeSuggestion = host.ownerDocument?.activeElement?.dataset;
+        const suggestionFocus = activeSuggestion?.releaseSuggestion ? { id: activeSuggestion.releaseSuggestion, task: activeSuggestion.releaseTask, version: activeSuggestion.releaseVersion } : null;
         const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0;
         const logTop = log?.scrollTop || 0, followMessages = !log || log.scrollHeight - log.clientHeight - logTop < 24;
         const currentTop = previousPhase === state.phase && previousRunId === selectedRunId && previousExplanationId === state.explanationId ? current?.scrollTop || 0 : 0;
@@ -14418,6 +14442,10 @@
         const nextInput = host.querySelector?.('#kt-release-input');
         if (nextInput) nextInput.value = draft;
         if (focused && nextInput && !nextInput.disabled) { nextInput.focus({ preventScroll: true }); if (selection && typeof nextInput.setSelectionRange === 'function') nextInput.setSelectionRange(...selection); }
+        if (suggestionFocus) {
+          const checkbox = Array.from(host.querySelectorAll?.('[data-release-suggestion]') || []).find(el => el.dataset.releaseSuggestion === suggestionFocus.id && el.dataset.releaseTask === suggestionFocus.task && el.dataset.releaseVersion === suggestionFocus.version);
+          if (checkbox && !checkbox.disabled) checkbox.focus?.({ preventScroll: true });
+        }
         const nextLog = host.querySelector?.('.ktr-chat-log'), nextCurrent = host.querySelector?.('.ktr-current');
         if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
         if (nextCurrent) nextCurrent.scrollTop = currentTop;
@@ -14428,16 +14456,18 @@
         const pending = draftPending({ draft, sending });
         host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { el.disabled = el.dataset.releaseBaseDisabled === 'true' || pending; });
         host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
+        const state = controller.getState();
+        host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
       }
       function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
       function canSend() {
         const state = controller.getState(), conn = connectionOf(options);
         return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false;
       }
-      async function send(request, onStart) {
+      async function send(request, onStart, suggestionReference = null) {
         if (!canSend()) return false;
-        const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string';
-        const value = String(fromTemplate ? request : input?.value ?? draft).trim();
+        const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
+        const value = String(suggestionReference ? workspace.suggestionRequest(controller.getState()) : fromTemplate ? request : input?.value ?? draft).trim();
         if (!value) return false;
         sending = true; updateDraftGuard();
         let cleared = false, sentTaskId = null;
@@ -14451,10 +14481,12 @@
           if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
           const conn = connectionOf(options);
           if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false) return false;
+          if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
+          if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
           if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
           selectedRunId = null; notice = '';
           onStart?.();
-          const sent = await controller.send(value, fromTemplate ? { documentOnly: true } : undefined);
+          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { documentOnly: true } : undefined);
           if (sent === false) restoreInput();
           return sent !== false;
         } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
@@ -14463,6 +14495,7 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
+        if (action === 'update-suggestions') return send(undefined, undefined, { taskId: Number(target.dataset?.releaseTask), version: Number(target.dataset?.releaseVersion) });
         if (action === 'current') { selectedRunId = null; notice = ''; draw(); return; }
         if (action === 'history') { selectedRunId = id; draw(); return; }
         if (action === 'show-explanation' || action === 'show-changes') {
@@ -14509,15 +14542,21 @@
         event.preventDefault?.();
         try { await act(target.dataset.releaseAction, target.dataset.releaseId, target); } catch (error) { notice = error?.message || '操作を完了できませんでした。'; draw(); }
       }
+      function suggestionChanged(event) {
+        const target = event.target;
+        if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || selectedRunId) return;
+        controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
+      }
       function keydown(event) { if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); send().catch(error => { notice = error.message; draw(); }); } }
       function toggled(event) { const key = event.target?.dataset?.releasePanel; if (key) { if (event.target.open) expanded.add(key); else expanded.delete(key); } }
       host.addEventListener('click', clicked);
       host.addEventListener('input', inputChanged);
+      host.addEventListener('change', suggestionChanged);
       host.addEventListener('keydown', keydown);
       host.addEventListener('toggle', toggled, true);
       const unsubscribe = controller.subscribe(draw);
       draw();
-      return { render: draw, onVisible() { draw(); }, dispose() { disposed = true; unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+      return { render: draw, onVisible() { draw(); }, dispose() { disposed = true; unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
     }
     const styles = `
       .ktr-workspace,.kt-release-dialog{--ktr-text:#202b3d;--ktr-muted:#536176;--ktr-line:#d9e1eb;--ktr-paper:#fff;--ktr-soft:#f5f7fa;--ktr-accent:#215bb8;color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
@@ -14529,6 +14568,7 @@
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:#eef4fd;border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid #aebccf;border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
       .ktr-template-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px;border:0;padding:0;margin:20px 0}.ktr-template-grid legend{font-weight:650;margin-bottom:10px}.kt-release-dialog .ktr-template-choice{display:flex;align-items:flex-start;gap:10px;padding:14px;margin:0;border:1px solid var(--ktr-line);border-radius:8px;cursor:pointer;background:var(--ktr-paper)}.ktr-template-choice:has(input:checked){border-color:var(--ktr-accent);background:var(--ktr-soft)}.ktr-template-choice input{flex:none;margin:4px 0;width:auto}.ktr-template-choice strong{display:block;margin-bottom:5px}.ktr-template-choice small{display:block;line-height:1.6;color:var(--ktr-muted)}.kt-release-dialog [data-document-create]{margin:12px 0;padding:10px 20px;color:#fff;background:var(--ktr-accent);border:1px solid var(--ktr-accent);border-radius:6px}.kt-release-dialog [data-document-create]:disabled{opacity:.5;cursor:not-allowed}.kt-release-dialog [data-offline-materials]{border-top:1px solid var(--ktr-line);padding-top:16px;margin-top:16px}.kt-release-dialog [data-document-status]{font-size:13px;color:var(--ktr-muted)}
+      .ktr-suggestion-choices{display:grid;gap:8px;margin:12px 0}.ktr-suggestion-choice{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border:1px solid var(--ktr-line);border-radius:8px;cursor:pointer;background:var(--ktr-paper)}.ktr-suggestion-choice:has(input:checked){border-color:var(--ktr-accent);background:var(--ktr-soft)}.ktr-suggestion-choice:has(input:disabled){cursor:default}.ktr-suggestion-choice input{flex:none;width:18px;height:18px;margin:3px 0;accent-color:var(--ktr-accent)}.ktr-suggestion-choice span{min-width:0;overflow-wrap:anywhere}.ktr-suggestion-choice input:focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-document-navigation{margin:0 0 18px}.ktr-document-tabs{display:flex;gap:8px;flex-wrap:wrap}.ktr-workspace .ktr-document-tabs button[aria-pressed="true"]{border-color:var(--ktr-accent);background:#edf3ff;color:var(--ktr-accent);font-weight:650}.ktr-document-navigation>details>ul{list-style:none;padding:0}.ktr-explanation-section{margin:24px 0;padding-bottom:8px}.ktr-explanation-section>h3{font-size:18px}.ktr-explanation-unknowns{border-left:3px solid #c49c48;padding:4px 16px;background:#fffaf0}.ktr-table-scroll{max-width:100%;overflow:auto;margin:16px 0}.ktr-table-scroll:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}.ktr-explanation table,#kt-toolkit .ktr-explanation table{width:100%;min-width:360px;border-collapse:collapse;font-size:13px}.ktr-explanation th,.ktr-explanation td,#kt-toolkit .ktr-explanation th,#kt-toolkit .ktr-explanation td{text-align:left;vertical-align:top;border:1px solid var(--ktr-line);padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--ktr-paper);color:var(--ktr-text);position:static;top:auto}.ktr-explanation th,#kt-toolkit .ktr-explanation th{background:var(--ktr-soft);font-weight:650}[data-release-stage="explanation"] .ktr-stage-header{background:#edf5f0;color:#315e45}
       .ktr-stage-header{display:flex;align-items:center;gap:10px;margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#f1f4f8;color:#45536a;font-weight:650;font-size:13px}.ktr-stage-icon{display:grid;place-items:center;width:28px;height:28px;flex:none;border-radius:50%;background:#fff;font-size:15px}
       [data-release-stage="proposal"] .ktr-stage-header{background:#edf3ff;color:#244e94}[data-release-stage="review"] .ktr-stage-header{background:#fff3d9;color:#715009}[data-release-stage="result"] .ktr-stage-header{background:#eaf2f3;color:#235c63}[data-release-stage="attention"] .ktr-stage-header{background:#fff0e8;color:#8a3c22}
