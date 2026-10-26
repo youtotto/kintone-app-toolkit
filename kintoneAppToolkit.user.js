@@ -21616,27 +21616,42 @@
               <span>自動解析</span>
             </label>
             <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; white-space:nowrap;"
-                   title="ファイル起点＝このJSがいつ動き何を触るか／フィールド起点＝どのフィールドがJSで使われているか">
+                   title="ファイル・フィールド・イベントから、JavaScriptの使用箇所を確認できます">
               <span>表示</span>
               <select id="fs-view" style="padding:4px 8px;">
                 <option value="file" selected>ファイル起点</option>
                 <option value="field">フィールド起点</option>
+                <option value="event">イベント起点</option>
               </select>
             </label>
             <button id="fs-scan" class="btn" title="キャッシュを無視して再取得します">Scan</button>
             <div style="display:flex; gap:8px;">
-              <button id="fs-copy-md"  class="btn">Copy MD</button>
-              <button id="fs-dl-md"    class="btn">DL MD</button>
-              <button id="fs-dl-csv"   class="btn">DL CSV</button>
-              <button id="fs-dl-json"  class="btn">DL JSON</button>
+              <button id="fs-copy-md"  class="btn" title="フィールドの使用状況をコピー">Copy MD</button>
+              <button id="fs-dl-md"    class="btn" title="フィールドの使用状況を保存">DL MD</button>
+              <button id="fs-dl-csv"   class="btn" title="フィールドの使用状況を保存">DL CSV</button>
+              <button id="fs-dl-json"  class="btn" title="イベントを含むすべての解析結果を保存">DL JSON</button>
             </div>
           </div>
 
           <div id="fs-meta" class="kt-flex-fixed" style="opacity:.8; font-size:12px;">未実行</div>
 
-          <!-- 結果領域：残り高さをすべて使い、内部だけスクロール（ファイル起点／フィールド起点とも同じ高さ） -->
+          <!-- 結果領域：どの表示でも残り高さを使い、内部だけスクロール -->
           <div id="fs-file-view" class="kt-scroll-area">
             <div style="padding:14px; opacity:.8;">解析結果を待っています。</div>
+          </div>
+
+          <div id="fs-event-view" class="kt-scroll-area" style="display:none;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+              <label style="display:flex;gap:6px;align-items:center;flex:1;min-width:200px;white-space:nowrap;">検索
+                <input id="fs-event-search" type="search" aria-label="イベント名で検索" placeholder="例: app.record.edit.show"
+                       style="min-width:0;width:100%;padding:8px;border:1px solid var(--fs-bd);border-radius:8px;background:var(--fs-bg);color:inherit;">
+              </label>
+              <select id="fs-event-select" aria-label="イベントを選択" style="flex:1;min-width:200px;max-width:100%;padding:8px;">
+                <option value="">すべてのイベント</option>
+              </select>
+            </div>
+            <div id="fs-event-notes" style="font-size:12px;line-height:1.7;margin-bottom:12px;"></div>
+            <div id="fs-event-results"><div style="padding:14px;opacity:.8;">解析結果を待っています。</div></div>
           </div>
 
           <div id="fs-table-wrap" class="kt-scroll-area" style="display:none;">
@@ -21741,6 +21756,11 @@
       const $meta = el.querySelector('#fs-meta');
       const $tbody = el.querySelector('#fs-tbody');
       const $fileView = el.querySelector('#fs-file-view');
+      const $eventView = el.querySelector('#fs-event-view');
+      const $eventSearch = el.querySelector('#fs-event-search');
+      const $eventSelect = el.querySelector('#fs-event-select');
+      const $eventResults = el.querySelector('#fs-event-results');
+      const $eventNotes = el.querySelector('#fs-event-notes');
       const $tableWrap = el.querySelector('#fs-table-wrap');
       const $view = el.querySelector('#fs-view');
 
@@ -22000,6 +22020,7 @@
         const blocks = [];
         for (const entry of byFile.values()) {
           const f = entry.file;
+          const fileIndex = files.indexOf(f);
           const key = keyOf(f.target, f.kind, f.name);
           const events = fileEvents[key] || [];
           const fieldList = [...entry.fields.values()]
@@ -22045,7 +22066,7 @@
             : '<span style="opacity:.7">検出なし</span>';
 
           blocks.push(`
-            <div style="border:1px solid ${BD}; border-radius:10px; padding:10px; margin-bottom:8px">
+            <article data-fs-file-index="${fileIndex}" tabindex="-1" style="border:1px solid ${BD}; border-radius:10px; padding:10px; margin-bottom:8px">
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
                 <span style="font-weight:600">${escapeHtml(f.name)}</span>
                 ${pill(f.target)}${pill(String(f.kind).toUpperCase())}
@@ -22067,12 +22088,65 @@
                 row('参照フィールド', fieldsHtml),
                 f.kind === 'js' ? row('参照アプリ', appsHtml) : '',
               ].filter(Boolean).join('')}
-            </div>`);
+            </article>`);
         }
 
         $fileView.innerHTML = blocks.join('') || `<div style="padding:14px;opacity:.8">結果なし</div>`;
       }
 
+
+      // イベント起点：取得済みの登録情報を逆引きする。本文の再解析・追加取得はしない。
+      function renderEventView(payload) {
+        if (!payload || !$eventResults) return;
+        const files = payload.files || [];
+        const jsFiles = files.filter(f => f.kind === 'js');
+        const keyOf = f => `${f.target}:js:${f.name}`;
+        const counts = new Map();
+        for (const f of jsFiles) counts.set(keyOf(f), (counts.get(keyOf(f)) || 0) + 1);
+        const groups = new Map();
+        files.forEach((f, index) => {
+          if (f.kind !== 'js') return;
+          const key = keyOf(f);
+          const rows = payload.fileEvents?.[key] || [];
+          for (const row of rows) {
+            const name = typeof row === 'string' ? row : row?.name;
+            if (typeof name !== 'string' || !name) continue;
+            if (!groups.has(name)) groups.set(name, new Map());
+            const uses = groups.get(name);
+            uses.set(key, { file: f, index, count: counts.get(key), direct: !!uses.get(key)?.direct || typeof row === 'string' || !!row.direct });
+          }
+        });
+        const query = $eventSearch.value.trim().toLowerCase();
+        const names = [...groups.keys()].sort().filter(name => name.toLowerCase().includes(query));
+        const selected = $eventSelect.value;
+        $eventSelect.innerHTML = '<option value="">すべてのイベント</option>' + names.map(name =>
+          `<option value="${escapeHtml(name)}">${escapeHtml(name)}（${groups.get(name).size} 件）</option>`).join('');
+        $eventSelect.value = names.includes(selected) ? selected : '';
+        const visible = names.filter(name => !$eventSelect.value || name === $eventSelect.value);
+        const targetLabel = f => f.target === 'desktop' ? 'PC' : f.target === 'mobile' ? 'モバイル' : f.target;
+        const source = payload.meta?.source;
+        const sourceLabel = source === 'preview' ? '動作テスト環境' : ['prod', 'production'].includes(source) ? '運用環境' : '環境は記録されていません';
+        const unscanned = jsFiles.filter(f => !f.text && f.note);
+        const ambiguous = [...new Map(jsFiles.filter(f => counts.get(keyOf(f)) > 1).map(f => [keyOf(f), f])).values()];
+        $eventNotes.innerHTML = `<div>取得元: ${escapeHtml(sourceLabel)}。取得済みの解析結果を表示しています。検出されなくても、使われていないとは限りません。</div>`
+          + '<div>「登録の候補」は、ファイル内にイベント名がありますが、登録に使われているかは未確認です。</div>'
+          + (unscanned.length ? `<div>本文を解析していないファイル: ${unscanned.map(f => escapeHtml(`${targetLabel(f)} / ${f.name}（${f.note}）`)).join('、')}</div>` : '')
+          + (ambiguous.length ? `<div>同名ファイルが複数あるため、各ファイルのイベントを特定できません: ${ambiguous.map(f => escapeHtml(`${targetLabel(f)} / ${f.name}（${counts.get(keyOf(f))} 本）`)).join('、')}</div>` : '');
+        const empty = !jsFiles.length ? '解析対象にJavaScriptがありません。対象の種類をJSにしてScanしてください。'
+          : !payload.fileEvents ? 'この解析結果にはイベント情報がありません。Scanで取り直してください。'
+          : !groups.size ? 'イベント名を検出できませんでした。'
+          : '検索条件に一致するイベントはありません。';
+        $eventResults.innerHTML = visible.length ? visible.map(name => `
+          <article data-fs-event="${escapeHtml(name)}" style="border:1px solid ${BD};border-radius:10px;padding:12px;margin-bottom:10px;">
+            <h3 style="font-size:14px;margin:0 0 8px;overflow-wrap:anywhere;"><code>${escapeHtml(name)}</code></h3>
+            <ul style="list-style:none;padding:0;margin:0;">${[...groups.get(name).values()].map(use => `
+              <li style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid ${BD};">
+                <span style="flex:1;min-width:180px;overflow-wrap:anywhere;"><b>${escapeHtml(use.file.name)}</b>（${escapeHtml(targetLabel(use.file))}${use.count > 1 ? `・同名 ${use.count} 本` : ''}）</span>
+                <span style="font-size:12px;">${use.count > 1 ? '同名ファイルが複数あるため、登録先は未確認' : use.direct ? '登録の記述あり' : '登録の候補'}</span>
+                ${use.count === 1 ? `<button type="button" class="btn" data-fs-file-index="${use.index}" aria-label="${escapeHtml(use.file.name)}（${escapeHtml(targetLabel(use.file))}）の詳細">ファイルの詳細</button>` : ''}
+              </li>`).join('')}</ul>
+          </article>`).join('') : `<div style="padding:14px;opacity:.8;">${empty}</div>`;
+      }
 
       // ---- Scan 実行（初期実行なし）----
 
@@ -22111,6 +22185,7 @@
         // サイレント実行でも表示を更新しておく（タブを開いたときに結果が見える状態にする）
         renderTable(results);
         renderFileView(payload);
+        renderEventView(payload);
         applyViewMode();
         return merged;
       }
@@ -22193,18 +22268,19 @@
       KTScan.register(scanOnce);
 
       // ---- イベント ----
-      // 表示ビューの切替（ファイル起点／フィールド起点）
+      // 表示ビューの切替（ファイル起点／フィールド起点／イベント起点）
       //   選択はLocalStorageに保存し、次回も同じビューで開けるようにする
       const FS_VIEW_KEY = 'ktScanView.v1';
       function applyViewMode() {
         const mode = $view ? $view.value : 'file';
         if ($fileView) $fileView.style.display = (mode === 'file') ? '' : 'none';
-        if ($tableWrap) $tableWrap.style.display = (mode === 'file') ? 'none' : '';
+        if ($tableWrap) $tableWrap.style.display = (mode === 'field') ? '' : 'none';
+        if ($eventView) $eventView.style.display = (mode === 'event') ? '' : 'none';
       }
       if ($view) {
         try {
           const saved = localStorage.getItem(FS_VIEW_KEY);
-          if (saved === 'file' || saved === 'field') $view.value = saved;
+          if (saved === 'file' || saved === 'field' || saved === 'event') $view.value = saved;
         } catch (e) { }
         $view.addEventListener('change', () => {
           try { localStorage.setItem(FS_VIEW_KEY, $view.value); } catch (e) { }
@@ -22212,6 +22288,22 @@
         }, { passive: true });
         applyViewMode();
       }
+
+      $eventSearch?.addEventListener('input', () => renderEventView(FS_last));
+      $eventSelect?.addEventListener('change', () => renderEventView(FS_last));
+      $eventResults?.addEventListener('click', event => {
+        const button = event.target.closest('button[data-fs-file-index]');
+        if (!button) return;
+        const index = Number(button.dataset.fsFileIndex);
+        if (!Number.isInteger(index) || index < 0) return;
+        const file = $fileView.querySelector(`[data-fs-file-index="${index}"]`);
+        if (!file) return;
+        $view.value = 'file';
+        try { localStorage.setItem(FS_VIEW_KEY, 'file'); } catch (e) { }
+        applyViewMode();
+        file.focus();
+        file.scrollIntoView({ block: 'nearest' });
+      });
 
       // 自動解析トグル（既定ON）
       const $auto = el.querySelector('#fs-auto');
