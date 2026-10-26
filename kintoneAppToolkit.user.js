@@ -14496,7 +14496,7 @@
         const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
         const activeSuggestion = host.ownerDocument?.activeElement?.dataset;
         const suggestionFocus = activeSuggestion?.releaseSuggestion ? { id: activeSuggestion.releaseSuggestion, task: activeSuggestion.releaseTask, version: activeSuggestion.releaseVersion } : null;
-        const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0;
+        const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0, contentTop = host.querySelector?.('.ktr-content')?.scrollTop || 0;
         const logTop = log?.scrollTop || 0, followMessages = !log || log.scrollHeight - log.clientHeight - logTop < 24;
         const currentTop = previousPhase === state.phase && previousRunId === selectedRunId && previousExplanationId === state.explanationId ? current?.scrollTop || 0 : 0;
         const previousNotice = host.querySelector?.('[data-release-panel="header-notice"]');
@@ -14519,6 +14519,7 @@
         if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
         if (nextCurrent) nextCurrent.scrollTop = currentTop;
         const nextLayout = host.querySelector?.('.ktr-layout'); if (nextLayout) nextLayout.scrollTop = layoutTop;
+        const nextContent = host.querySelector?.('.ktr-content'); if (nextContent) nextContent.scrollTop = contentTop;
         for (const listener of displayListeners) listener();
         previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
       }
@@ -14665,6 +14666,7 @@
       .ktr-code-shell{width:100%;height:100%;min-width:0;min-height:0;container:ktr-code-shell / inline-size}.ktr-code-columns{width:100%;height:100%;min-width:0;min-height:0}.ktr-code-conversation-host{width:100%;min-width:0;min-height:0}.ktr-code-slot{min-width:0;min-height:0;overflow:auto;border-left:1px solid var(--kt-line,#dbe2ec);padding:16px}.ktr-code-slot[hidden]{display:none}.ktr-code-shell.is-code-open>.ktr-code-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);overflow:hidden}.ktr-code-open .ktr-layout{display:flex;flex-direction:column;overflow:hidden}.ktr-code-open .ktr-current{display:none}.ktr-code-open .ktr-conversation{flex:1;overflow:hidden}.ktr-code-open .ktr-chat-log{min-height:0;max-height:none}.ktr-code-progress{display:flex;flex:none;gap:10px;align-items:center;flex-wrap:wrap;max-height:30%;overflow:auto;padding:10px;margin-bottom:8px;background:var(--ktr-soft);border-radius:6px}.ktr-code-progress>span:not(.ktr-activity){flex:1;min-width:120px;font-size:13px}.ktr-code-open .ktr-header{align-items:flex-start;flex-direction:column;gap:8px}.ktr-code-open .ktr-header-tools{justify-content:flex-start;gap:8px}
       .ktr-code-attention{flex:none;margin-bottom:12px;padding:12px;border-left:3px solid var(--ktr-warning);border-radius:4px;background:color-mix(in srgb,var(--ktr-warning) 9%,var(--ktr-paper))}.ktr-code-attention>p{margin:0 0 8px}
       @container ktr-code-shell (max-width:959px){.ktr-code-shell.is-code-open>.ktr-code-columns{display:flex;flex-direction:column;overflow:auto}.ktr-code-shell.is-code-open .ktr-code-conversation-host{flex:none;height:auto!important;overflow:visible!important}.ktr-workspace.ktr-code-open{height:auto;overflow:visible}.ktr-code-open .ktr-content{height:auto}.ktr-code-open .ktr-layout{display:block;flex:none;overflow:visible}.ktr-code-open .ktr-conversation{overflow:visible}.ktr-code-open .ktr-chat-log{flex:none;min-height:180px;max-height:42dvh;overflow:auto}.ktr-code-slot{flex:none;border-left:0;border-top:1px solid var(--kt-line,#dbe2ec)}}
+      @media(max-height:700px){@container ktr-workspace (max-width:959px){.ktr-content{overflow:auto}.ktr-layout{flex:none;overflow:visible}}}
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
     return { create, render, escape: esc, explanationMarkdown };
@@ -14862,25 +14864,28 @@
     function renderDependencyInfo(info) {
       if (!info || info.status !== 'ready') return '<p class="kt-muted">' + escape(info?.reason || '依存関係は未取得です。') + '</p>';
       const platform = target => target === 'mobile' ? 'モバイル' : 'PC';
+      const fieldName = ref => '<strong>' + escape(ref.label || ref.code) + '</strong>'
+        + (ref.code && ref.code !== (ref.label || ref.code) ? ' <code>' + escape(ref.code) + '</code>' : '');
       const accessLabels = { READ: '読み取り', WRITE: '書き換え', CONTROL: '入力の制御', ELEMENT: '画面の操作', SHOW_HIDE: '表示の切替',
         FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
-      const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
-        + (ref.current ? '（開いているファイル）' : '') + '<br>'
+      const references = info.jsReferences.map(ref => '<li class="kt-dependency-reference"><div class="kt-dependency-reference-title"><strong>' + escape(ref.name) + '</strong>'
+        + '<span class="kt-dependency-platform">' + platform(ref.target) + '</span>'
+        + (ref.current ? '<span class="kt-dependency-current">開いているファイル</span>' : '') + '</div><p class="kt-dependency-reference-meta">'
         + escape(info.kind === 'event' ? (ref.direct ? '登録の記述あり' : '登録の候補（既存の解析による推定）')
           : ref.access.map(access => accessLabels[access] || '参照').join('・'))
         + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
-        + '</li>').join('');
-      const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
-        + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
+        + '</p></li>').join('');
+      const formulas = info.formulaReferences.map(ref => '<li class="kt-dependency-reference"><div class="kt-dependency-reference-title">' + fieldName(ref)
+        + '</div><details class="kt-dependency-formula"><summary>計算式を見る</summary><pre>' + escape(ref.expression) + '</pre></details></li>').join('');
       const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
         ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
       return (info.kind === 'event' ? '<p><strong>イベント</strong> <code>' + escape(info.event.name) + '</code></p>'
-        : '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>')
+        : '<p>' + fieldName(info.field) + '</p>')
         + '<p class="kt-muted">' + (info.kind === 'event' ? '取得した登録済みコードのイベントです。' : '取得した登録済みコードと計算式の参照です。') + '編集中のコードは解析していません。</p>'
         + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
-        + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+        + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul class="kt-dependency-list">' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
         + (info.kind === 'event' ? '<p class="kt-muted">イベントの行番号は既存の解析結果に含まれていません。候補のイベントはコードで確認してください。</p>'
-          : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
+          : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul class="kt-dependency-list">' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
         + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
         + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
     }
@@ -20016,6 +20021,7 @@
         #kt-customize-width-resize{align-self:stretch;min-height:160px;cursor:col-resize}#kt-customize-width-resize:before{width:3px;left:8px;top:12px;bottom:12px}
         #kt-customize-reference-info{font-size:12px;flex:none;overflow-wrap:anywhere;border-top:1px solid var(--kt-line);padding-top:12px}#kt-customize-reference-info summary{font-weight:600;cursor:pointer}#kt-customize-reference-info h4{font-size:12px;margin:12px 0 4px}#kt-customize-reference-info p{margin:6px 0;color:var(--kt-muted)}#kt-customize-reference-info ul{padding-left:20px;margin:4px 0;max-height:230px;overflow:auto}#kt-customize-reference-info li{margin:5px 0}#kt-customize-reference-info code{font-size:11px;color:var(--kt-muted)}
         #kt-customize-dependencies{font-size:12px;overflow-wrap:anywhere}#kt-customize-dependencies header{display:flex;flex-wrap:wrap;align-items:center;gap:8px}#kt-customize-dependencies header h3{flex:1;margin:0}#kt-customize-dependencies :is(input,select){width:100%;min-width:0;box-sizing:border-box;padding:7px;margin:4px 0;font:inherit;color:var(--kt-text);background:var(--kt-paper);border:1px solid var(--kt-line);border-radius:6px}#kt-customize-dependency-status{color:var(--kt-muted);margin:8px 0}#kt-customize-dependency-content h4{margin:10px 0 5px}#kt-customize-dependency-content ul{padding-left:18px;max-height:230px;overflow:auto}#kt-customize-dependency-content li{margin:6px 0}#kt-customize-dependency-content pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+        #kt-customize-dependency-content .kt-dependency-list{padding:0;list-style:none}#kt-customize-dependency-content .kt-dependency-reference{padding:8px 0;border-bottom:1px solid var(--kt-line)}.kt-dependency-reference-title{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px}.kt-dependency-reference-title strong{min-width:0;overflow-wrap:anywhere}.kt-dependency-platform{padding:1px 5px;border-radius:4px;background:var(--kt-paper);color:var(--kt-muted);font-size:11px}.kt-dependency-current,.kt-dependency-reference-meta{color:var(--kt-muted)}#kt-customize-dependency-content .kt-dependency-reference-meta{margin:4px 0 0}.kt-dependency-formula{margin-top:6px}.kt-dependency-formula summary{color:var(--kt-accent);cursor:pointer}
         .kt-customize-dependency-kinds{display:flex;gap:2px}#kt-toolkit .kt-customize-dependency-kinds .btn{font-size:12px;line-height:1.4;padding:4px 6px;min-height:28px}#kt-toolkit .kt-customize-dependency-kinds .btn[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);background:var(--kt-paper)}#kt-toolkit #kt-customize-dependency-refresh{font-size:12px;padding:4px 7px;min-height:28px}
         .kt-customize-modes{display:none;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
         .kt-customize-picker,.kt-customize-editor-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
@@ -20023,13 +20029,14 @@
         #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
         #kt-customize-refresh{width:34px;padding:4px}#kt-customize-consult{white-space:nowrap}
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
-        .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
+        .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-identity{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap}#kt-customize-edit-state{flex:none;max-width:100%;padding:3px 7px;border:1px solid var(--kt-line);border-radius:5px;font-size:11px;line-height:1.4;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-edit-state[data-state="edited"],#kt-customize-edit-state[data-state="new"]{color:var(--kt-accent);border-color:var(--kt-accent)}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
         .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
         #kt-toolkit .kt-customize-actionbar .btn{font-size:12px;line-height:1.4;min-height:32px;padding:6px 8px;white-space:nowrap}
+        #kt-customize-save-help{font-size:12px;margin-top:6px;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-save-help summary{cursor:pointer}#kt-customize-save-help dt{font-weight:600;margin:8px 0 2px;color:var(--kt-text)}#kt-customize-save-help dd{margin:0}
         #kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
         #kt-customize-manual-confirm{margin-top:10px;padding:10px;border:1px solid var(--kt-line);border-radius:6px;background:var(--kt-paper);font-size:12px}#kt-customize-manual-confirm p{white-space:pre-line;overflow-wrap:anywhere;margin:0 0 10px}#kt-customize-manual-confirm>div{display:flex;gap:6px;flex-wrap:wrap}
-        .ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
+        .ktr-code-slot #kt-customize-save-help,.ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
         .kt-customize-menu{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:stretch;background:var(--kt-soft)}
@@ -20050,7 +20057,7 @@
           <nav class="kt-customize-modes" aria-label="コードの表示" hidden><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
           <div id="kt-customize">
             <div class="kt-customize-editor-pane">
-              <header class="kt-customize-editor-heading"><div id="kt-customize-meta"></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
+              <header class="kt-customize-editor-heading"><div class="kt-customize-editor-identity"><div id="kt-customize-meta"></div><span id="kt-customize-edit-state" role="status" title="取得した本文、または登録後に一致を確認した本文との比較です。ローカル保存や運用環境への反映状況ではありません。" hidden></span></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
               <p id="kt-customize-editor-note">相談には動作テスト環境のコードを使います。手元の編集は送信しません。</p>
               <div id="kt-customize-editor"></div>
               <div id="kt-customize-comparison" hidden></div>
@@ -20059,7 +20066,8 @@
             <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
               <section class="kt-customize-menu-section" aria-label="保存と反映">
                 <div class="kt-customize-actionbar"><div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn" title="編集中のコードをローカルに保存" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn" title="新規ファイルを作成">＋ 新規</button></div>
-                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn" title="運用環境へ反映（デプロイ）">運用環境へ反映</button></div></div>
+                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" title="手元のコードを動作テスト環境に登録します。運用環境は変わりません。" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn" title="アプリの未反映の変更全体を運用環境へ反映します。未登録の手元のコードは含みません。">運用環境へ反映</button></div></div>
+                <details id="kt-customize-save-help"><summary>保存・反映の違い</summary><dl><dt>ローカルに保存</dt><dd>手元のコードをファイルとしてダウンロードします。kintoneは変更しません。</dd><dt>動作テスト環境に登録</dt><dd>エディターのコードを登録します。運用環境は変更しません。</dd><dt>運用環境へ反映</dt><dd>フォームなども含め、アプリの未反映の変更全体を反映します。未登録の手元のコードは含みません。</dd></dl></details>
                 <p id="kt-customize-manual-status" role="status" aria-live="polite"></p><button id="kt-customize-manual-reload" class="btn" hidden>登録済みコードを読み直す</button>
                 <section id="kt-customize-manual-confirm" aria-label="手元の編集と反映の確認" hidden><p data-manual-description></p><div><button class="btn" data-manual-cancel>キャンセル</button><button class="btn" data-manual-confirm>確認して実行</button></div></section>
               </section>
@@ -20100,7 +20108,7 @@
     const $consult = $('#kt-customize-consult');
     const $download = $('#kt-customize-download');
     const $new = $('#kt-customize-new');
-    const $meta = $('#kt-customize-meta');
+    const $meta = $('#kt-customize-meta'), $editState = $('#kt-customize-edit-state');
     const $refresh = $('#kt-customize-refresh');
     const $sourceSel = $('#kt-customize-source');
     const $editorHost = $('#kt-customize-editor');
@@ -20196,11 +20204,28 @@
       if (!activeDocument) return;
       drafts.set(draftKey(activeDocument), { ...activeDocument, text: editor.getValue(), viewState: editor.saveViewState?.() });
     }
+    function editingState(d, text = d.text) {
+      if (d.isNew) return { key: 'new', label: '新規ファイル' };
+      if (typeof d.registeredText !== 'string') return { key: 'unknown', label: '比較元を未取得' };
+      return text === d.registeredText ? { key: 'same', label: '取得時と同じ' } : { key: 'edited', label: '手元の変更あり' };
+    }
+    function draftLabel(d, text = d.text) {
+      return (d.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + d.name + '（' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境') + '・' + editingState(d, text).label + '）';
+    }
+    function updateEditingState() {
+      $editState.hidden = !activeDocument;
+      if (!activeDocument) return;
+      const text = editor.getValue(), state = editingState(activeDocument, text);
+      if ($editState.textContent !== state.label) $editState.textContent = state.label;
+      $editState.dataset.state = state.key;
+      const selected = Array.from($drafts.options).find(option => option.value === draftKey(activeDocument));
+      if (selected) selected.textContent = draftLabel(activeDocument, text);
+    }
     function renderDrafts() {
       $drafts.innerHTML = '<option value="">ファイルを選択してください</option>';
       for (const [key, d] of drafts) {
         const option = document.createElement('option'); option.value = key;
-        option.textContent = (d.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + d.name + (d.isNew ? '（新規・未登録）' : '（' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境') + '）');
+        option.textContent = draftLabel(d);
         $drafts.appendChild(option);
       }
       $drafts.value = activeDocument ? draftKey(activeDocument) : '';
@@ -20211,7 +20236,8 @@
       editor.setValue(d.text); setEditorLanguage(d.kind === 'css' ? 'css' : 'javascript');
       if (d.viewState) editor.restoreViewState?.(d.viewState);
       drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
-      $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
+      $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）';
+      $meta.title = d.name + '・' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境');
       $download.disabled = false; invalidateManualConfirmation(); updateManualButtons(); renderReferenceInfo(); comparison?.render(); ensureDependencies();
     }
     async function selectFile(entry, conf) {
@@ -20510,6 +20536,7 @@
     // Manual edits use their own explicit confirmations; AI-created changes keep the Assistant approval path.
     function aiBusy() { return ['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result'].includes(assistant?.controller?.getState?.().phase); }
     function updateManualButtons() {
+      updateEditingState();
       const busy = manualBusy || aiBusy();
       $register.disabled = busy || !activeDocument || activeDocument.environment !== 'preview';
       $deploy.disabled = busy;

@@ -16,8 +16,11 @@ const cases = [
   { name: 'full-110', viewport: { width: 1536, height: 790 }, full: true, zoom: 1.1, split: true },
   { name: 'panel', viewport: { width: 1440, height: 900 }, full: false, zoom: 1, split: false },
   { name: 'narrow-110', viewport: { width: 390, height: 844 }, full: true, zoom: 1.1, split: false },
+  { name: 'short-390-130', viewport: { width: 390, height: 600 }, full: true, zoom: 1.3, split: false, realShell: true },
+  { name: 'short-320-130', viewport: { width: 320, height: 568 }, full: true, zoom: 1.3, split: false, realShell: true },
 ];
-function html({ full, zoom }) {
+function html({ full, zoom, realShell }) {
+  if (realShell) return '<!doctype html><html lang="ja"><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%}</style><body></body></html>';
   return `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Toolkit 幅の回帰確認</title>
   <style>
     html,body{margin:0;width:100%;height:100%;overflow:hidden}
@@ -36,7 +39,7 @@ function bundle() {
   const sourcePath = process.env.KT_LAYOUT_TOOLKIT_SOURCE || path.join(root, 'kintoneAppToolkit.user.js');
   const source = fs.readFileSync(sourcePath, 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
-  return source.slice(0, end) + '\nglobalThis.LayoutTest={mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.LayoutTest={mountReleaseWorkspace,mountRoot,KTAiClient};\n' + source.slice(end);
 }
 function data() {
   return { appId: '310', appName: '案件管理', fields: {
@@ -79,6 +82,27 @@ async function checkLayout(page, split, label) {
   assert.equal(await page.locator('#kt-release-input').count(), 1, `${label}: one persistent input`);
   assert.ok(m.input.x >= m.conversation.x && m.input.right <= m.conversation.right + 1, `${label}: input stays in the conversation`);
 }
+async function fullyVisible(page, target, label) {
+  await target.scrollIntoViewIfNeeded();
+  const visible = await target.evaluate(el => {
+    const r = el.getBoundingClientRect(), clips = []; let parent = el.parentElement;
+    while (parent) { if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) clips.push(parent.getBoundingClientRect()); parent = parent.parentElement; }
+    return r.width > 0 && r.height > 0 && r.x >= -1 && r.right <= innerWidth + 1 && r.y >= -1 && r.bottom <= innerHeight + 1 && clips.every(c => r.top >= c.top - 1 && r.bottom <= c.bottom + 1);
+  });
+  assert.equal(visible, true, label);
+}
+
+async function checkShortSurface(page, label) {
+  const scroll = await page.locator('.ktr-content').evaluate(el => ({ client: el.clientHeight, scroll: el.scrollHeight }));
+  assert.ok(scroll.client > 200 && scroll.scroll > scroll.client, label + ': 相談と案を数行の窓へ圧縮しない');
+  const candidates = ['#kt-release-input', '[data-release-action="send"]', '[data-release-action="adopt"]', '[data-release-action="apply"]'];
+  for (const selector of candidates) {
+    const target = page.locator(selector); if (!await target.count()) continue;
+    await fullyVisible(page, target, label + ': 操作全体が見える ' + selector);
+  }
+  await page.locator('.ktr-header strong').scrollIntoViewIfNeeded();
+}
+
 function sameInputPosition(before, after, label) {
   for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(before[key] - after[key]) < 3, `${label}: input ${key} moved (${before[key]} -> ${after[key]})`);
 }
@@ -108,7 +132,7 @@ async function checkDialog(page, { wide = false, label = '' } = {}) {
   }
 }
 
-test('実ホストの幅・高さ・110%表示とダイアログを固定応答で確認する', { timeout: 120000 }, async t => {
+test('実ホストの幅・高さ・文字拡大とダイアログを固定応答で確認する', { timeout: 120000 }, async t => {
   let pw;
   try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
   catch (_) { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
@@ -124,6 +148,7 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
       try {
         await context.route('**/*', route => {
           if (route.request().url() === 'https://layout.test.invalid/') return route.fulfill({ contentType: 'text/html', body: html(scene) });
+          if (route.request().url().startsWith('https://www.google.com/s2/favicons?')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg"/>' });
           unexpected.push(route.request().url()); return route.abort();
         });
         const page = await context.newPage();
@@ -138,8 +163,14 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
           return F.generated(ctx.customization);
         });
         await page.goto('https://layout.test.invalid/');
+        await page.evaluate(scene => { localStorage.setItem('ktToolkitFull.v1', scene.full ? '1' : '0'); localStorage.setItem('ktToolkitFullZoom.v1', String(scene.zoom)); }, scene);
         await page.addScriptTag({ content: bundle() });
-        await page.evaluate(({ prod, names }) => {
+        await page.evaluate(({ prod, names, scene }) => {
+          if (scene.realShell) {
+            const shell = LayoutTest.mountRoot(); shell.ktTabs.switchTab('ai');
+            const host = document.createElement('div'); host.id = 'kt-ai-host'; host.className = 'kt-flex-column'; host.style.height = '100%';
+            shell.querySelector('#view-ai').appendChild(host);
+          }
           const client = Object.fromEntries(['getHealth', 'propose', 'plan', 'generate'].map(name => [name, input => window.testService(name, input?.ctx)]));
           window.work = LayoutTest.mountReleaseWorkspace(document.querySelector('#kt-ai-host'), {
             appId: '310', settings: LayoutTest.KTAiClient.createSettingsStore(),
@@ -148,11 +179,12 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
             getInputs: () => ({ data: prod, deps: {}, scan: { files: [] } }), copyText: async () => {}, downloadText: () => {},
           });
           window.work.onVisible();
-        }, { prod, names: Object.keys(mock.api) });
+        }, { prod, names: Object.keys(mock.api), scene });
         const action = name => page.locator('[data-release-action="' + name + '"]').first();
         const phase = value => page.waitForFunction(v => window.work.controller.getState().phase === v, value);
         await page.waitForFunction(() => window.work.capability().available);
         await checkLayout(page, scene.split, scene.name + '/idle');
+        if (scene.realShell) await checkShortSurface(page, scene.name + '/idle');
         const initialInput = (await measure(page)).input;
         assert.equal(await page.locator('#kt-release-input').count(), 1);
         assert.equal(await page.locator('[data-release-action="send"]').count(), 1);
@@ -174,11 +206,13 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
         await page.locator('dialog [data-consent]').waitFor(); await checkDialog(page, { label: scene.name + '/consent' });
         await page.locator('dialog [data-consent]').click(); await phase('proposal');
         await checkLayout(page, scene.split, scene.name + '/proposal');
+        if (scene.realShell) await checkShortSurface(page, scene.name + '/proposal');
         if (scene.split) sameInputPosition(initialInput, (await measure(page)).input, scene.name + '/proposal');
         assert.match(await page.locator('.ktr-chat-log').innerText(), /承認待ちの一覧を追加します/);
         assert.equal(await page.locator('[data-release-action="adopt"]').count(), 1);
         await action('adopt').click(); await phase('review');
         await checkLayout(page, scene.split, scene.name + '/review');
+        if (scene.realShell) await checkShortSurface(page, scene.name + '/review');
         if (scene.split) sameInputPosition(initialInput, (await measure(page)).input, scene.name + '/review');
         assert.equal(await page.locator('[data-release-action="apply"]').count(), 1);
         assert.equal(await page.locator('.ktr-workspace main .ktr-primary').count(), 1);
@@ -201,6 +235,33 @@ test('実ホストの幅・高さ・110%表示とダイアログを固定応答�
           assert.equal(await page.evaluate(() => window.work.controller.getState().phase), 'review');
           assert.equal(calls.length, count, 'resizing must not make requests');
           assert.equal(await page.locator('[data-release-action="apply"]').count(), 1);
+        }
+        if (scene.realShell) {
+          const requestCount = calls.length;
+          for (const button of await page.locator('#kt-toolkit > .bar button').all()) {
+            await fullyVisible(page, button, scene.name + ': 上部のタブと操作ボタンを切らない');
+            await button.click({ trial: true });
+          }
+          await page.evaluate(() => { window.noticeState = { ...work.controller.getState(), error: { code: 'NETWORK_ERROR', message: '通信を確認できませんでした。' + '通知を最後まで読めることを確認します。'.repeat(50) } }; work.view.render(noticeState); });
+          const notification = page.locator('[data-release-panel="header-notice"]');
+          await fullyVisible(page, notification.locator('summary'), scene.name + ': 通知の見出しへ戻れる');
+          await notification.locator('summary').click();
+          const body = notification.locator('.ktr-header-notice-body');
+          assert.ok(await body.evaluate(el => el.scrollHeight > el.clientHeight), '長文通知をスクロールできる');
+          await fullyVisible(page, notification.locator('[data-release-action="close-notice"]'), scene.name + ': 通知の末尾と閉じる操作へ到達できる');
+          await notification.locator('[data-release-action="close-notice"]').focus();
+          const positions = await page.evaluate(() => [document.querySelector('.ktr-content').scrollTop, document.querySelector('.ktr-header-notice-body').scrollTop]);
+          assert.ok(positions.every(value => value > 0), '外側と通知の本文を両方スクロールした状態を確かめる');
+          await page.evaluate(() => work.view.render(noticeState));
+          assert.equal(await notification.evaluate(el => el.open), true);
+          assert.deepEqual(await page.evaluate(() => [document.querySelector('.ktr-content').scrollTop, document.querySelector('.ktr-header-notice-body').scrollTop]), positions, '通知を読んでいる間の再描画で二つのスクロール位置を保つ');
+          assert.equal(await notification.locator('[data-release-action="close-notice"]').evaluate(el => el === document.activeElement), true);
+          await page.screenshot({ path: path.join(out, scene.name + '-notice.png') });
+          await notification.locator('[data-release-action="close-notice"]').click();
+          await page.evaluate(() => work.view.render());
+          assert.equal(await page.locator('#kt-release-input').inputValue(), '入力途中の文は残してください。');
+          assert.equal(await page.evaluate(() => work.controller.getState().prepared.signature), prepared);
+          assert.equal(calls.length, requestCount, '画面操作だけではAIを呼ばない');
         }
         fs.writeFileSync(path.join(out, scene.name + '-measurements.json'), JSON.stringify(await measure(page), null, 2));
         await page.screenshot({ path: path.join(out, scene.name + '.png'), fullPage: true });

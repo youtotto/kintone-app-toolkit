@@ -266,7 +266,7 @@ const KTReleaseView = (() => {
       const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
       const activeSuggestion = host.ownerDocument?.activeElement?.dataset;
       const suggestionFocus = activeSuggestion?.releaseSuggestion ? { id: activeSuggestion.releaseSuggestion, task: activeSuggestion.releaseTask, version: activeSuggestion.releaseVersion } : null;
-      const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0;
+      const log = host.querySelector?.('.ktr-chat-log'), current = host.querySelector?.('.ktr-current'), layoutTop = host.querySelector?.('.ktr-layout')?.scrollTop || 0, contentTop = host.querySelector?.('.ktr-content')?.scrollTop || 0;
       const logTop = log?.scrollTop || 0, followMessages = !log || log.scrollHeight - log.clientHeight - logTop < 24;
       const currentTop = previousPhase === state.phase && previousRunId === selectedRunId && previousExplanationId === state.explanationId ? current?.scrollTop || 0 : 0;
       const previousNotice = host.querySelector?.('[data-release-panel="header-notice"]');
@@ -289,6 +289,7 @@ const KTReleaseView = (() => {
       if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
       if (nextCurrent) nextCurrent.scrollTop = currentTop;
       const nextLayout = host.querySelector?.('.ktr-layout'); if (nextLayout) nextLayout.scrollTop = layoutTop;
+      const nextContent = host.querySelector?.('.ktr-content'); if (nextContent) nextContent.scrollTop = contentTop;
       for (const listener of displayListeners) listener();
       previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
     }
@@ -435,6 +436,7 @@ const KTReleaseView = (() => {
     .ktr-code-shell{width:100%;height:100%;min-width:0;min-height:0;container:ktr-code-shell / inline-size}.ktr-code-columns{width:100%;height:100%;min-width:0;min-height:0}.ktr-code-conversation-host{width:100%;min-width:0;min-height:0}.ktr-code-slot{min-width:0;min-height:0;overflow:auto;border-left:1px solid var(--kt-line,#dbe2ec);padding:16px}.ktr-code-slot[hidden]{display:none}.ktr-code-shell.is-code-open>.ktr-code-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);overflow:hidden}.ktr-code-open .ktr-layout{display:flex;flex-direction:column;overflow:hidden}.ktr-code-open .ktr-current{display:none}.ktr-code-open .ktr-conversation{flex:1;overflow:hidden}.ktr-code-open .ktr-chat-log{min-height:0;max-height:none}.ktr-code-progress{display:flex;flex:none;gap:10px;align-items:center;flex-wrap:wrap;max-height:30%;overflow:auto;padding:10px;margin-bottom:8px;background:var(--ktr-soft);border-radius:6px}.ktr-code-progress>span:not(.ktr-activity){flex:1;min-width:120px;font-size:13px}.ktr-code-open .ktr-header{align-items:flex-start;flex-direction:column;gap:8px}.ktr-code-open .ktr-header-tools{justify-content:flex-start;gap:8px}
     .ktr-code-attention{flex:none;margin-bottom:12px;padding:12px;border-left:3px solid var(--ktr-warning);border-radius:4px;background:color-mix(in srgb,var(--ktr-warning) 9%,var(--ktr-paper))}.ktr-code-attention>p{margin:0 0 8px}
     @container ktr-code-shell (max-width:959px){.ktr-code-shell.is-code-open>.ktr-code-columns{display:flex;flex-direction:column;overflow:auto}.ktr-code-shell.is-code-open .ktr-code-conversation-host{flex:none;height:auto!important;overflow:visible!important}.ktr-workspace.ktr-code-open{height:auto;overflow:visible}.ktr-code-open .ktr-content{height:auto}.ktr-code-open .ktr-layout{display:block;flex:none;overflow:visible}.ktr-code-open .ktr-conversation{overflow:visible}.ktr-code-open .ktr-chat-log{flex:none;min-height:180px;max-height:42dvh;overflow:auto}.ktr-code-slot{flex:none;border-left:0;border-top:1px solid var(--kt-line,#dbe2ec)}}
+    @media(max-height:700px){@container ktr-workspace (max-width:959px){.ktr-content{overflow:auto}.ktr-layout{flex:none;overflow:visible}}}
     @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
   `;
   return { create, render, escape: esc, explanationMarkdown };

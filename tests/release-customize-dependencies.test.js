@@ -237,3 +237,38 @@ test('イベント名・ファイル名をエスケープし、実行と行番�
   assert.match(html,/イベントの行番号は既存の解析結果に含まれていません/);
   assert.match(html,/実際の動作は未確認/); assert.match(html,/編集中のコードは解析していません/);
 });
+
+test('参照元のファイル名・画面・行番号を先に示し、取得済み情報を変更しない', () => {
+  const info = infoOf(snapshotOf());
+  info.jsReferences[0].access = ['READ', 'CONTROL'];
+  info.jsReferences[0].lines = [6, 10];
+  info.jsReferences[1].lines = [3];
+  const before = JSON.stringify(info), html = C.renderDependencyInfo(info);
+  const rows = [...html.matchAll(/<li class="kt-dependency-reference">([\s\S]*?)<\/li>/g)].map(match => match[1]);
+  assert.match(rows[0], /<strong>lock\.js<\/strong><span class="kt-dependency-platform">PC<\/span>/);
+  assert.match(rows[0], /開いているファイル/);
+  assert.match(rows[0], /読み取り・入力の制御 \/ 6・10行目/);
+  assert.match(rows[1], /<strong>lock\.js<\/strong><span class="kt-dependency-platform">モバイル<\/span>/);
+  assert.match(rows[1], /3行目/);
+  assert.doesNotMatch(rows[1], /開いているファイル/);
+  assert.equal(JSON.stringify(info), before);
+});
+
+test('計算式本文だけを閉じ、同じ名前とコードを重ねず未確認の注意を残す', () => {
+  const info = infoOf(snapshotOf());
+  info.formulaReferences = [
+    {label:'合計',code:'合計',expression:'IF(amount>0,amount*2,0)'},
+    {label:'割引後の金額',code:'discount_total',expression:'amount-100'}
+  ];
+  const before = JSON.stringify(info), html = C.renderDependencyInfo(info);
+  assert.ok(html.startsWith('<p><strong>amount</strong></p>'),'選択したフィールドの同名コードも重ねない');
+  assert.match(html, /<strong>合計<\/strong><\/div><details class="kt-dependency-formula"><summary>計算式を見る<\/summary><pre>IF\(amount&gt;0,amount\*2,0\)<\/pre><\/details>/);
+  assert.doesNotMatch(html, /<code>合計<\/code>/);
+  assert.match(html, /<strong>割引後の金額<\/strong> <code>discount_total<\/code>/);
+  assert.equal((html.match(/<details class="kt-dependency-formula">/g)||[]).length,2,'式はそれぞれ閉じて表示する');
+  assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+  assert.match(html, /編集中のコードは解析していません/);
+  assert.match(html, /参照が見つからなくても、依存関係がないとは限りません/);
+  assert.match(html, /<summary>未確認の範囲<\/summary>/);
+  assert.equal(JSON.stringify(info), before);
+});

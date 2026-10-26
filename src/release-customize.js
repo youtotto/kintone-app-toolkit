@@ -190,25 +190,28 @@ const KTReleaseCustomize = (() => {
   function renderDependencyInfo(info) {
     if (!info || info.status !== 'ready') return '<p class="kt-muted">' + escape(info?.reason || '依存関係は未取得です。') + '</p>';
     const platform = target => target === 'mobile' ? 'モバイル' : 'PC';
+    const fieldName = ref => '<strong>' + escape(ref.label || ref.code) + '</strong>'
+      + (ref.code && ref.code !== (ref.label || ref.code) ? ' <code>' + escape(ref.code) + '</code>' : '');
     const accessLabels = { READ: '読み取り', WRITE: '書き換え', CONTROL: '入力の制御', ELEMENT: '画面の操作', SHOW_HIDE: '表示の切替',
       FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
-    const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
-      + (ref.current ? '（開いているファイル）' : '') + '<br>'
+    const references = info.jsReferences.map(ref => '<li class="kt-dependency-reference"><div class="kt-dependency-reference-title"><strong>' + escape(ref.name) + '</strong>'
+      + '<span class="kt-dependency-platform">' + platform(ref.target) + '</span>'
+      + (ref.current ? '<span class="kt-dependency-current">開いているファイル</span>' : '') + '</div><p class="kt-dependency-reference-meta">'
       + escape(info.kind === 'event' ? (ref.direct ? '登録の記述あり' : '登録の候補（既存の解析による推定）')
         : ref.access.map(access => accessLabels[access] || '参照').join('・'))
       + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
-      + '</li>').join('');
-    const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
-      + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
+      + '</p></li>').join('');
+    const formulas = info.formulaReferences.map(ref => '<li class="kt-dependency-reference"><div class="kt-dependency-reference-title">' + fieldName(ref)
+      + '</div><details class="kt-dependency-formula"><summary>計算式を見る</summary><pre>' + escape(ref.expression) + '</pre></details></li>').join('');
     const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
       ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
     return (info.kind === 'event' ? '<p><strong>イベント</strong> <code>' + escape(info.event.name) + '</code></p>'
-      : '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>')
+      : '<p>' + fieldName(info.field) + '</p>')
       + '<p class="kt-muted">' + (info.kind === 'event' ? '取得した登録済みコードのイベントです。' : '取得した登録済みコードと計算式の参照です。') + '編集中のコードは解析していません。</p>'
       + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
-      + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+      + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul class="kt-dependency-list">' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
       + (info.kind === 'event' ? '<p class="kt-muted">イベントの行番号は既存の解析結果に含まれていません。候補のイベントはコードで確認してください。</p>'
-        : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
+        : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul class="kt-dependency-list">' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
       + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
       + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
   }
