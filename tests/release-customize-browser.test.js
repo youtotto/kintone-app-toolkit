@@ -64,8 +64,8 @@ async function mount(page) {
     const data={appId:'310',appName:'カスタマイズ確認用',fields:{memo:{type:'SINGLE_LINE_TEXT',code:'memo',label:'備考'}},layout:[],status:{enable:false,states:{},actions:[]},views:{views:{}},customize};
     const base={ok:true,env:'preview',appId:'310',loadedAt:'2026-10-26T00:00:00Z',revision:{preview:'7',production:'7'},data,files:[...customize.desktop.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'desktop',text:sources[entry.file.fileKey],sourceAvailable:true})),...customize.mobile.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'mobile',text:sources[entry.file.fileKey],sourceAvailable:true}))],errors:[]};
     base.files.forEach(file=>file.env='preview');
-    window.dependencyBase=base;window.baseReads=0;window.pendingDependency=null;window.holdDependency=false;window.dependencyFailure=false;
-    T.KTDevBase.loadForRelease=async()=>{baseReads++;const result=clone(dependencyBase);if(dependencyFailure)throw Error('Dependency fixture failure');if(holdDependency){holdDependency=false;return new Promise(resolve=>{pendingDependency=()=>resolve(result);});}return result;};
+    window.dependencyBase=base;window.baseReads=0;window.pendingDependency=null;window.holdDependency=false;window.dependencyFailure=false;window.dependencyContinue=null;
+    T.KTDevBase.loadForRelease=async(options={})=>{window.dependencyContinue=options.shouldContinue;baseReads++;const result=clone(dependencyBase);if(dependencyFailure)throw Error('Dependency fixture failure');if(holdDependency){holdDependency=false;return new Promise(resolve=>{pendingDependency=()=>resolve(result);});}return result;};
     const health={ok:true,supportedContractVersions:[C.CONTRACT_VERSION],entitlements:[{product:C.PRODUCT,features:[C.FEATURE,C.FEATURE_PLANNER]}],registry:{[C.PRODUCT]:{
       [C.FEATURE]:{implemented:true,promptVersions:[C.PROMPT_VERSION],conversation:[...C.CONVERSATION_MARKS,'releaseWorkspace','appExplanation']},
       [C.FEATURE_PLANNER]:{implemented:true,promptVersions:[C.PLANNER_PROMPT_VERSION],...C.PLANNER_MARKS,requirementOps:[...C.PLANNER_MARKS.requirementOps,'releaseWorkspace','formLayoutPlacement','fieldMaintenance']}
@@ -138,7 +138,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         t.diagnostic(colorScheme+' Customize menu: '+JSON.stringify(menuDensity));
         assert.ok(menuDensity.upperHeight<=145,'操作と選択欄の占有高さを旧304pxから半分以下にし、依存領域を上へ出す');
         assert.equal(menuDensity.dependencyFont,'12px','依存情報の文字を縮めずMenu側を圧縮する');
-        assert.ok(menuDensity.pickerHeight<=36,'十分な幅では種類・ファイル・更新を1行にまとめる');
+        assert.ok(menuDensity.pickerHeight<=42,'操作の高さを確保し、十分な幅では種類・ファイル・更新を1行にまとめる');
         assert.equal(await page.locator('.kt-customize-files h3').count(),0,'選択欄と重なるファイル見出しを繰り返さない');
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0,'Customizeにチャットを複製しない');
         assert.equal(await page.locator('#kt-release-input').isVisible(),false,'Customizeは編集に集中する');
@@ -540,7 +540,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
   }finally{await browser.close();}
 });
 
-test('Customizeの依存関係は明示更新し、コードの選択は登録基準だけを参照する（外部通信なし）',{timeout:60000},async()=>{
+test('Customizeの依存関係は自動取得して再利用し、コードの選択は登録基準だけを参照する（外部通信なし）',{timeout:60000},async()=>{
   const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
   try{for(const colorScheme of ['light','dark']){
   const context=await browser.newContext({viewport:{width:1440,height:960},colorScheme,serviceWorkers:'block'}),errors=[],unexpected=[];
@@ -548,12 +548,11 @@ test('Customizeの依存関係は明示更新し、コードの選択は登録�
     await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%}</style><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
     const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
     await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
-    await selected(page,'same.js','// PC original\nconst memo = 1;\n');
     const field=page.locator('#kt-customize-field'),content=page.locator('#kt-customize-dependency-content'),status=page.locator('#kt-customize-dependency-status'),refresh=page.locator('#kt-customize-dependency-refresh');
     assert.equal(await field.isDisabled(),true);const initialBaseReads=await page.evaluate(()=>baseReads);assert.equal(initialBaseReads,1,'会話開始時の取得以外を増やさない');
     await page.evaluate(()=>{dependencyBase.data.fields.show={code:'show',label:'表示',type:'SINGLE_LINE_TEXT'};dependencyBase.data.fields.税_番号={code:'税_番号',label:'税の番号',type:'SINGLE_LINE_TEXT'};dependencyBase.data.fields.items={code:'items',label:'明細',type:'SUBTABLE',fields:{qty:{code:'qty',label:'数量',type:'NUMBER'}}};dependencyBase.data.fields.summary={code:'summary',label:'備考の確認',type:'SINGLE_LINE_TEXT',expression:'IF(memo="","未入力","入力済み")'};dependencyBase.files.find(f=>f.name==='second.js').text="kintone.events.on('app.record.edit.show', event => { event.record.memo.value = 'x'; return event; });";dependencyBase.files.find(f=>f.name==='same.js'&&f.target==='desktop').text="kintone.events.on(['app.record.edit.show','app.record.edit.change.memo'], event => { event.record.memo.value = 'pc'; return event; });";dependencyBase.files.find(f=>f.name==='same.js'&&f.target==='mobile').text="kintone.events.on('mobile.app.record.edit.show', event => { event.record.memo.value = 'mobile'; return event; });";});
-    const aiBefore=await page.evaluate(()=>proposalCalls.length);await refresh.click();await assertEventually(()=>field.isDisabled(),false);
-    assert.equal(await page.evaluate(()=>baseReads),initialBaseReads+1);assert.match(await status.innerText(),/動作テスト環境/);
+    const aiBefore=await page.evaluate(()=>proposalCalls.length);await selected(page,'same.js','// PC original\nconst memo = 1;\n');await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),initialBaseReads+1,'ファイルを開くと更新ボタンを押さずに依存関係を取得する');assert.match(await status.innerText(),/動作テスト環境/);
     await field.selectOption('memo');assert.match(await content.innerText(),/備考/);assert.match(await content.innerText(),/second\.js/);assert.match(await content.innerText(),/備考の確認/);
     const counts=await page.evaluate(()=>({base:baseReads,files:fileReads.length,scan:[...scanCalls],ai:proposalCalls.length,writes:[...operations]}));
     const eventMode=page.locator('[data-dependency-kind="event"]'),fieldMode=page.locator('[data-dependency-kind="field"]');
@@ -603,7 +602,7 @@ test('Customizeの依存関係は明示更新し、コードの選択は登録�
     await page.evaluate(()=>dependencyFailure=true);await refresh.click();await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/取得できません/);assert.equal(await field.isDisabled(),true);assert.doesNotMatch(await content.innerText(),/second\.js|備考の確認/,'取得失敗で古い結果を確認済みとして残さない');
     await page.evaluate(()=>{dependencyFailure=false;holdDependency=true;});await refresh.click();await page.waitForFunction(()=>typeof pendingDependency==='function');assert.match(await status.innerText(),/取得しています/);assert.equal(await content.innerText(),'');
     const readsWhileBusy=await page.evaluate(()=>baseReads);await page.evaluate(()=>document.querySelector('#kt-customize-dependency-refresh').dispatchEvent(new Event('click')));assert.equal(await page.evaluate(()=>baseReads),readsWhileBusy,'更新中に二重取得しない');
-    await filePicker(page).selectOption({label:'second.js'});await assertEventually(()=>editor(page).inputValue(),'// second original\n');await page.evaluate(()=>pendingDependency());await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/対象が変わった/);assert.equal(await field.isDisabled(),true,'遅い応答で別ファイルの表示を作らない');
+    await filePicker(page).selectOption({label:'second.js'});await assertEventually(()=>editor(page).inputValue(),'// second original\n');await page.evaluate(()=>pendingDependency());await assertEventually(()=>refresh.isDisabled(),false);assert.equal(await field.isDisabled(),false,'同じ取得単位にある別ファイルにも取得中の結果を共有する');await field.selectOption('memo');assert.match(await content.innerText(),/second\.js（開いているファイル）/,'取得中に切り替えても現在のファイルを表示する');assert.equal(await page.evaluate(()=>baseReads),readsWhileBusy,'別ファイルへの切替で二重取得しない');
     await selected(page,'same.js','// hand edit\nconst memo = 42;\n');await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');
     await page.evaluate(()=>holdDependency=true);await refresh.click();await page.waitForFunction(()=>typeof pendingDependency==='function');await page.evaluate(()=>{window.oldDependency=pendingDependency;customize.markStale();});assert.match(await status.innerText(),/設定が変わった/);
     await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');assert.match(await content.innerText(),/second\.js/,'設定変更後は一覧更新を挟まず依存関係の更新だけで回復する');assert.match(await content.innerText(),/備考の確認/);await field.selectOption('税_番号');const latestText=await content.innerText();await page.evaluate(()=>oldDependency());assert.equal(await field.inputValue(),'税_番号');assert.equal(await content.innerText(),latestText,'古い更新結果で新しい選択や結果を上書きしない');
@@ -672,5 +671,53 @@ test('手編集の登録と運用反映は別確認・編集中の保持・外�
     await page.evaluate(()=>{fixtureClient.propose=()=>new Promise(resolve=>{window.finishConsult=()=>resolve({reply:'確認しました。',intent:'answer',turn:{ops:[],answers:[],requirementOps:[]}});});window.busyConsult=work.controller.send('今のコードを説明してください');});await page.waitForFunction(()=>work.controller.getState().phase==='consulting');assert.equal(await register.isDisabled(),true);assert.equal(await deploy.isDisabled(),true);await page.evaluate(async()=>{finishConsult();await busyConsult;});await assertEventually(()=>register.isEnabled(),true);
     await page.locator('#kt-customize-consult').click();await page.locator('[data-release-action="code"]').click();assert.equal(await register.isVisible(),false);assert.equal(await deploy.isVisible(),false,'AIの相談画面に手編集の反映ボタンを混ぜない');
     assert.equal(await page.evaluate(()=>proposalCalls.length),initialCalls,'手編集の操作からAIを呼ばない');assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await page.evaluate(()=>work.dispose());
+  }finally{await context.close();await browser.close();}
+});
+
+test('依存関係の自動取得は失敗を繰り返さず、再表示と新しい設定で再開する（外部通信なし）',{timeout:60000},async()=>{
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'}),errors=[],unexpected=[];
+  try{
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
+    const field=page.locator('#kt-customize-field'),status=page.locator('#kt-customize-dependency-status'),refresh=page.locator('#kt-customize-dependency-refresh');
+    const initial=await page.evaluate(()=>({reads:baseReads,ai:proposalCalls.length}));
+    await page.locator('#kt-customize-source').selectOption('css');await selected(page,'style.css','.memo { color: blue; }\n');
+    assert.equal(await page.evaluate(()=>baseReads),initial.reads,'CSSを開くだけでは依存関係を自動取得しない');
+    await page.locator('#kt-customize-source').selectOption('JavaScript');await page.locator('#kt-customize-new').click();await page.locator('#kt-newfile-name').fill('scratch.js');await page.locator('#kt-newfile-ok').click();
+    assert.equal(await page.evaluate(()=>baseReads),initial.reads,'登録していない新規ファイルでは取得しない');
+    await page.evaluate(()=>dependencyFailure=true);await selected(page,'same.js','// PC original\nconst memo = 1;\n');await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/取得できません/);
+    const failedReads=await page.evaluate(()=>baseReads);assert.equal(failedReads,initial.reads+1);
+    await editor(page).fill('// kept draft\nconst memo = 42;');await selected(page,'second.js','// second original\n');
+    await page.locator('#tab-health').click();await page.locator('#tab-customize').click();await page.evaluate(()=>monacoEditors[0].setTestCursor('memo'));
+    assert.equal(await page.evaluate(()=>baseReads),failedReads,'失敗後にファイル・タブ・カーソルを変えても自動で再試行しない');
+    await page.evaluate(()=>dependencyFailure=false);await refresh.click();await assertEventually(()=>field.isDisabled(),false);assert.equal(await page.evaluate(()=>dependencyContinue),null,'手動更新は表示の中断条件を渡さない');
+    await selected(page,'same.js','// kept draft\nconst memo = 42;');assert.equal(await page.evaluate(()=>baseReads),failedReads+1,'手動更新の成功結果はファイルを変えても再利用する');
+    await page.evaluate(()=>{customize.markStale();dependencyBase.revision.preview='8';manualFixtures.customize.revision='8';});
+    await page.locator('#tab-health').click();await page.locator('#tab-customize').click();await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),failedReads+2,'設定変更の新しい世代では次の表示時に自動取得する');assert.equal(await editor(page).inputValue(),'// kept draft\nconst memo = 42;');
+    await page.evaluate(()=>{customize.markStale();holdDependency=true;pendingDependency=null;});
+    await page.locator('#tab-health').click();await page.locator('#tab-customize').click();await page.waitForFunction(()=>typeof pendingDependency==='function');
+    const pausedReads=await page.evaluate(()=>baseReads),pausedScans=await page.evaluate(()=>scanCalls.length);
+    assert.equal(await page.evaluate(()=>typeof dependencyContinue),'function','自動取得は既存の段階取得に表示条件を渡す');assert.equal(await page.evaluate(()=>dependencyContinue()),true);
+    await page.locator('#kt-mini').click();assert.equal(await page.evaluate(()=>dependencyContinue()),false,'最小化後は次の取得段を始めない');await page.evaluate(()=>pendingDependency());await assertEventually(()=>refresh.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>scanCalls.length),pausedScans,'最小化した後の結果は解析しない');assert.match(await status.textContent(),/表示すると/);
+    await page.locator('#kt-mini').click();await page.evaluate(()=>customize.ensureLoaded());await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),pausedReads+1,'再表示時は失敗の扱いにせず再開する');
+    await page.evaluate(()=>{customize.markStale();holdDependency=true;pendingDependency=null;});
+    await page.locator('#tab-health').click();await page.locator('#tab-customize').click();await page.waitForFunction(()=>typeof pendingDependency==='function');const quickReads=await page.evaluate(()=>baseReads);
+    await page.locator('#kt-mini').click();await page.locator('#kt-mini').click();await page.evaluate(()=>customize.ensureLoaded());await page.evaluate(()=>pendingDependency());await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),quickReads+1,'旧取得の終了前に再展開しても自動再開を取りこぼさない');
+    await page.evaluate(()=>{customize.markStale();holdDependency=true;pendingDependency=null;});
+    await page.locator('#tab-health').click();await page.locator('#tab-customize').click();await page.waitForFunction(()=>typeof pendingDependency==='function');
+    const oldReads=await page.evaluate(()=>baseReads);await page.evaluate(()=>{manualFixtures.customize.revision='9';dependencyBase.revision.preview='9';});
+    await page.locator('#kt-customize-refresh').click();await assertEventually(()=>filePicker(page).isDisabled(),false);await page.evaluate(()=>pendingDependency());await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),oldReads+1,'取得中に新しい設定の版を知った場合は最新を一度取り直す');
+    await page.locator('#tab-ai').click();await page.evaluate(()=>customize.markStale());const aiCodeReads=await page.evaluate(()=>baseReads);
+    await page.locator('[data-release-action="code"]').click();await assertEventually(()=>editor(page).isVisible(),true);await page.evaluate(()=>customize.ensureLoaded());
+    assert.equal(await page.evaluate(()=>baseReads),aiCodeReads,'AI側へコード表示を開いただけでは依存関係を自動取得しない');
+    await page.locator('#tab-customize').click();await assertEventually(()=>field.isDisabled(),false);assert.equal(await page.evaluate(()=>baseReads),aiCodeReads+1,'Customizeへ戻ると新しい世代の依存関係を取得する');
+    assert.equal(await editor(page).inputValue(),'// kept draft\nconst memo = 42;');assert.equal(await page.evaluate(()=>proposalCalls.length),initial.ai);assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);await page.evaluate(()=>work.dispose());
   }finally{await context.close();await browser.close();}
 });

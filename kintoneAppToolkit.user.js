@@ -20005,17 +20005,17 @@
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
         .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
-        .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
-        #kt-toolkit .kt-customize-actionbar .btn{font-size:12px;line-height:1.4;min-height:28px;padding:4px 6px;white-space:nowrap}
+        .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
+        #kt-toolkit .kt-customize-actionbar .btn{font-size:12px;line-height:1.4;min-height:32px;padding:6px 8px;white-space:nowrap}
         #kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
         #kt-customize-manual-confirm{margin-top:10px;padding:10px;border:1px solid var(--kt-line);border-radius:6px;background:var(--kt-paper);font-size:12px}#kt-customize-manual-confirm p{white-space:pre-line;overflow-wrap:anywhere;margin:0 0 10px}#kt-customize-manual-confirm>div{display:flex;gap:6px;flex-wrap:wrap}
         .ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
-        .kt-customize-menu{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0;overflow:auto;padding:10px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
+        .kt-customize-menu{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
         .kt-customize-menu h3{font-size:13px;margin:0 0 8px}.kt-customize-menu-section{min-width:0}.kt-customize-menu-section+.kt-customize-menu-section{border-top:1px solid var(--kt-line);padding-top:12px}.kt-customize-primary{width:100%;font-weight:600!important;color:var(--kt-accent)!important;border-color:var(--kt-accent)!important}.kt-customize-menu .kt-customize-picker{display:flex;gap:6px;flex-wrap:wrap}
         .kt-customize-menu .kt-customize-files{border-top:0;padding-top:0}.kt-customize-menu #kt-customize-source{flex:1 1 140px;width:140px}.kt-customize-file-picker{display:flex;align-items:center;gap:4px;flex:2 1 150px;min-width:0}.kt-customize-menu #kt-customize-file{flex:1;min-width:0;width:100%}
-        #kt-toolkit .kt-customize-menu #kt-customize-picker .btn{font-size:12px;line-height:1.4;height:30px;padding:4px 6px}.kt-customize-menu #kt-customize-refresh{width:28px;flex:none}
+        #kt-toolkit .kt-customize-menu #kt-customize-picker .btn{font-size:12px;line-height:1.4;height:34px;padding:6px 8px}.kt-customize-menu #kt-customize-refresh{width:34px;flex:none}
         .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}
         .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-modes{display:flex}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-menu-section{border:0;padding:0}.ktr-code-slot .kt-customize-primary{width:auto}.ktr-code-slot .kt-customize-editor-pane{order:1}
         .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
@@ -20192,7 +20192,7 @@
       if (d.viewState) editor.restoreViewState?.(d.viewState);
       drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
       $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
-      $download.disabled = false; invalidateManualConfirmation(); updateManualButtons(); renderReferenceInfo(); comparison?.render();
+      $download.disabled = false; invalidateManualConfirmation(); updateManualButtons(); renderReferenceInfo(); comparison?.render(); ensureDependencies();
     }
     async function selectFile(entry, conf) {
       retainEditor(); const ticket = ++fileReadSeq;
@@ -20229,7 +20229,7 @@
     function layoutCode() { editor.layout?.(); comparison?.layout(); }
     function onVisible() {
       assistant?.setCodeOpen(false);
-      syncCodeSurface(); renderReferenceInfo();
+      syncCodeSurface(); renderReferenceInfo(); ensureDependencies();
     }
     function attachAssistant(panel) {
       if (!panel || assistant === panel) return;
@@ -20304,8 +20304,8 @@
       }
       if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       const { data, source } = got;
+      if (source === 'preview' && isNewerRevision(data.revision, dependencySnapshot?.revision ?? lastCustomize?.data?.revision)) { dependencySnapshot = null; dependencyAttemptGen = -1; dependencyNote = '設定の版が変わったため、依存関係を取り直します。'; }
       lastCustomize = got;
-      if (source === 'preview' && dependencySnapshot && isNewerRevision(data.revision, dependencySnapshot.revision)) { dependencySnapshot = null; dependencyNote = '設定の版が変わったため未確認です。依存関係を更新してください。'; }
       listLoadedGen = gen; renderReferenceInfo();
       const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
         : (data.desktop || { js: [], css: [] });
@@ -20337,7 +20337,7 @@
         option.textContent = name + (entry.type === 'URL' ? '（URL）' : '') + (note ? '（' + note + '）' : '');
         $file.appendChild(option);
       });
-      $file.disabled = false; $fileStatus.textContent = ''; syncFileSelection();
+      $file.disabled = false; $fileStatus.textContent = ''; syncFileSelection(); ensureDependencies(live);
     }
     /** AIの結果から登録済みファイルを開く。手編集は保持し、AIや反映は実行しない。 */
     async function show({ target = 'desktop', kind = 'js', name = null } = {}) {
@@ -20354,11 +20354,11 @@
     /** タブを開いたとき（設定取得の関所）: 一覧をまだ取っていない・古い印があるときだけ取る。取得中ならそれを待つ（二重に送らない）。有効な一覧は再利用する */
     function ensureLoaded({ live = null } = {}) {
       if (listLoading) return listLoading;
-      if (listLoadedGen === listGen) return Promise.resolve({ reused: true });
+      if (listLoadedGen === listGen) { ensureDependencies(live); return Promise.resolve({ reused: true }); }
       return refreshList(typeof live === 'function' ? { live } : null);
     }
     /** ほかの場所で設定を変えた（開発支援の反映・登録など）: 取得済みの一覧を古いとする（取得はしない。次にタブを開いたときに取り直す） */
-    function markStale() { listGen += 1; fileReadSeq += 1; heldList = null; dependencyRequest += 1; dependencyBusy = false; dependencySnapshot = null; dependencyNote = '設定が変わったため未確認です。依存関係を更新してください。'; renderReferenceInfo(); }
+    function markStale() { listGen += 1; fileReadSeq += 1; heldList = null; dependencyRequest += 1; dependencyBusy = false; dependencySnapshot = null; dependencyNote = '設定が変わったため、次にファイルを開くときに依存関係を取り直します。'; renderReferenceInfo(); }
 
 
     // Layout controls change only CSS; the editor, drafts and AI state stay in place.
@@ -20386,9 +20386,9 @@
     wireResize($('#kt-customize-height-resize'), 'y', 220, 1000, 20, () => parseFloat(getComputedStyle($editorHost).height), value => codePane.style.setProperty('--kt-editor-height', value + 'px'));
     const heightObserver = new ResizeObserver(() => { const height = parseFloat(getComputedStyle($editorHost).height); if (height > 0) $('#kt-customize-height-resize').setAttribute('aria-valuenow', String(Math.round(height))); });
     heightObserver.observe($editorHost);
-    // Inspect dependencies only on explicit refresh. Cursor selections match existing field/event names exactly.
+    // Load registered-source dependencies once when a JavaScript file opens. Cursor lookup reuses that snapshot.
     const $dependencyRefresh = $('#kt-customize-dependency-refresh'), $fieldSearch = $('#kt-customize-field-search'), $fieldChoice = $('#kt-customize-field');
-    let dependencySnapshot = null, dependencyRequest = 0, dependencyBusy = false, dependencyNote = '', dependencyCode = '', dependencyKind = 'field', dependencyEvent = '';
+    let dependencySnapshot = null, dependencyRequest = 0, dependencyAttemptGen = -1, dependencyBusy = false, dependencyNote = '', dependencyCode = '', dependencyKind = 'field', dependencyEvent = '';
     function isNewerRevision(current, known) {
       return current != null && known != null && Number.isFinite(Number(current)) && Number.isFinite(Number(known)) && Number(current) > Number(known);
     }
@@ -20411,19 +20411,29 @@
       $('#kt-customize-dependency-status').textContent = dependencyBusy ? '依存関係を取得しています…' : dependencyNote || (available ? '動作テスト環境' + (when ? '・' + when : '') : '動作テスト環境の依存関係は未確認です。');
       $('#kt-customize-dependency-content').innerHTML = dependencyBusy || dependencyNote ? '' : KTReleaseCustomize.renderDependencyInfo(info);
     }
-    async function refreshDependencies() {
+    function ensureDependencies(live = null) {
+      if (activeDocument?.kind !== 'js' || activeDocument.isNew || activeDocument.environment !== 'preview') return;
+      const ticket = KTFetchGate.of(root).ticket();
+      const visible = () => ticket.live() && root.ktPanel?.visibleTab?.() === 'customize' && !codePane.closest('.ktr-code-slot') && (typeof live !== 'function' || live());
+      if (!visible()) return;
+      if (listLoadedGen !== listGen) { ensureLoaded({ live: visible }).catch(() => { $fileStatus.textContent = 'ファイル一覧を読み込めませんでした。もう一度更新してください。'; }); return; }
+      if (dependencySnapshot || dependencyBusy || dependencyAttemptGen === listGen) return;
+      refreshDependencies({ live: visible });
+    }
+    async function refreshDependencies({ live = null } = {}) {
       if (dependencyBusy) return;
-      const request = ++dependencyRequest, generation = listGen, document = activeDocument;
-      dependencyBusy = true; dependencySnapshot = null; dependencyNote = ''; renderDependencies();
+      const request = ++dependencyRequest, generation = listGen;
+      let resumeVisible = false;
+      dependencyAttemptGen = generation; dependencyBusy = true; dependencySnapshot = null; dependencyNote = ''; renderDependencies();
       try {
-        const base = await KTDevBase.loadForRelease({ appId, getImpl: kGet, download: key => KTApi.downloadFile(key) });
-        if (request !== dependencyRequest) return;
-        if (generation !== listGen || document !== activeDocument) { dependencyNote = '対象が変わったため取得結果を表示しません。依存関係を更新してください。'; return; }
-        if (lastCustomize?.source === 'preview' && isNewerRevision(lastCustomize.data?.revision, base.revision?.preview)) { dependencyNote = '設定の版が変わったため取得結果を表示しません。依存関係を更新してください。'; return; }
+        const base = await KTDevBase.loadForRelease({ appId, getImpl: kGet, download: key => KTApi.downloadFile(key), shouldContinue: live });
+        if (request !== dependencyRequest || generation !== listGen) return;
+        if (base.paused || (typeof live === 'function' && !live())) { resumeVisible = true; dependencyAttemptGen = -1; dependencyNote = 'ファイルを表示すると、依存関係を読み込みます。'; return; }
+        if (lastCustomize?.source === 'preview' && isNewerRevision(lastCustomize.data?.revision, base.revision?.preview)) { resumeVisible = dependencyAttemptGen !== generation; dependencyNote = '設定の版が変わったため取得結果を表示しません。依存関係を更新してください。'; return; }
         dependencySnapshot = KTReleaseCustomize.createDependencySnapshot(base, KTDevBase.analyze);
         if (dependencySnapshot.status !== 'ready') dependencyNote = dependencySnapshot.reason || '依存関係を取得できませんでした。もう一度更新してください。';
       } catch (error) { if (request === dependencyRequest) dependencyNote = '依存関係を取得できませんでした。もう一度更新してください。'; }
-      finally { if (request === dependencyRequest) { dependencyBusy = false; renderDependencies(); } }
+      finally { if (request === dependencyRequest) { dependencyBusy = false; renderDependencies(); followEditorField(); if (resumeVisible) ensureDependencies(); } }
     }
     function followEditorField() {
       if (!dependencySnapshot || dependencyBusy || activeDocument?.kind !== 'js') return;
