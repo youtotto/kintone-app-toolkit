@@ -15569,6 +15569,7 @@
         #kt-toolkit .btn{font:inherit;line-height:1.4;padding:7px 12px;border:1px solid ${C.border};background:${C.bg};color:${C.text};border-radius:6px;cursor:pointer}
         #kt-toolkit .btn:hover:not(:disabled),#kt-toolkit .tab:hover:not(.active){background:${C.bgSub}}
         #kt-toolkit .btn:disabled{opacity:.5;cursor:default}
+        #kt-toolkit .btn.kt-compact-action{font-size:12px;line-height:1.4;min-height:32px;padding:6px 8px;white-space:nowrap}
         #kt-toolkit > .bar > .actions{flex:none}
         @media(max-width:760px){#kt-toolkit .bar{flex-wrap:wrap;gap:8px}#kt-toolkit .tabs{flex-basis:100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin}}
         /* Phase 20（実機）: kintone のページの CSS がフォーカスの枠を消すため、キーボード操作でいまの位置が分からなかった。Toolkit の操作部品にだけ明示する */
@@ -20032,7 +20033,6 @@
         .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-identity{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap}#kt-customize-edit-state{flex:none;max-width:100%;padding:3px 7px;border:1px solid var(--kt-line);border-radius:5px;font-size:11px;line-height:1.4;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-edit-state[data-state="edited"],#kt-customize-edit-state[data-state="new"]{color:var(--kt-accent);border-color:var(--kt-accent)}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
         .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
-        #kt-toolkit .kt-customize-actionbar .btn{font-size:12px;line-height:1.4;min-height:32px;padding:6px 8px;white-space:nowrap}
         #kt-customize-save-help{font-size:12px;margin-top:6px;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-save-help summary{cursor:pointer}#kt-customize-save-help dt{font-weight:600;margin:8px 0 2px;color:var(--kt-text)}#kt-customize-save-help dd{margin:0}
         #kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
         #kt-customize-manual-confirm{margin-top:10px;padding:10px;border:1px solid var(--kt-line);border-radius:6px;background:var(--kt-paper);font-size:12px}#kt-customize-manual-confirm p{white-space:pre-line;overflow-wrap:anywhere;margin:0 0 10px}#kt-customize-manual-confirm>div{display:flex;gap:6px;flex-wrap:wrap}
@@ -20065,8 +20065,8 @@
             <div id="kt-customize-width-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの幅" aria-orientation="vertical" aria-controls="kt-customize-editor" aria-valuemin="45" aria-valuemax="80" aria-valuenow="65" title="ドラッグまたは左右キーで幅を調整"></div>
             <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
               <section class="kt-customize-menu-section" aria-label="保存と反映">
-                <div class="kt-customize-actionbar"><div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn" title="編集中のコードをローカルに保存" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn" title="新規ファイルを作成">＋ 新規</button></div>
-                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" title="手元のコードを動作テスト環境に登録します。運用環境は変わりません。" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn" title="アプリの未反映の変更全体を運用環境へ反映します。未登録の手元のコードは含みません。">運用環境へ反映</button></div></div>
+                <div class="kt-customize-actionbar"><div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn kt-compact-action" title="編集中のコードをローカルに保存" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn kt-compact-action" title="新規ファイルを作成">＋ 新規</button></div>
+                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn kt-compact-action" title="手元のコードを動作テスト環境に登録します。運用環境は変わりません。" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn kt-compact-action" title="アプリの未反映の変更全体を運用環境へ反映します。未登録の手元のコードは含みません。">運用環境へ反映</button></div></div>
                 <details id="kt-customize-save-help"><summary>保存・反映の違い</summary><dl><dt>ローカルに保存</dt><dd>手元のコードをファイルとしてダウンロードします。kintoneは変更しません。</dd><dt>動作テスト環境に登録</dt><dd>エディターのコードを登録します。運用環境は変更しません。</dd><dt>運用環境へ反映</dt><dd>フォームなども含め、アプリの未反映の変更全体を反映します。未登録の手元のコードは含みません。</dd></dl></details>
                 <p id="kt-customize-manual-status" role="status" aria-live="polite"></p><button id="kt-customize-manual-reload" class="btn" hidden>登録済みコードを読み直す</button>
                 <section id="kt-customize-manual-confirm" aria-label="手元の編集と反映の確認" hidden><p data-manual-description></p><div><button class="btn" data-manual-cancel>キャンセル</button><button class="btn" data-manual-confirm>確認して実行</button></div></section>
@@ -22141,8 +22141,8 @@
           </div>
 
           <div class="kt-flex-fixed" style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button id="kt-plg-reload" class="btn" style="height:32px; padding:0 12px;">↻ 再取得</button>
-            <button id="kt-plg-deploy" class="btn" style="height:32px; padding:0 12px;" disabled>🚀 deploy</button>
+            <button id="kt-plg-reload" class="btn kt-compact-action">再取得</button>
+            <button id="kt-plg-deploy" class="btn kt-compact-action" title="フォームなども含め、アプリの未反映の変更全体を運用環境へ反映します。" disabled>運用環境へ反映</button>
           </div>
 
           <div id="kt-plg-status" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; background:var(--kt-soft); padding:10px 12px; font-size:12px;">
@@ -22152,13 +22152,13 @@
           <div class="kt-flex-fill" style="display:flex; gap:10px;">
             <div class="kt-flex-column" style="flex:1;">
               <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
-                <div style="font-weight:600;">本番</div><span class="kt-pill">prod</span>
+                <div style="font-weight:600;">運用環境</div>
               </div>
               <div id="kt-plg-prod" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
             </div>
             <div class="kt-flex-column" style="flex:1;">
               <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between; margin:6px 0;">
-                <div style="font-weight:600;">プレビュー</div><span class="kt-pill">preview</span>
+                <div style="font-weight:600;">動作テスト環境</div>
               </div>
               <div id="kt-plg-prev" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
             </div>
@@ -22178,11 +22178,11 @@
           <div class="kt-flex-fixed" style="display:flex; gap:8px; align-items:center;">
             <input id="kt-plg-search" placeholder="検索（名前/説明/ID）"
               style="flex:1; min-width:0; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:var(--kt-paper); color:var(--kt-text);" />
-            <button id="kt-plg-add" class="btn" style="height:32px; padding:0 12px;" disabled>＋ previewに追加</button>
+            <button id="kt-plg-add" class="btn kt-compact-action" title="選択したプラグインを動作テスト環境に追加します。運用環境は変わりません。" disabled>動作テスト環境に追加</button>
           </div>
 
           <div class="kt-muted kt-flex-fixed" style="font-size:12px;">
-            ※ previewへ追加後、deployで本番反映されます。
+            動作テスト環境で確認してから、［運用環境へ反映］でアプリの未反映の変更全体を反映します。
           </div>
 
           <div id="kt-plg-catalog" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
@@ -22248,7 +22248,7 @@
 
       $diff.innerHTML = `
       <div style="font-weight:700;">差分</div>
-      <div class="kt-muted" style="margin-top:6px;">本番のみ: ${onlyProd.length} / previewのみ: ${onlyPrev.length}</div>
+      <div class="kt-muted" style="margin-top:6px;">運用環境のみ: ${onlyProd.length} / 動作テスト環境のみ: ${onlyPrev.length}</div>
     `;
 
       $deploy.disabled = !(onlyProd.length || onlyPrev.length);
@@ -22328,8 +22328,8 @@
         pendingResume = false;
 
         $status.innerHTML = `
-        <div>本番: <b>${(prodRes?.plugins || []).length}</b> / preview: <b>${(prevRes?.plugins || []).length}</b></div>
-        <div class="kt-muted" style="margin-top:6px;">右の一覧から preview に追加 → deploy</div>
+        <div>運用環境: <b>${(prodRes?.plugins || []).length}</b> / 動作テスト環境: <b>${(prevRes?.plugins || []).length}</b></div>
+        <div class="kt-muted" style="margin-top:6px;">一覧で選んだプラグインを、まず動作テスト環境に追加します。</div>
       `;
 
         renderApp();
@@ -22356,9 +22356,9 @@
         // 既にpreviewにあるものは除外
         const prevIds = new Set((prevRes?.plugins || []).map(x => x.id || x).filter(Boolean));
         const toAdd = ids.filter(id => !prevIds.has(id));
-        if (!toAdd.length) { setLog('追加対象なし（全てpreviewに存在）'); return; }
+        if (!toAdd.length) { setLog('追加対象はありません（すべて動作テスト環境に追加済み）'); return; }
 
-        setLog(`previewに追加中... (${toAdd.length})`);
+        setLog(`動作テスト環境に追加しています（${toAdd.length}件）`);
         await api('/k/v1/preview/app/plugins.json', 'POST', { app, ids: toAdd });
         notifyChanged({ preview: true, production: false });
 
@@ -22369,7 +22369,7 @@
         renderApp();
         renderCatalog($search.value || '');
 
-        setLog(`previewに追加しました: ${toAdd.length}件`);
+        setLog(`動作テスト環境に追加しました: ${toAdd.length}件`);
       } catch (e) {
         console.error(e);
         setLog(`NG: ${e?.message || e}`);
@@ -22383,18 +22383,18 @@
       const btn = ev.currentTarget;
       btn.disabled = true;
       try {
-        setLog('deploy開始...');
+        setLog('運用環境へ反映しています。');
         await api('/k/v1/preview/app/deploy.json', 'POST', { apps: [{ app, revision: -1 }], revert: false });
         notifyChanged({ preview: true, production: true });   // deploy を受け付けたら運用環境は変わる（完了待ちの失敗・時間切れでも古いとする）
         await waitDeploy(app);
 
         await reload();
-        setLog('✅ deploy完了');
-        alert('✅ deploy完了（preview→本番）');
+        setLog('運用環境への反映が完了しました。');
+        alert('運用環境への反映が完了しました。');
       } catch (e) {
         console.error(e);
         setLog(`NG: ${e?.message || e}`);
-        alert(`❌ deploy失敗: ${e?.message || e}`);
+        alert(`運用環境への反映に失敗しました: ${e?.message || e}`);
       } finally {
         // reloadで差分判定されるのでここでは触らない
       }

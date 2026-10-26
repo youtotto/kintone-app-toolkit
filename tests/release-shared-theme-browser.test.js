@@ -36,7 +36,7 @@ function bundle() {
     source = source.slice(0, start) + fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC, 'utf8') + '\n' + source.slice(end);
   }
   const end = source.lastIndexOf('})();'); assert.ok(end >= 0);
-  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,renderPlugins,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,renderPlugins,renderCustomize,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
 }
 async function inspect(page, selectors) {
   return page.evaluate(selectors => {
@@ -58,6 +58,25 @@ async function inspect(page, selectors) {
     const bounds = Object.fromEntries(['#kt-toolkit', '#kt-toolkit > .bar', '#kt-toolkit > .body', '.ktr-workspace', '.ktr-layout', '.ktr-conversation', '.ktr-current', '#kt-release-input', 'dialog[open]'].map(selector => [selector, document.querySelector(selector)]).filter(([, el]) => el?.getClientRects().length).map(([selector, el]) => [selector, box(el)]));
     return { samples, bounds, width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyDirectDialog: document.querySelector('dialog[open]')?.parentElement === document.body };
   }, selectors);
+}
+async function actionAppearance(page, selector) {
+  return page.locator(selector).evaluate(el => {
+    const style=getComputedStyle(el), keys=['fontFamily','fontSize','fontWeight','lineHeight','padding','borderRadius','borderColor','borderWidth','color','backgroundColor','height','minHeight','opacity','cursor','filter','outlineStyle','outlineWidth','outlineColor','outlineOffset'];
+    return { disabled:el.disabled, ...Object.fromEntries(keys.map(key=>[key,style[key]])) };
+  });
+}
+async function compareActionState(page, kind, pluginSelector, customizeSelector) {
+  const samples=[];
+  for(const [tab,selector] of [['plugins',pluginSelector],['customize',customizeSelector]]) {
+    await page.locator('#tab-'+tab).click();
+    await page.mouse.move(0,0);
+    const button=page.locator(selector);
+    if(kind==='hover') await button.hover();
+    if(kind==='focus') { await button.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab'); assert.equal(await button.evaluate(el=>el.matches(':focus-visible')),true); }
+    samples.push(await actionAppearance(page,selector));
+  }
+  assert.deepEqual(samples[0],samples[1],'PluginsとCustomizeの'+kind+'の操作ボタンを揃える');
+  return samples[0];
 }
 const normalSelectors = ['#kt-toolkit', '#tab-fields', '#tab-ai', '#fi-copy', '#fi-search', '#fi-type', '#view-fields th', '#view-fields td'];
 const aiSelectors = ['#kt-toolkit', '#tab-ai', '.ktr-workspace', '.ktr-environment', '.ktr-speaker', '.ktr-message p', '.ktr-stage-header', '.ktr-explanation th', '.ktr-explanation td', '.ktr-document-tabs button[aria-pressed="true"]', '.ktr-workspace button:not(:disabled)', '#kt-release-input'];
@@ -165,6 +184,15 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.locator('dialog[open] [data-close]').click();
         assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'dialogを閉じても入力draftを保持');
 
+        // Actual Customize buttons, without loading code or settings. Monaco only supplies its local editor surface.
+        await page.evaluate(async()=>{
+          window.loadMonaco=async()=>({_kintoneFieldsReady:true,editor:{create(host){
+            const area=document.createElement('textarea'); area.style.cssText='width:100%;height:100%;box-sizing:border-box'; host.appendChild(area);
+            const dispose=()=>({dispose(){}});
+            return {getValue:()=>area.value,getModel:()=>null,onDidChangeModelContent:dispose,onDidChangeCursorSelection:dispose,layout(){},updateOptions(){},dispose(){area.remove();}};
+          }}});
+          await ThemeTest.renderCustomize(shell,{fields:{}},'310',{autoLoad:false});
+        });
         // Render the actual Plugins tab with read-only responses; never register or deploy.
         const outsideBefore = await page.evaluate(() => {
           const probe = document.createElement('div'); probe.id = 'host-theme-probe'; probe.style.cssText = 'position:absolute;left:-10000px';
@@ -209,8 +237,22 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
           if(sample.width<=0||sample.height<=0) pluginFailures.push(sample.selector+' の領域が潰れている');
         }
         assert.ok(plugins.documentWidth<=plugins.width+1,'Pluginsがページを横にはみ出させない');
-        assert.match(await page.locator('#kt-plg-status').innerText(),/本番: 1.*preview: 2/s);
-        assert.match(await page.locator('#kt-plg-diff').innerText(),/本番のみ: 0.*previewのみ: 1/s);
+        const actionStates={};
+        for(const kind of ['normal','hover','focus']) actionStates[kind]=await compareActionState(page,kind,'#kt-plg-deploy','#kt-customize-deploy');
+        actionStates.disabled=await compareActionState(page,'disabled','#kt-plg-add','#kt-customize-register');
+        assert.equal(actionStates.normal.disabled,false);assert.equal(actionStates.disabled.disabled,true);
+        assert.equal(actionStates.normal.fontSize,'12px');assert.equal(actionStates.normal.minHeight,'32px');
+        assert.match(await page.locator('#kt-plg-status').innerText(),/運用環境: 1.*動作テスト環境: 2/s);
+        assert.match(await page.locator('#kt-plg-diff').innerText(),/運用環境のみ: 0.*動作テスト環境のみ: 1/s);
+        assert.equal(await page.locator('#kt-plg-deploy').innerText(),'運用環境へ反映');
+        assert.equal(await page.locator('#kt-plg-add').innerText(),'動作テスト環境に追加');
+        assert.equal(await page.locator('#kt-plg-reload').innerText(),'再取得');
+        assert.match(await page.locator('#kt-plg-deploy').getAttribute('title'),/未反映の変更全体/);
+        await page.locator('#tab-customize').click();
+        assert.equal(await page.locator('.kt-customize-actionbar').evaluate(el=>[...el.querySelectorAll('button')].every(button=>button.getBoundingClientRect().right<=el.getBoundingClientRect().right+1&&button.scrollWidth<=button.clientWidth+1)),true,'Customizeの長い操作名を切らない');
+        await page.locator('#tab-plugins').click();
+        for(const selector of ['#kt-plg-reload','#kt-plg-deploy','#kt-plg-add']) assert.equal(await page.locator(selector).evaluate(el=>el.scrollWidth<=el.clientWidth+1&&el.getBoundingClientRect().right<=document.querySelector('#kt-toolkit').getBoundingClientRect().right+1),true,'Pluginsの長い操作名を切らない');
+        await page.mouse.move(0,0);
         // Searching and choosing a row remain local UI actions, not registrations.
         await page.locator('#kt-plg-search').fill('一覧サポート');
         assert.equal(await page.locator('#kt-plg-catalog .kt-row').count(),1);
@@ -240,7 +282,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.locator('#tab-ai').click();
         const aiAfter=await inspect(page,aiSelectors);
         assert.deepEqual(aiAfter.samples,ai.samples,'Pluginsを開いてもAI Assistantの表示を変えない');
-        fs.writeFileSync(path.join(output,label+'-plugins-measurements.json'),JSON.stringify({plugins,hovered,pluginFailures},null,2));
+        fs.writeFileSync(path.join(output,label+'-plugins-measurements.json'),JSON.stringify({plugins,hovered,pluginFailures,actionStates},null,2));
         assert.deepEqual(pluginFailures,[]);
 
         const failures = audit(normal, ai, dialog, scene);
