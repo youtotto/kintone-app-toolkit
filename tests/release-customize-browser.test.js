@@ -96,11 +96,10 @@ async function dragBy(page,handle,dx,dy){
   const x=box.x+box.width/2,y=box.y+box.height/2;
   await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+dx,y+dy,{steps:6});await page.mouse.up();
 }
-const editorCssHeight=page=>page.locator('#kt-customize-editor').evaluate(el=>parseFloat(getComputedStyle(el).height));
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu')};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu'),home:rect('#kt-customize-workspace')};
 });}
 function assertHorizontal(g,label){
   assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
@@ -146,7 +145,9 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.ok(initialShare>=.60&&initialShare<=.70,'左は約65%、右は参照情報を読める幅にする');
         assert.ok(initialGeometry.menu.left>=initialGeometry.editor.right+6,'Menuはエディターの右に置く');
         assert.ok(initialGeometry.menu.width>=280,'Menuの操作と参照情報に幅を残す');
-        assert.ok(initialGeometry.editor.height>=260&&initialGeometry.editor.height<600,'短いコードの編集領域が画面いっぱいに伸びない');
+        assert.ok(initialGeometry.editor.height>600,'短いコードでも利用可能な縦領域を使う');
+        assert.ok(Math.abs(initialGeometry.editor.bottom-initialGeometry.home.bottom)<=3,'エディターはCustomize領域の下端まで伸びる');
+        assert.equal(await page.locator('#kt-customize-height-resize').count(),0,'高さ調整は不要で幅調整だけを残す');
         await page.screenshot({path:path.join(out,colorScheme+'-customize-menu.png'),fullPage:true});
         assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
         assert.equal(await page.locator('.kt-customize-editor-heading #kt-customize-consult').count(),1,'相談はエディターの見出しに置く');
@@ -174,13 +175,10 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.deepEqual(await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]})),referenceCalls,'参照情報の切り替えでAI・ダウンロード・新しい解析を呼ばない');
         const stateBeforeResize=await page.evaluate(()=>JSON.stringify(work.controller.getState()));
         await page.evaluate(()=>{window.resizeEditor=document.querySelector('#kt-customize-editor textarea[data-test-editor]');});
-        const widthHandle=page.locator('#kt-customize-width-resize'),heightHandle=page.locator('#kt-customize-height-resize');
+        const widthHandle=page.locator('#kt-customize-width-resize');
         assert.equal(await widthHandle.getAttribute('role'),'separator');assert.equal(await widthHandle.getAttribute('aria-orientation'),'vertical');
-        assert.equal(await heightHandle.getAttribute('role'),'separator');assert.equal(await heightHandle.getAttribute('aria-orientation'),'horizontal');
         assert.equal(await widthHandle.getAttribute('aria-valuemin'),'45');assert.equal(await widthHandle.getAttribute('aria-valuemax'),'80');
-        assert.equal(await heightHandle.getAttribute('aria-valuemin'),'220');assert.equal(await heightHandle.getAttribute('aria-valuemax'),'1000');
         assert.ok(Number(await widthHandle.getAttribute('tabindex'))>=0,'幅調整をキーボードでも選べる');
-        assert.ok(Number(await heightHandle.getAttribute('tabindex'))>=0,'高さ調整をキーボードでも選べる');
         const startWidth=Number(await widthHandle.getAttribute('aria-valuenow'));
         await widthHandle.press('ArrowRight');assert.equal(Number(await widthHandle.getAttribute('aria-valuenow')),startWidth+2);
         await widthHandle.press('ArrowLeft');assert.equal(Number(await widthHandle.getAttribute('aria-valuenow')),startWidth);
@@ -190,14 +188,18 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await widthHandle.press('Home');await widthHandle.press('ArrowLeft');assert.equal(await widthHandle.getAttribute('aria-valuenow'),'45','幅の下限を越えない');
         for(let i=0;i<10;i++)await widthHandle.press('ArrowRight');
         const widthReset=await geometry(page);assert.ok(Math.abs(widthReset.editor.width-initialGeometry.editor.width)<=3,'65%へ戻せる');
-        const startHeight=await editorCssHeight(page);
-        await heightHandle.press('ArrowUp');assert.ok(Math.abs((await editorCssHeight(page))-(startHeight-20))<=2,'高さはキーで縮められる');
-        await heightHandle.press('ArrowDown');assert.ok(Math.abs((await editorCssHeight(page))-startHeight)<=2);
-        await dragBy(page,heightHandle,0,66);assert.ok((await editorCssHeight(page))>startHeight+40,'文字倍率があってもドラッグで高さが増える');
-        await heightHandle.press('End');await heightHandle.press('ArrowDown');assert.equal(await heightHandle.getAttribute('aria-valuenow'),'1000','高さの上限を越えない');
-        await heightHandle.press('Home');await heightHandle.press('ArrowUp');assert.equal(await heightHandle.getAttribute('aria-valuenow'),'220','高さの下限を越えない');
-        for(let i=0;i<11;i++)await heightHandle.press('ArrowDown');
-        assert.ok(Math.abs((await editorCssHeight(page))-440)<=2);
+        await page.setViewportSize({width:1440,height:720});
+        const shorterGeometry=await geometry(page);
+        assert.ok(shorterGeometry.editor.height<initialGeometry.editor.height-100,'画面が低くなったらエディターも追従する');
+        assert.ok(Math.abs(shorterGeometry.editor.bottom-shorterGeometry.home.bottom)<=3,'低い画面でも下端まで使う');
+        await page.locator('#kt-full').click();
+        const panelGeometry=await geometry(page);
+        assert.ok(Math.abs(panelGeometry.editor.bottom-panelGeometry.home.bottom)<=3,'通常パネルでも利用可能な高さを使う');
+        await page.locator('#kt-full').click();
+        await page.setViewportSize({width:1440,height:960});
+        await page.waitForFunction(()=>Math.abs(document.querySelector('#kt-toolkit').getBoundingClientRect().height-innerHeight)<=1);
+        const restoredGeometry=await geometry(page);
+        assert.ok(Math.abs(restoredGeometry.editor.height-initialGeometry.editor.height)<=3,'元の画面サイズに戻ると高さも戻る');
         assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===resizeEditor),true,'サイズ変更でエディターを作り直さない');
         assert.equal(await editor(page).inputValue(),'// PC original\nconst memo = 1;\n');
         assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeResize,'サイズ変更は会話・採用・呼び出しを変えない');
@@ -425,7 +427,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('#view-customize #kt-customize-code-pane').count(),1,'Customizeへ戻るとコードを元の場所へ戻す');
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0);
         assert.equal(await widthHandle.isVisible(),true,'Customizeへ戻すと幅調整を戻す');
-        assert.ok(Math.abs((await editorCssHeight(page))-440)<=2,'表示場所を変えても調整した高さを保つ');
+        const returnedGeometry=await geometry(page);
+        assert.ok(Math.abs(returnedGeometry.editor.bottom-returnedGeometry.home.bottom)<=3,'AI Assistantから戻ると利用可能高さへ戻る');
         assert.equal(await page.locator('[data-customize-mode="comparison"]').isVisible(),false,'Customizeへ戻るとAI差分の操作を隠す');
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),false,'CustomizeへAI差分を持ち出さない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n','差分を隠しても手編集を保持する');
@@ -513,12 +516,10 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         const narrowCustomize=await geometry(page);
         assert.ok(narrowCustomize.editor.top>=narrowCustomize.menu.bottom,'狭い表示ではMenuとエディターを縦に並べる');
         assert.equal(await widthHandle.isVisible(),false,'狭い表示は幅調整なしで縦に並べる');
-        assert.equal(await heightHandle.isVisible(),true,'狭い表示でも高さを調整できる');
-        await heightHandle.press('ArrowUp');assert.ok(Math.abs((await editorCssHeight(page))-420)<=2);
-        await heightHandle.press('ArrowDown');assert.ok(Math.abs((await editorCssHeight(page))-440)<=2);
         assert.equal(await page.locator('.kt-customize-menu').evaluate(el=>el.scrollHeight<=el.clientHeight+1),true,'Menu内の説明と最後の操作を枠内に収める');
         assert.ok((await page.locator('#kt-customize-file-details').boundingBox()).y+(await page.locator('#kt-customize-file-details').boundingBox()).height<=narrowCustomize.menu.bottom,'末尾の情報をエディターへ重ねない');
         assert.ok(narrowCustomize.editor.width>=350,'狭い表示でもエディター幅を確保する');
+        assert.ok(narrowCustomize.editor.height>=220,'Menuが上に並ぶ狭い表示でもエディターを潰さない');
         assert.ok(narrowCustomize.documentWidth<=narrowCustomize.viewport+1,'CustomizeのMenuで横はみ出しを増やさない');
         assert.equal(await page.locator('.kt-customize-actionbar').evaluate(el=>[...el.querySelectorAll('button')].every(button=>button.getBoundingClientRect().right<=el.getBoundingClientRect().right+1&&button.scrollWidth<=button.clientWidth+1)),true,'狭幅でも操作は折り返し、環境を示す名前を切らない');
         assert.equal(await page.locator('#kt-customize-picker').evaluate(el=>[...el.querySelectorAll('select,button')].every(control=>control.getBoundingClientRect().right<=el.getBoundingClientRect().right+1)),true,'種類とファイル選択は狭幅でもはみ出さない');

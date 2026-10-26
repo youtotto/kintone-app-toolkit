@@ -1,5 +1,5 @@
 'use strict';
-// Real mountRoot + Fields + release workspace. Every request is served locally or aborted.
+// Real mountRoot + Fields + Plugins + release workspace. Every request is served locally or aborted.
 // KT_SRC and KT_RELEASE_VIEW_SRC allow the same assertions against a previous build.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
@@ -36,7 +36,7 @@ function bundle() {
     source = source.slice(0, start) + fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC, 'utf8') + '\n' + source.slice(end);
   }
   const end = source.lastIndexOf('})();'); assert.ok(end >= 0);
-  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,renderPlugins,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
 }
 async function inspect(page, selectors) {
   return page.evaluate(selectors => {
@@ -164,6 +164,85 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.screenshot({ path: path.join(output, label + '-dialog.png'), fullPage: true });
         await page.locator('dialog[open] [data-close]').click();
         assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'dialogを閉じても入力draftを保持');
+
+        // Render the actual Plugins tab with read-only responses; never register or deploy.
+        const outsideBefore = await page.evaluate(() => {
+          const probe = document.createElement('div'); probe.id = 'host-theme-probe'; probe.style.cssText = 'position:absolute;left:-10000px';
+          probe.innerHTML = '<button class="btn">Host button</button><div class="kt-row">Host row</div><span class="kt-pill">Host tag</span><span class="kt-muted">Host note</span><span class="kt-danger">Host error</span>';
+          document.body.appendChild(probe);
+          window.pluginHostStyle = () => [...probe.children].map(el => { const c=getComputedStyle(el); return { color:c.color,background:c.backgroundColor,border:c.border,width:c.width,padding:c.padding,opacity:c.opacity,lineHeight:c.lineHeight }; });
+          return pluginHostStyle();
+        });
+        await page.evaluate(async () => {
+          window.pluginReads = []; window.pluginWrites = [];
+          const api = async (url, method, params) => {
+            if (method !== 'GET') { pluginWrites.push({url,method}); throw Error('Plugin write forbidden'); }
+            pluginReads.push(url);
+            if (!['/k/v1/app/plugins.json','/k/v1/preview/app/plugins.json'].includes(url)) throw Error('Unexpected plugin read '+url);
+            return {plugins: (url.includes('/preview/') ? ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'] : ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']).map(id=>({id}))};
+          };
+          api.url = url => url;
+          window.kintone = {api, app:{getId:()=>310}, system:{getPermissions:async()=>true}};
+          await ThemeTest.renderPlugins(shell,{appId:'310',plugins:{plugins:[
+            {id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',name:'入力サポート',description:'入力内容を確認するプラグイン',version:'1.0'},
+            {id:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',name:'確認サポート',description:'確認する対象を案内するプラグイン',version:'2.0'},
+            {id:'cccccccccccccccccccccccccccccccc',name:'一覧サポート',description:'一覧の確認を支援するプラグイン',version:'1.1'}
+          ]}});
+          shell.ktTabs.switchTab('plugins');
+        });
+        const pluginSelectors = ['#kt-toolkit','#kt-plg-reload','#kt-plg-deploy','#kt-plg-add','#kt-plg-search','#kt-plg-status','#kt-plg-log','#kt-plg-diff','#kt-plg-prod','#kt-plg-prev','#kt-plg-catalog','#kt-plugins .kt-row','#kt-plugins .kt-pill','#kt-plugins .kt-muted'];
+        const plugins = await inspect(page, pluginSelectors);
+        const pluginPalette = await page.evaluate(() => {
+          const shellStyle=getComputedStyle(document.querySelector('#kt-toolkit'));
+          const probe=document.createElement('div'); probe.style.background=shellStyle.getPropertyValue('--kt-soft'); document.body.appendChild(probe);
+          const soft=getComputedStyle(probe).backgroundColor; probe.remove(); return {soft};
+        });
+        await page.screenshot({ path:path.join(output,label+'-plugins.png'), fullPage:true });
+        const pluginFailures = [];
+        for(const selector of ['#kt-plg-status','#kt-plg-log','#kt-plg-diff']) {
+          assert.equal(plugins.samples.find(s=>s.selector===selector).background,pluginPalette.soft,selector+'は共通テーマの補助背景');
+        }
+        const fieldsButton=normal.samples.find(s=>s.selector==='#fi-copy'),pluginButton=plugins.samples.find(s=>s.selector==='#kt-plg-reload');
+        for(const key of ['color','background','font']) assert.equal(pluginButton[key],fieldsButton[key],'Pluginsのボタンを通常タブと揃える: '+key);
+        for(const sample of plugins.samples) {
+          if(!sample.disabled && sample.contrast<4.5) pluginFailures.push(sample.selector+' '+sample.text+' のコントラスト '+sample.contrast.toFixed(2));
+          if(sample.width<=0||sample.height<=0) pluginFailures.push(sample.selector+' の領域が潰れている');
+        }
+        assert.ok(plugins.documentWidth<=plugins.width+1,'Pluginsがページを横にはみ出させない');
+        assert.match(await page.locator('#kt-plg-status').innerText(),/本番: 1.*preview: 2/s);
+        assert.match(await page.locator('#kt-plg-diff').innerText(),/本番のみ: 0.*previewのみ: 1/s);
+        // Searching and choosing a row remain local UI actions, not registrations.
+        await page.locator('#kt-plg-search').fill('一覧サポート');
+        assert.equal(await page.locator('#kt-plg-catalog .kt-row').count(),1);
+        await page.locator('#kt-plg-catalog .kt-row').hover();
+        const hovered=await inspect(page,['#kt-plg-catalog .kt-row']);
+        assert.equal(hovered.samples[0].background,pluginPalette.soft,'hoverも共通テーマの補助背景');
+        assert.ok(hovered.samples[0].contrast>=4.5,'hover時も読める');
+        await page.locator('#kt-plg-catalog input[type="checkbox"]').check();
+        assert.equal(await page.locator('#kt-plg-add').isEnabled(),true,'選択により追加ボタンを有効にできる');
+        assert.deepEqual(await page.evaluate(()=>pluginWrites),[],'選択だけでは登録・deployしない');
+        assert.deepEqual(await page.evaluate(()=>pluginReads),['/k/v1/app/plugins.json','/k/v1/preview/app/plugins.json'],'検索・選択で再取得しない');
+        assert.deepEqual(await page.evaluate(()=>pluginHostStyle()),outsideBefore,'PluginsのCSSをホスト側の同名classへ漏らさない');
+
+        if(scene.name==='full-1440') {
+          await page.evaluate(async()=>{kintone.system.getPermissions=async()=>false;await ThemeTest.renderPlugins(shell,{appId:'310'});});
+          assert.match(await page.locator('#view-plugins').innerText(),/システム管理者/);
+          assert.equal(await page.locator('#view-plugins button').count(),0,'権限なしでは登録・反映の操作を出さない');
+          const deniedView=await inspect(page,['#view-plugins > div','#view-plugins > div > div']);
+          assert.ok(deniedView.samples.every(s=>s.contrast>=4.5),'権限なしの説明も読める');
+          assert.deepEqual(await page.evaluate(()=>pluginReads),['/k/v1/app/plugins.json','/k/v1/preview/app/plugins.json'],'権限なしでは追加取得しない');
+          await page.screenshot({path:path.join(output,label+'-plugins-denied.png'),fullPage:true});
+        }
+
+        await page.locator('#tab-fields').click();
+        const fieldsAfter=await inspect(page,normalSelectors);
+        assert.deepEqual(fieldsAfter.samples,normal.samples,'Pluginsを開いてもFieldsの表示を変えない');
+        await page.locator('#tab-ai').click();
+        const aiAfter=await inspect(page,aiSelectors);
+        assert.deepEqual(aiAfter.samples,ai.samples,'Pluginsを開いてもAI Assistantの表示を変えない');
+        fs.writeFileSync(path.join(output,label+'-plugins-measurements.json'),JSON.stringify({plugins,hovered,pluginFailures},null,2));
+        assert.deepEqual(pluginFailures,[]);
+
         const failures = audit(normal, ai, dialog, scene);
         if ((await page.locator('#tab-ai').innerText()).trim() !== 'AI Assistant') failures.unshift('タブ表示名は AI Assistant');
         fs.writeFileSync(path.join(output, label + '-measurements.json'), JSON.stringify({ scene, colorScheme, normal, ai, dialog, failures }, null, 2));

@@ -19987,13 +19987,12 @@
       <style>
         #kt-customize-workspace{display:flex;flex-direction:column;height:100%;min-height:0;overflow:auto;container:kt-customize-home / inline-size}
         #kt-customize-code-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;gap:10px}
-        #kt-customize{display:grid;grid-template-columns:minmax(320px,min(var(--kt-editor-share,65%),calc(100% - 300px))) 20px minmax(280px,1fr);align-items:start;min-width:0;min-height:0;overflow:visible}
-        .kt-customize-editor-pane{display:flex;flex-direction:column;width:100%;min-width:0;min-height:0;gap:8px}
+        #kt-customize{display:grid;flex:1;grid-template-columns:minmax(320px,min(var(--kt-editor-share,65%),calc(100% - 300px))) 20px minmax(280px,1fr);grid-template-rows:minmax(0,1fr);align-items:stretch;min-width:0;min-height:0;overflow:visible}
+        .kt-customize-editor-pane{display:flex;flex:1;flex-direction:column;width:100%;min-width:0;min-height:0;gap:8px}
         #kt-customize-code-pane [hidden]{display:none!important}
         #kt-customize-comparison{min-height:420px;min-width:0;padding-top:12px;border-top:1px solid var(--kt-line)}
         .kt-customize-resize{position:relative;touch-action:none;user-select:none;outline-offset:-3px}.kt-customize-resize:before{content:"";position:absolute;border-radius:3px;background:var(--kt-line)}.kt-customize-resize:hover:before,.kt-customize-resize:focus-visible:before{background:var(--kt-accent)}.kt-customize-resize:focus-visible{outline:2px solid var(--kt-accent)}
         #kt-customize-width-resize{align-self:stretch;min-height:160px;cursor:col-resize}#kt-customize-width-resize:before{width:3px;left:8px;top:12px;bottom:12px}
-        #kt-customize-height-resize{height:16px;flex:none;cursor:row-resize}#kt-customize-height-resize:before{height:3px;left:calc(50% - 28px);right:calc(50% - 28px);top:6px}
         #kt-customize-reference-info{font-size:12px;flex:none;overflow-wrap:anywhere;border-top:1px solid var(--kt-line);padding-top:12px}#kt-customize-reference-info summary{font-weight:600;cursor:pointer}#kt-customize-reference-info h4{font-size:12px;margin:12px 0 4px}#kt-customize-reference-info p{margin:6px 0;color:var(--kt-muted)}#kt-customize-reference-info ul{padding-left:20px;margin:4px 0;max-height:230px;overflow:auto}#kt-customize-reference-info li{margin:5px 0}#kt-customize-reference-info code{font-size:11px;color:var(--kt-muted)}
         #kt-customize-dependencies{font-size:12px;overflow-wrap:anywhere}#kt-customize-dependencies header{display:flex;flex-wrap:wrap;align-items:center;gap:8px}#kt-customize-dependencies header h3{flex:1;margin:0}#kt-customize-dependencies :is(input,select){width:100%;min-width:0;box-sizing:border-box;padding:7px;margin:4px 0;font:inherit;color:var(--kt-text);background:var(--kt-paper);border:1px solid var(--kt-line);border-radius:6px}#kt-customize-dependency-status{color:var(--kt-muted);margin:8px 0}#kt-customize-dependency-content h4{margin:10px 0 5px}#kt-customize-dependency-content ul{padding-left:18px;max-height:230px;overflow:auto}#kt-customize-dependency-content li{margin:6px 0}#kt-customize-dependency-content pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
         .kt-customize-dependency-kinds{display:flex;gap:2px}#kt-toolkit .kt-customize-dependency-kinds .btn{font-size:12px;line-height:1.4;padding:4px 6px;min-height:28px}#kt-toolkit .kt-customize-dependency-kinds .btn[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);background:var(--kt-paper)}#kt-toolkit #kt-customize-dependency-refresh{font-size:12px;padding:4px 7px;min-height:28px}
@@ -20012,7 +20011,7 @@
         .ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
-        .kt-customize-menu{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
+        .kt-customize-menu{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:stretch;background:var(--kt-soft)}
         .kt-customize-menu h3{font-size:13px;margin:0 0 8px}.kt-customize-menu-section{min-width:0}.kt-customize-menu-section+.kt-customize-menu-section{border-top:1px solid var(--kt-line);padding-top:12px}.kt-customize-primary{width:100%;font-weight:600!important;color:var(--kt-accent)!important;border-color:var(--kt-accent)!important}.kt-customize-menu .kt-customize-picker{display:flex;gap:6px;flex-wrap:wrap}
         .kt-customize-menu .kt-customize-files{border-top:0;padding-top:0}.kt-customize-menu #kt-customize-source{flex:1 1 140px;width:140px}.kt-customize-file-picker{display:flex;align-items:center;gap:4px;flex:2 1 150px;min-width:0}.kt-customize-menu #kt-customize-file{flex:1;min-width:0;width:100%}
         #kt-toolkit .kt-customize-menu #kt-customize-picker .btn{font-size:12px;line-height:1.4;height:34px;padding:6px 8px}.kt-customize-menu #kt-customize-refresh{width:34px;flex:none}
@@ -20020,7 +20019,8 @@
         .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-modes{display:flex}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-menu-section{border:0;padding:0}.ktr-code-slot .kt-customize-primary{width:auto}.ktr-code-slot .kt-customize-editor-pane{order:1}
         .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
         @container kt-customize-home (max-width:899px){#kt-customize{display:flex;flex-direction:column;gap:12px}.kt-customize-menu{order:-1;align-self:stretch;overflow:visible;flex:none}#kt-customize-width-resize{display:none}}
-        #kt-customize-editor{flex:none;height:var(--kt-editor-height,clamp(260px,45dvh,480px));min-height:220px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
+        #kt-customize-editor{flex:1;min-height:220px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
+        .ktr-code-slot #kt-customize-editor{flex:none;height:clamp(260px,45dvh,480px)}
         #kt-customize-file-details{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
         #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
       </style>
@@ -20032,7 +20032,6 @@
               <header class="kt-customize-editor-heading"><div id="kt-customize-meta"></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
               <p id="kt-customize-editor-note">相談には動作テスト環境のコードを使います。手元の編集は送信しません。</p>
               <div id="kt-customize-editor"></div>
-              <div id="kt-customize-height-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの高さ" aria-orientation="horizontal" aria-controls="kt-customize-editor" aria-valuemin="220" aria-valuemax="1000" aria-valuenow="440" title="ドラッグまたは上下キーで高さを調整"></div>
               <div id="kt-customize-comparison" hidden></div>
             </div>
             <div id="kt-customize-width-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの幅" aria-orientation="vertical" aria-controls="kt-customize-editor" aria-valuemin="45" aria-valuemax="80" aria-valuenow="65" title="ドラッグまたは左右キーで幅を調整"></div>
@@ -20362,30 +20361,27 @@
 
 
     // Layout controls change only CSS; the editor, drafts and AI state stay in place.
-    function wireResize(handle, axis, min, max, step, read, write) {
+    function wireResize(handle, min, max, step, read, write) {
       let drag = null;
       const apply = value => { const next = Math.max(min, Math.min(max, Math.round(value))); write(next); handle.setAttribute('aria-valuenow', String(next)); layoutCode(); };
       handle.addEventListener('keydown', event => {
-        const minus = axis === 'x' ? 'ArrowLeft' : 'ArrowUp', plus = axis === 'x' ? 'ArrowRight' : 'ArrowDown';
+        const minus = 'ArrowLeft', plus = 'ArrowRight';
         if (![minus, plus, 'Home', 'End'].includes(event.key)) return;
         event.preventDefault(); apply(event.key === 'Home' ? min : event.key === 'End' ? max : read() + (event.key === plus ? step : -step));
       });
       handle.addEventListener('pointerdown', event => {
         if (event.button !== 0) return;
-        const box = $('#kt-customize').getBoundingClientRect(), height = $editorHost.getBoundingClientRect().height;
-        drag = { id: event.pointerId, start: axis === 'x' ? event.clientX : event.clientY, value: read(), scale: axis === 'x' ? box.width / 100 : height / (parseFloat(getComputedStyle($editorHost).height) || height) };
+        const box = $('#kt-customize').getBoundingClientRect();
+        drag = { id: event.pointerId, start: event.clientX, value: read(), scale: box.width / 100 };
         handle.setPointerCapture(event.pointerId); handle.focus(); event.preventDefault();
       });
-      handle.addEventListener('pointermove', event => { if (drag?.id === event.pointerId) apply(drag.value + ((axis === 'x' ? event.clientX : event.clientY) - drag.start) / (drag.scale || 1)); });
+      handle.addEventListener('pointermove', event => { if (drag?.id === event.pointerId) apply(drag.value + (event.clientX - drag.start) / (drag.scale || 1)); });
       handle.addEventListener('pointerup', event => { if (drag?.id === event.pointerId) { drag = null; handle.releasePointerCapture(event.pointerId); } });
       handle.addEventListener('lostpointercapture', () => { drag = null; });
       handle.addEventListener('pointercancel', () => { drag = null; });
     }
     let editorShare = 65;
-    wireResize($('#kt-customize-width-resize'), 'x', 45, 80, 2, () => editorShare, value => { editorShare = value; codePane.style.setProperty('--kt-editor-share', value + '%'); });
-    wireResize($('#kt-customize-height-resize'), 'y', 220, 1000, 20, () => parseFloat(getComputedStyle($editorHost).height), value => codePane.style.setProperty('--kt-editor-height', value + 'px'));
-    const heightObserver = new ResizeObserver(() => { const height = parseFloat(getComputedStyle($editorHost).height); if (height > 0) $('#kt-customize-height-resize').setAttribute('aria-valuenow', String(Math.round(height))); });
-    heightObserver.observe($editorHost);
+    wireResize($('#kt-customize-width-resize'), 45, 80, 2, () => editorShare, value => { editorShare = value; codePane.style.setProperty('--kt-editor-share', value + '%'); });
     // Load registered-source dependencies once when a JavaScript file opens. Cursor lookup reuses that snapshot.
     const $dependencyRefresh = $('#kt-customize-dependency-refresh'), $fieldSearch = $('#kt-customize-field-search'), $fieldChoice = $('#kt-customize-field');
     let dependencySnapshot = null, dependencyRequest = 0, dependencyAttemptGen = -1, dependencyBusy = false, dependencyNote = '', dependencyCode = '', dependencyKind = 'field', dependencyEvent = '';
@@ -20487,7 +20483,7 @@
     }
     $('#kt-customize-reference-info [data-open-deps]').addEventListener('click', () => root.ktTabs?.switchTab?.('deps'));
     const unsubscribeScan = KTScan.onChange(renderReferenceInfo);
-    view._ktCustomizeDispose = () => { dependencyRequest += 1; unsubscribeScan(); manualEditListener.dispose(); manualStateListener?.(); heightObserver.disconnect(); editorFieldListeners.forEach(listener => listener.dispose()); };
+    view._ktCustomizeDispose = () => { dependencyRequest += 1; unsubscribeScan(); manualEditListener.dispose(); manualStateListener?.(); editorFieldListeners.forEach(listener => listener.dispose()); };
     renderReferenceInfo();
 
     // Manual edits use their own explicit confirmations; AI-created changes keep the Assistant approval path.
@@ -22038,9 +22034,9 @@
     const ok = await kintone.system.getPermissions();
     if (!ok) {
       view.innerHTML = `
-        <div style="padding:12px; border:1px solid #ddd; border-radius:10px;">
+        <div style="padding:12px; border:1px solid var(--kt-line); border-radius:10px;">
           <div style="font-weight:700; margin-bottom:6px;">🔒 plug-in タブ（管理者専用）</div>
-          <div style="opacity:.8; font-size:12px; line-height:1.6;">
+          <div style="color:var(--kt-muted); font-size:12px; line-height:1.6;">
             この機能は <b>システム管理者</b> のみ利用できます。<br/>
             ※ REST API では、UIで「利用許可されていないプラグイン」も追加できてしまうため、
             誤操作防止として制限しています。
@@ -22059,31 +22055,18 @@
         Array.isArray(installedRaw?.plugins) ? installedRaw.plugins :
           [];
 
-    const C = getThemeColors();
-    const BG = C.bgInput;
-    const BD = C.border2;
-    const isDark = C.isDark;
+    const BG = 'var(--kt-paper)';
+    const BD = 'var(--kt-line)';
 
-    // 使い回しボタンCSS
     if (!document.getElementById('kt-plugins-inline-style')) {
       const st = document.createElement('style');
       st.id = 'kt-plugins-inline-style';
       st.textContent = `
-        .btn {
-          border: 1px solid ${BD};
-          background: ${isDark ? '#1e1e1e' : '#fff'};
-          color: ${isDark ? '#eee' : '#111'};
-          border-radius: 8px;
-          line-height: 1;
-          cursor: pointer;
-        }
-        .btn:disabled { opacity: .5; cursor: not-allowed; }
-        .btn:not(:disabled):hover { filter: brightness(${isDark ? 1.1 : 0.98}); }
-        .kt-row { border-bottom: 1px solid ${BD}; }
-        .kt-row:hover { background:${isDark ? '#111' : '#fafafa'}; }
-        .kt-pill { display:inline-flex; align-items:center; gap:6px; border:1px solid ${BD}; border-radius:999px; padding:2px 8px; font-size:11px; opacity:.85; }
-        .kt-muted { opacity:.75; }
-        .kt-danger { color:${isDark ? '#ffb4b4' : '#b00020'}; }
+        #view-plugins .kt-row { border-bottom:1px solid var(--kt-line); }
+        #view-plugins .kt-row:hover { background:var(--kt-soft); }
+        #view-plugins .kt-pill { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--kt-line); border-radius:999px; padding:2px 8px; font-size:11px; color:var(--kt-muted); background:var(--kt-soft); }
+        #view-plugins .kt-muted { color:var(--kt-muted); }
+        #view-plugins .kt-danger { color:var(--kt-danger); }
       `;
       document.head.appendChild(st);
     }
@@ -22114,7 +22097,7 @@
             <button id="kt-plg-deploy" class="btn" style="height:32px; padding:0 12px;" disabled>🚀 deploy</button>
           </div>
 
-          <div id="kt-plg-status" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; background:${isDark ? '#0f0f0f' : '#fafafa'}; padding:10px 12px; font-size:12px;">
+          <div id="kt-plg-status" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; background:var(--kt-soft); padding:10px 12px; font-size:12px;">
             読み込み中...
           </div>
 
@@ -22133,7 +22116,7 @@
             </div>
           </div>
 
-          <div id="kt-plg-diff" class="kt-flex-fixed" style="border:1px dashed ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#101010' : '#fff'};">
+          <div id="kt-plg-diff" class="kt-flex-fixed" style="border:1px dashed ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:var(--kt-soft);">
             差分: -
           </div>
         </div>
@@ -22146,7 +22129,7 @@
 
           <div class="kt-flex-fixed" style="display:flex; gap:8px; align-items:center;">
             <input id="kt-plg-search" placeholder="検索（名前/説明/ID）"
-              style="flex:1; min-width:0; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:transparent; color:inherit;" />
+              style="flex:1; min-width:0; height:32px; padding:0 10px; border-radius:8px; border:1px solid ${BD}; background:var(--kt-paper); color:var(--kt-text);" />
             <button id="kt-plg-add" class="btn" style="height:32px; padding:0 12px;" disabled>＋ previewに追加</button>
           </div>
 
@@ -22156,7 +22139,7 @@
 
           <div id="kt-plg-catalog" class="kt-scroll-area" style="border:1px solid ${BD}; border-radius:10px; background:${BG};"></div>
 
-          <div id="kt-plg-log" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:${isDark ? '#0f0f0f' : '#fafafa'};">
+          <div id="kt-plg-log" class="kt-flex-fixed" style="border:1px solid ${BD}; border-radius:10px; padding:10px 12px; font-size:12px; background:var(--kt-soft);">
             ログ: -
           </div>
         </div>
