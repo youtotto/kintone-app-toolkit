@@ -20,15 +20,25 @@ async function mount(page) {
     const clone = value => structuredClone(value);
     window.scanCalls=[];
     for(const method of ['run','runStale','analyzeFile','buildPayload']){const original=T.KTScan[method];T.KTScan[method]=function(...args){scanCalls.push(method);return original.apply(this,args);};}
-    window.operations = []; window.fileReads = []; window.pendingFile = null; window.fileFailure = null; window.holdNextCustomize = false; window.pendingList = null;
+    window.operations = []; window.manualChanges = []; window.fileReads = []; window.pendingFile = null; window.fileFailure = null; window.holdNextCustomize = false; window.pendingList = null;
     const denied = name => () => { operations.push(name); throw Error('Forbidden in local browser test: ' + name); };
     const file = (name, fileKey) => ({type:'FILE', file:{name,fileKey,size:'40'}});
     const customize = {revision:'7',scope:'ALL',desktop:{js:[file('same.js','pc'),file('second.js','second'),file('slow.js','slow')],css:[file('style.css','css')]},mobile:{js:[file('same.js','mobile')],css:[]}};
+    let production=clone(customize);
     const sources = {pc:'// PC original\nconst memo = 1;\n',mobile:'// mobile original\nconst memo = 2;\n',second:'// second original\n',slow:'// slow original\n',css:'.memo { color: blue; }\n'};
-    window.addRegisteredFiles = count => { for(let i=0;i<count;i++){const key='extra-'+i;customize.desktop.js.push(file(key+'.js',key));sources[key]='// extra registered file '+i+'\n';} };
-    T.KTApi.getCustomize = async (_app, options) => { const result={source:options?.preferPreview === false ? 'prod' : 'preview',data:clone(customize)}; if(window.holdNextCustomize&&result.source==='preview'){window.holdNextCustomize=false;return new Promise(resolve=>{window.pendingList=()=>resolve(result);});} return result; };
+    window.addRegisteredFiles = count => { for(let i=0;i<count;i++){const key='extra-'+i;customize.desktop.js.push(file(key+'.js',key));production.desktop.js.push(file(key+'.js',key));sources[key]='// extra registered file '+i+'\n';} };
+    T.KTApi.getCustomize = async (_app, options) => { const result={source:options?.preferPreview === false ? 'prod' : 'preview',data:clone(options?.preferPreview === false ? production : customize)}; if(window.holdNextCustomize&&result.source==='preview'){window.holdNextCustomize=false;return new Promise(resolve=>{window.pendingList=()=>resolve(result);});} return result; };
     T.KTApi.downloadFile = async key => { fileReads.push(key); if(key===window.fileFailure)throw Error('Fixture download failure'); if(key === 'slow')return new Promise(resolve => {window.pendingFile=()=>resolve(sources.slow);}); return sources[key]; };
+    window.actualDeploy=T.KTApi.deploy;
     for(const method of ['uploadFile','putPreviewCustomize','deploy','waitDeploy','deployAndWait'])T.KTApi[method]=denied('kintone.'+method);
+    window.manualFixtures={customize,sources};
+    window.enableManualWrites=()=>{
+      let sequence=0;const uploaded=new Map();
+      T.KTApi.uploadFile=async(name,content)=>{operations.push({type:'upload',name,content});const key='upload-'+(++sequence);sources[key]=content;uploaded.set(key,{name,fileKey:key,size:String(content.length)});if(window.holdUpload){window.holdUpload=false;await new Promise(resolve=>{window.finishUpload=resolve;});}return key;};
+      T.KTApi.putPreviewCustomize=async(app,payload)=>{operations.push({type:'put',app,payload:clone(payload)});if(String(payload.revision)!==customize.revision)throw Error('Revision mismatch');const known=new Map([...uploaded]);for(const target of ['desktop','mobile'])for(const kind of ['js','css'])for(const item of customize[target][kind])if(item.type==='FILE')known.set(item.file.fileKey,item.file);for(const target of ['desktop','mobile'])for(const kind of ['js','css'])customize[target][kind]=payload[target][kind].map(item=>item.type==='URL'?clone(item):{type:'FILE',file:clone(known.get(item.file.fileKey))});customize.scope=payload.scope;customize.revision=String(Number(customize.revision)+1);if(window.failNextRegistrationReadback){window.failNextRegistrationReadback=false;window.fileFailure='upload-'+sequence;}return {revision:customize.revision};};
+      T.KTApi.deploy=async(app,options)=>{operations.push({type:'deploy',app,options});if(String(options.revision)!==customize.revision)throw Error('Revision mismatch');production=clone(customize);};
+      T.KTApi.waitDeploy=async()=>{operations.push({type:'waitDeploy'});return 'SUCCESS';};
+    };
     window.monacoModels=[]; window.monacoEditors=[]; window.monacoDiffs=[];
     const createModel = (value,language) => {
       const model={text:String(value),language,disposed:false,listeners:new Set(),getValue(){return this.text;},getValueInRange(range){return range.testText||'';},getWordAtPosition(){return {word:this.testWord||''};},setValue(text){this.text=String(text);for(const listener of this.listeners)listener();},dispose(){this.disposed=true;this.listeners.clear();},onDidChangeContent(listener){this.listeners.add(listener);return {dispose:()=>this.listeners.delete(listener)};}};
@@ -62,13 +72,14 @@ async function mount(page) {
     }}};
     window.proposalCalls=[];
     const client={getHealth:async()=>health,propose:async({ctx})=>{proposalCalls.push(clone(ctx));return {reply:'備考の編集条件を変更する案です。',intent:'propose',proposal:{behaviors:[{id:'B1',text:'備考の編集条件を変更する',origin:'user'}],assumptions:[],decisions:[],approach:{standard:[],js:['備考の編集条件']},cannot:[]},turn:{ops:[],answers:[],requirementOps:[]}};},plan:denied('AI.plan'),generate:denied('AI.generate')};
+    window.fixtureClient=client;
     localStorage.setItem('ktToolkitFull.v1','1');
     const shell=window.shell=T.mountRoot();
     const settings=C.createSettingsStore();settings.setConsent(true,'release-raw-source-1');
     const session={client,status:()=>({connected:true,apiBase:'https://gateway.test.invalid'}),disconnect:async()=>{}};
     window.work=T.renderAiWorkspace(shell,data,'310',{getContextInputs:()=>({data,deps:{},scan:{files:[]}}),aiLink:{settings,session,probe:async()=>({ok:true,health})}});
     shell.ktAi=work;
-    window.customize=T.renderCustomize(shell,data,'310',{autoLoad:true,getInputs:()=>({data,deps:{},scan:window.referenceScan}),consult:seed=>work.consult(seed)});
+    window.customize=T.renderCustomize(shell,data,'310',{autoLoad:true,getInputs:()=>({data,deps:{},scan:window.referenceScan}),onSettingsChanged:info=>manualChanges.push(clone(info)),consult:seed=>work.consult(seed)});
     window.customize=await window.customize;shell.ktCustomize=window.customize;
     window.customize.attachAssistant(work);
     window.originalHost=shell.querySelector('#kt-ai-host');
@@ -132,7 +143,11 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.ok(initialGeometry.editor.height>=260&&initialGeometry.editor.height<600,'短いコードの編集領域が画面いっぱいに伸びない');
         await page.screenshot({path:path.join(out,colorScheme+'-customize-menu.png'),fullPage:true});
         assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
-        assert.equal(await page.locator('#kt-customize-upload').count(),0,'Customizeに運用環境への反映操作を持たない');
+        assert.equal(await page.locator('.kt-customize-editor-heading #kt-customize-consult').count(),1,'相談はエディターの見出しに置く');
+        assert.equal(await page.locator('.kt-customize-menu > section').first().getAttribute('aria-label'),'保存と反映','右上に保存・登録・運用反映をまとめる');
+        assert.equal(await page.locator('#kt-customize-register').isVisible(),true);
+        assert.equal(await page.locator('#kt-customize-deploy').isVisible(),true);
+        assert.equal(await page.locator('#kt-customize-upload').count(),0,'旧い登録と運用反映の一括操作は戻さない');
         assert.equal(await page.locator('[data-customize-mode="comparison"]').isVisible(),false,'CustomizeにAIの差分操作を出さない');
         const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
         const reference=page.locator('#kt-customize-reference-info [data-reference-content]');
@@ -566,4 +581,54 @@ test('Customizeの依存関係は明示更新し、コードの選択は登録�
     await page.evaluate(()=>document.querySelector('#view-customize')._ktCustomizeDispose());assert.equal(await page.evaluate(()=>monacoEditors[0].cursorListenerCount()),0,'カーソル監視を破棄する');await page.evaluate(()=>work.dispose());
   }finally{await context.close();}
   }}finally{await browser.close();}
+});
+
+
+test('手編集の登録と運用反映は別確認・編集中の保持・外部変更から復帰（仮想APIだけ）',{timeout:60000},async()=>{
+  fs.mkdirSync(out,{recursive:true});
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'}),unexpected=[],errors=[];
+  try{
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
+    const actualPayloads=await page.evaluate(async()=>{const calls=[];window.kintone={api:Object.assign(async(url,method,payload)=>{calls.push({url,method,payload});},{url:path=>path})};await actualDeploy('310',{revision:'17'});await actualDeploy('310');return calls;});
+    assert.equal(actualPayloads[0].payload.apps[0].revision,'17','実部品も確認した版を送る');assert.equal(actualPayloads[1].payload.apps[0].revision,-1,'既存呼出しの既定値は保つ');
+    await selected(page,'same.js','// PC original\nconst memo = 1;\n');await page.evaluate(()=>enableManualWrites());
+    const register=page.locator('#kt-customize-register'),deploy=page.locator('#kt-customize-deploy'),confirm=page.locator('#kt-customize-manual-confirm'),accept=confirm.locator('[data-manual-confirm]'),cancel=confirm.locator('[data-manual-cancel]'),status=page.locator('#kt-customize-manual-status');
+    const initialCalls=await page.evaluate(()=>proposalCalls.length);
+    await editor(page).fill('// manual v1');await register.click();await assertEventually(()=>confirm.isVisible(),true);
+    assert.match(await confirm.innerText(),/same\.js（PC）/);assert.match(await confirm.innerText(),/運用環境は変更しません/);
+    await page.screenshot({path:path.join(out,'manual-register-confirm.png'),fullPage:true});
+    await cancel.click();assert.deepEqual(await page.evaluate(()=>operations),[],'確認を取り消すとアップロードも書込みもしない');
+    await page.evaluate(()=>{holdNextCustomize=true;pendingList=null;});await register.click();await page.waitForFunction(()=>typeof pendingList==='function');await editor(page).fill('// edited during prepare');await page.evaluate(()=>pendingList());await assertEventually(()=>register.isEnabled(),true);
+    assert.equal(await confirm.isVisible(),false,'読取り準備中に本文が変わると旧内容の確認を出さない');
+    await register.click();await assertEventually(()=>confirm.isVisible(),true);await editor(page).fill('// manual v2');assert.equal(await confirm.isVisible(),false,'確認後の編集で確認を取り消す');
+    await register.click();await assertEventually(()=>confirm.isVisible(),true);await page.evaluate(()=>holdUpload=true);await accept.click();await page.waitForFunction(()=>typeof finishUpload==='function');
+    await editor(page).fill('// next edit retained');await page.evaluate(()=>finishUpload());await page.waitForFunction(()=>document.querySelector('#kt-customize-manual-status').textContent.includes('読み戻して一致'));await assertEventually(()=>register.isEnabled(),true);
+    assert.equal(await editor(page).inputValue(),'// next edit retained','登録中に進んだ手編集を上書きしない');
+    assert.deepEqual(await page.evaluate(()=>operations.map(x=>x.type)),['upload','put'],'登録だけでは運用反映しない');
+    assert.equal(await page.evaluate(()=>manualFixtures.sources[manualFixtures.customize.desktop.js[0].file.fileKey]),'// manual v2');
+    assert.ok((await page.evaluate(()=>manualChanges)).every(change=>change.preview&&!change.production),'登録後に動作テスト環境の基準を失効する');
+    await register.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await page.waitForFunction(()=>operations.filter(x=>x.type==='put').length===2);await assertEventually(()=>register.isEnabled(),true);
+    assert.equal(await page.evaluate(()=>manualFixtures.sources[manualFixtures.customize.desktop.js[0].file.fileKey]),'// next edit retained','更新したfileKeyを基準に次の手編集を登録できる');
+    await page.evaluate(()=>{manualFixtures.customize.desktop.js[0].file.fileKey='external';manualFixtures.sources.external='// external current';manualFixtures.customize.revision=String(Number(manualFixtures.customize.revision)+1);});
+    await editor(page).fill('// conflicting edit');await register.click();await assertEventually(()=>register.isEnabled(),true);assert.equal(await confirm.isVisible(),false);assert.match(await status.innerText(),/ファイルが変わ/);
+    const writesBeforeReload=await page.evaluate(()=>operations.length);await page.locator('#kt-customize-manual-reload').click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/手元の編集は置き換わります/);await cancel.click();assert.equal(await editor(page).inputValue(),'// conflicting edit');
+    await page.locator('#kt-customize-manual-reload').click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await assertEventually(()=>editor(page).inputValue(),'// external current');assert.equal(await page.evaluate(()=>operations.length),writesBeforeReload,'読み直しはkintoneに書き込まない');
+    await editor(page).fill('// after recovery');await register.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await page.waitForFunction(()=>operations.filter(x=>x.type==='put').length===3);await assertEventually(()=>register.isEnabled(),true);
+    await page.locator('#kt-customize-new').click();await page.locator('#kt-newfile-name').fill('new-manual.js');await page.locator('#kt-newfile-ok').click();await editor(page).fill('// new registered body');
+    await page.evaluate(()=>failNextRegistrationReadback=true);await register.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await assertEventually(()=>register.isEnabled(),true);assert.match(await status.innerText(),/登録後の確認が完了していません/);
+    assert.equal(await editor(page).inputValue(),'// new registered body');assert.equal(await page.locator('#kt-customize-manual-reload').isVisible(),true,'新規の登録結果不明でも読み直せる');
+    await page.evaluate(()=>fileFailure=null);await page.locator('#kt-customize-manual-reload').click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await assertEventually(()=>register.isEnabled(),true);
+    await editor(page).fill('// new edited again');await register.click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/現在の本文を置き換え/);await accept.click();await assertEventually(()=>register.isEnabled(),true);assert.match(await status.innerText(),/読み戻して一致/);assert.equal(await page.evaluate(()=>manualFixtures.customize.desktop.js.filter(item=>item.file.name==='new-manual.js').length),1,'回復後の新規ファイルを重複追加しない');
+    await selected(page,'same.js','// after recovery');
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/未反映の変更をすべて運用環境/);assert.match(await confirm.innerText(),/フォーム・一覧・プロセス管理/);assert.match(await confirm.innerText(),/編集中のコードは、この操作では登録しません/);await page.screenshot({path:path.join(out,'manual-deploy-confirm.png'),fullPage:true});await cancel.click();
+    assert.equal(await page.evaluate(()=>operations.some(x=>x.type==='deploy')),false);
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);await page.evaluate(()=>manualFixtures.customize.revision=String(Number(manualFixtures.customize.revision)+1));await accept.click();await assertEventually(()=>deploy.isEnabled(),true);assert.match(await status.innerText(),/設定が変わりました/);assert.equal(await page.evaluate(()=>operations.some(x=>x.type==='deploy')),false,'確認後の別の変更を未確認で運用反映しない');
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await page.waitForFunction(()=>document.querySelector('#kt-customize-manual-status').textContent.includes('反映が完了'));assert.equal(await page.evaluate(()=>operations.filter(x=>x.type==='deploy').length),1);assert.ok((await page.evaluate(()=>manualChanges)).some(change=>change.production));
+    await page.evaluate(()=>{fixtureClient.propose=()=>new Promise(resolve=>{window.finishConsult=()=>resolve({reply:'確認しました。',intent:'answer',turn:{ops:[],answers:[],requirementOps:[]}});});window.busyConsult=work.controller.send('今のコードを説明してください');});await page.waitForFunction(()=>work.controller.getState().phase==='consulting');assert.equal(await register.isDisabled(),true);assert.equal(await deploy.isDisabled(),true);await page.evaluate(async()=>{finishConsult();await busyConsult;});await assertEventually(()=>register.isEnabled(),true);
+    await page.locator('#kt-customize-consult').click();await page.locator('[data-release-action="code"]').click();assert.equal(await register.isVisible(),false);assert.equal(await deploy.isVisible(),false,'AIの相談画面に手編集の反映ボタンを混ぜない');
+    assert.equal(await page.evaluate(()=>proposalCalls.length),initialCalls,'手編集の操作からAIを呼ばない');assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await page.evaluate(()=>work.dispose());
+  }finally{await context.close();await browser.close();}
 });

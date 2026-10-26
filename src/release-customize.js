@@ -1,4 +1,4 @@
-/* Read-only code comparison from the existing approval preparation. */
+/* Customize editor helpers, dependency display, and explicit manual registration. */
 'use strict';
 const KTReleaseCustomize = (() => {
   const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -269,6 +269,128 @@ const KTReleaseCustomize = (() => {
     const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
     return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
   }
-  return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo };
+  // Manual edits use the existing API adapter; registration and app deployment
+  // have separate read-only preparations and single-use confirmations.
+  function createManualRegistration({ appId, api, onChanged } = {}) {
+    const app = String(appId ?? ''), tickets = new WeakMap(), targets = ['desktop', 'mobile'], kinds = ['js', 'css'];
+    let busy = false;
+    const fail = (code, message) => Object.assign(new Error(message), { code });
+    if (!/^[1-9]\d*$/.test(app) || !api) throw fail('INVALID_APP', '対象のアプリを確認できません。');
+    const revisionOf = value => {
+      const revision = String(value ?? '');
+      if (!/^\d+$/.test(revision)) throw fail('INVALID_SETTINGS', '動作テスト環境の設定の版を確認できません。');
+      return revision;
+    };
+    async function readPreview() {
+      const response = await api.getCustomize(app, { preferPreview: true });
+      if (response?.source !== 'preview') throw fail('PREVIEW_UNAVAILABLE', '動作テスト環境の設定を取得できません。登録・運用環境への反映は行っていません。');
+      const value = response.data;
+      if (typeof value?.scope !== 'string' || !targets.every(target => kinds.every(kind => Array.isArray(value[target]?.[kind]))))
+        throw fail('INVALID_SETTINGS', 'カスタマイズ設定の一覧を確認できません。');
+      for (const target of targets) for (const kind of kinds) for (const entry of value[target][kind]) {
+        if (!(entry?.type === 'FILE' && typeof entry.file?.fileKey === 'string' && entry.file.fileKey && typeof entry.file.name === 'string')
+          && !(entry?.type === 'URL' && typeof entry.url === 'string' && entry.url))
+          throw fail('INVALID_SETTINGS', 'カスタマイズ設定に確認できないファイルがあります。');
+      }
+      return { ...cloneDependency(value), revision: revisionOf(value.revision) };
+    }
+    const identity = value => JSON.stringify([value.scope, ...targets.flatMap(target => kinds.map(kind =>
+      value[target][kind].map(entry => entry.type === 'FILE' ? [entry.type, entry.file.name, entry.file.fileKey] : [entry.type, entry.url])))]);
+    const changed = production => { try { onChanged?.({ preview: true, production, what: 'customize' }); } catch (_) { /* the write result remains authoritative */ } };
+    function prepare(operation, snapshot, extra = {}) {
+      const exposed = Object.freeze({ operation, appId: app, revision: snapshot.revision, ...extra });
+      tickets.set(exposed, { operation, snapshot });
+      return exposed;
+    }
+    async function prepareRegistration({ document, content } = {}) {
+      if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+      if (!document || document.environment !== 'preview' || !targets.includes(document.target) || !kinds.includes(document.kind)
+        || typeof document.name !== 'string' || !document.name.trim() || typeof content !== 'string')
+        throw fail('INVALID_DOCUMENT', '動作テスト環境の登録先とファイルを選んでください。');
+      const doc = cloneDependency(document);
+      const snapshot = await readPreview(), list = snapshot[doc.target][doc.kind];
+      const matches = list.map((entry, index) => ({ entry, index })).filter(item => item.entry.type === 'FILE' && item.entry.file.name === doc.name);
+      if (doc.isNew ? matches.length !== 0 : matches.length !== 1 || !doc.fileKey || matches[0].entry.file.fileKey !== doc.fileKey)
+        throw fail('STALE_DOCUMENT', doc.isNew ? '同名のファイルが登録されています。別の名前にしてください。'
+          : '取得した後に登録先のファイルが変わっています。手元の編集を保存してから、ファイルを取り直してください。');
+      const position = doc.isNew ? list.length : matches[0].index;
+      const exposed = prepare('register', snapshot, { name: doc.name, target: doc.target, kind: doc.kind, isNew: !!doc.isNew, position });
+      Object.assign(tickets.get(exposed), { document: doc, content, position });
+      return exposed;
+    }
+    async function prepareDeploy() {
+      if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+      return prepare('deploy', await readPreview());
+    }
+    async function execute(prepared, operation, action) {
+      if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+      const ticket = tickets.get(prepared);
+      if (!ticket || ticket.operation !== operation) throw fail('NOT_PREPARED', '確認からやり直してください。この確認は既に使われたか、対象が異なります。');
+      tickets.delete(prepared); busy = true;
+      let writing = false;
+      try {
+        const current = await readPreview();
+        if (current.revision !== ticket.snapshot.revision || identity(current) !== identity(ticket.snapshot))
+          throw fail('STALE_SETTINGS', '確認した後に動作テスト環境の設定が変わりました。何も書き込んでいません。確認からやり直してください。');
+        return await action(ticket, () => { writing = true; changed(operation === 'deploy'); });
+      } catch (error) {
+        const result = error instanceof Error ? error : new Error(String(error));
+        result.writeAttempted = writing;
+        throw result;
+      } finally { busy = false; if (writing) changed(operation === 'deploy'); }
+    }
+    async function register(prepared) {
+      return execute(prepared, 'register', async (ticket, beginWrite) => {
+        const { snapshot, document: doc, content, position } = ticket;
+        beginWrite();
+        const fileKey = await api.uploadFile(doc.name, content, doc.kind === 'css' ? 'text/css' : 'text/javascript');
+        if (typeof fileKey !== 'string' || !fileKey) throw fail('UPLOAD_FAILED', 'ファイルのアップロード結果を確認できません。登録は行っていません。');
+        const payload = { app: Number(app), revision: snapshot.revision, scope: snapshot.scope, desktop: {}, mobile: {} };
+        for (const target of targets) for (const kind of kinds) payload[target][kind] = snapshot[target][kind].map(entry =>
+          entry.type === 'URL' ? { type: 'URL', url: entry.url } : { type: 'FILE', file: { fileKey: entry.file.fileKey } });
+        const replacement = { type: 'FILE', file: { fileKey } };
+        if (doc.isNew) payload[doc.target][doc.kind].push(replacement);
+        else payload[doc.target][doc.kind][position] = replacement;
+        const put = await api.putPreviewCustomize(app, payload);
+        let after;
+        try {
+          after = await readPreview();
+          let matches = after.scope === snapshot.scope && (put?.revision == null || after.revision === String(put.revision));
+          for (const target of targets) for (const kind of kinds) {
+            const previous = snapshot[target][kind], actual = after[target][kind];
+            const selected = target === doc.target && kind === doc.kind;
+            if (actual.length !== previous.length + (selected && doc.isNew ? 1 : 0)) matches = false;
+            for (let index = 0; index < actual.length; index++) {
+              const entry = actual[index], before = previous[index];
+              if (selected && index === position) {
+                if (entry.type !== 'FILE' || entry.file.name !== doc.name) matches = false;
+              } else if (!before || entry.type !== before.type || (entry.type === 'URL' ? entry.url !== before.url
+                : entry.file.name !== before.file.name || entry.file.fileKey !== before.file.fileKey)) matches = false;
+            }
+          }
+          if (!matches) throw fail('VERIFY_FAILED', '登録後の一覧が確認した内容と一致しません。');
+          const registered = after[doc.target][doc.kind][position];
+          if (await api.downloadFile(registered.file.fileKey) !== content)
+            throw fail('VERIFY_FAILED', '登録後のファイルの内容が確認した内容と一致しません。');
+        } catch (error) {
+          throw fail('VERIFY_FAILED', '登録後の確認が完了していません。動作テスト環境の登録内容を取り直してください。' + (error?.message ? ' ' + error.message : ''));
+        }
+        return { kind: 'registered', appId: app, revision: after.revision, customize: after,
+          document: { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' } };
+      });
+    }
+    async function deploy(prepared) {
+      return execute(prepared, 'deploy', async (ticket, beginWrite) => {
+        beginWrite();
+        await api.deploy(app, { revision: ticket.snapshot.revision });
+        const status = await api.waitDeploy(app);
+        if (!['SUCCESS', 'PROCESSED'].includes(status)) throw fail('DEPLOY_UNCONFIRMED', '運用環境への反映結果を確認できません。');
+        return { kind: 'deployed', appId: app, revision: ticket.snapshot.revision, status };
+      });
+    }
+    return { prepareRegistration, register, prepareDeploy, deploy };
+  }
+
+  return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo, createManualRegistration };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseCustomize };

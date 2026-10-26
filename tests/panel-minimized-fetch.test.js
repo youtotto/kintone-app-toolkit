@@ -22,19 +22,20 @@ function makeStorage(init = {}) {
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { writes.push([k, String(v)]); m.set(k, String(v)); }, removeItem: (k) => m.delete(k), _m: m, writes };
 }
 const fakeMonaco = (() => {
-  const editor = { value: '', setValue(v) { this.value = v; }, getValue() { return this.value; }, getModel() { return {}; }, focus() { }, getSelection() { return null; } };
+  const editor = { value: '', setValue(v) { this.value = v; }, getValue() { return this.value; }, getModel() { return {}; }, focus() { }, getSelection() { return null; }, onDidChangeModelContent() { return { dispose() { } }; } };
   return { editor: { create: () => editor, setModelLanguage: () => { } }, languages: { registerCompletionItemProvider: () => { }, CompletionItemKind: { Field: 1, Snippet: 2 } }, Range: function () { } };
 })();
 
 /** 1 回のページ（sandbox）。storage を渡すと、同じ localStorage で読み込み直す（画面遷移） */
 function makeEnv({ mini = null, storage = null, data = null, admin = true, layout = null, gateway = null } = {}) {
   const { doc, byId } = makeFakeDocument();
-  // This fetch-count test uses a flat DOM. Resolve only the reference panel's two descendant selectors;
+  // This fetch-count test uses a flat DOM. Resolve the reference and manual confirmation descendants;
   // rendering and resize behavior remain covered by release-customize-browser.test.js.
   const setElement = byId.set.bind(byId);
   byId.set = (id, element) => {
     const query = element.querySelector.bind(element);
     element.querySelector = selector => {
+      if (id === 'kt-customize-manual-confirm' && /^\[data-manual-(description|cancel|confirm)\]$/.test(selector)) return byId.get('view-customize').querySelector(selector);
       const child = /^#kt-customize-reference-info (\[data-reference-content\]|\[data-open-deps\])$/.exec(String(selector));
       return child && byId.has('kt-customize-reference-info') ? byId.get('view-customize').querySelector(child[1]) : query(selector);
     };

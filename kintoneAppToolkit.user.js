@@ -377,9 +377,9 @@
     }
 
     /** previewの内容を運用環境へデプロイする（戻り値は無し。完了待ちは waitDeploy） */
-    async function deploy(app) {
+    async function deploy(app, { revision = -1 } = {}) {
       return await kintone.api(url('/k/v1/preview/app/deploy.json'), 'POST',
-        { apps: [{ app: Number(app), revision: -1 }], revert: false });
+        { apps: [{ app: Number(app), revision }], revert: false });
     }
 
     /** デプロイ完了を待つ（SUCCESS/PROCESSEDで正常終了、FAIL系は例外） */
@@ -14649,7 +14649,7 @@
     return { create, render, escape: esc, explanationMarkdown };
   })();
 
-  /* Read-only code comparison from the existing approval preparation. */
+  /* Customize editor helpers, dependency display, and explicit manual registration. */
   'use strict';
   const KTReleaseCustomize = (() => {
     const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -14920,7 +14920,129 @@
       const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
       return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
     }
-    return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo };
+    // Manual edits use the existing API adapter; registration and app deployment
+    // have separate read-only preparations and single-use confirmations.
+    function createManualRegistration({ appId, api, onChanged } = {}) {
+      const app = String(appId ?? ''), tickets = new WeakMap(), targets = ['desktop', 'mobile'], kinds = ['js', 'css'];
+      let busy = false;
+      const fail = (code, message) => Object.assign(new Error(message), { code });
+      if (!/^[1-9]\d*$/.test(app) || !api) throw fail('INVALID_APP', '対象のアプリを確認できません。');
+      const revisionOf = value => {
+        const revision = String(value ?? '');
+        if (!/^\d+$/.test(revision)) throw fail('INVALID_SETTINGS', '動作テスト環境の設定の版を確認できません。');
+        return revision;
+      };
+      async function readPreview() {
+        const response = await api.getCustomize(app, { preferPreview: true });
+        if (response?.source !== 'preview') throw fail('PREVIEW_UNAVAILABLE', '動作テスト環境の設定を取得できません。登録・運用環境への反映は行っていません。');
+        const value = response.data;
+        if (typeof value?.scope !== 'string' || !targets.every(target => kinds.every(kind => Array.isArray(value[target]?.[kind]))))
+          throw fail('INVALID_SETTINGS', 'カスタマイズ設定の一覧を確認できません。');
+        for (const target of targets) for (const kind of kinds) for (const entry of value[target][kind]) {
+          if (!(entry?.type === 'FILE' && typeof entry.file?.fileKey === 'string' && entry.file.fileKey && typeof entry.file.name === 'string')
+            && !(entry?.type === 'URL' && typeof entry.url === 'string' && entry.url))
+            throw fail('INVALID_SETTINGS', 'カスタマイズ設定に確認できないファイルがあります。');
+        }
+        return { ...cloneDependency(value), revision: revisionOf(value.revision) };
+      }
+      const identity = value => JSON.stringify([value.scope, ...targets.flatMap(target => kinds.map(kind =>
+        value[target][kind].map(entry => entry.type === 'FILE' ? [entry.type, entry.file.name, entry.file.fileKey] : [entry.type, entry.url])))]);
+      const changed = production => { try { onChanged?.({ preview: true, production, what: 'customize' }); } catch (_) { /* the write result remains authoritative */ } };
+      function prepare(operation, snapshot, extra = {}) {
+        const exposed = Object.freeze({ operation, appId: app, revision: snapshot.revision, ...extra });
+        tickets.set(exposed, { operation, snapshot });
+        return exposed;
+      }
+      async function prepareRegistration({ document, content } = {}) {
+        if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+        if (!document || document.environment !== 'preview' || !targets.includes(document.target) || !kinds.includes(document.kind)
+          || typeof document.name !== 'string' || !document.name.trim() || typeof content !== 'string')
+          throw fail('INVALID_DOCUMENT', '動作テスト環境の登録先とファイルを選んでください。');
+        const doc = cloneDependency(document);
+        const snapshot = await readPreview(), list = snapshot[doc.target][doc.kind];
+        const matches = list.map((entry, index) => ({ entry, index })).filter(item => item.entry.type === 'FILE' && item.entry.file.name === doc.name);
+        if (doc.isNew ? matches.length !== 0 : matches.length !== 1 || !doc.fileKey || matches[0].entry.file.fileKey !== doc.fileKey)
+          throw fail('STALE_DOCUMENT', doc.isNew ? '同名のファイルが登録されています。別の名前にしてください。'
+            : '取得した後に登録先のファイルが変わっています。手元の編集を保存してから、ファイルを取り直してください。');
+        const position = doc.isNew ? list.length : matches[0].index;
+        const exposed = prepare('register', snapshot, { name: doc.name, target: doc.target, kind: doc.kind, isNew: !!doc.isNew, position });
+        Object.assign(tickets.get(exposed), { document: doc, content, position });
+        return exposed;
+      }
+      async function prepareDeploy() {
+        if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+        return prepare('deploy', await readPreview());
+      }
+      async function execute(prepared, operation, action) {
+        if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
+        const ticket = tickets.get(prepared);
+        if (!ticket || ticket.operation !== operation) throw fail('NOT_PREPARED', '確認からやり直してください。この確認は既に使われたか、対象が異なります。');
+        tickets.delete(prepared); busy = true;
+        let writing = false;
+        try {
+          const current = await readPreview();
+          if (current.revision !== ticket.snapshot.revision || identity(current) !== identity(ticket.snapshot))
+            throw fail('STALE_SETTINGS', '確認した後に動作テスト環境の設定が変わりました。何も書き込んでいません。確認からやり直してください。');
+          return await action(ticket, () => { writing = true; changed(operation === 'deploy'); });
+        } catch (error) {
+          const result = error instanceof Error ? error : new Error(String(error));
+          result.writeAttempted = writing;
+          throw result;
+        } finally { busy = false; if (writing) changed(operation === 'deploy'); }
+      }
+      async function register(prepared) {
+        return execute(prepared, 'register', async (ticket, beginWrite) => {
+          const { snapshot, document: doc, content, position } = ticket;
+          beginWrite();
+          const fileKey = await api.uploadFile(doc.name, content, doc.kind === 'css' ? 'text/css' : 'text/javascript');
+          if (typeof fileKey !== 'string' || !fileKey) throw fail('UPLOAD_FAILED', 'ファイルのアップロード結果を確認できません。登録は行っていません。');
+          const payload = { app: Number(app), revision: snapshot.revision, scope: snapshot.scope, desktop: {}, mobile: {} };
+          for (const target of targets) for (const kind of kinds) payload[target][kind] = snapshot[target][kind].map(entry =>
+            entry.type === 'URL' ? { type: 'URL', url: entry.url } : { type: 'FILE', file: { fileKey: entry.file.fileKey } });
+          const replacement = { type: 'FILE', file: { fileKey } };
+          if (doc.isNew) payload[doc.target][doc.kind].push(replacement);
+          else payload[doc.target][doc.kind][position] = replacement;
+          const put = await api.putPreviewCustomize(app, payload);
+          let after;
+          try {
+            after = await readPreview();
+            let matches = after.scope === snapshot.scope && (put?.revision == null || after.revision === String(put.revision));
+            for (const target of targets) for (const kind of kinds) {
+              const previous = snapshot[target][kind], actual = after[target][kind];
+              const selected = target === doc.target && kind === doc.kind;
+              if (actual.length !== previous.length + (selected && doc.isNew ? 1 : 0)) matches = false;
+              for (let index = 0; index < actual.length; index++) {
+                const entry = actual[index], before = previous[index];
+                if (selected && index === position) {
+                  if (entry.type !== 'FILE' || entry.file.name !== doc.name) matches = false;
+                } else if (!before || entry.type !== before.type || (entry.type === 'URL' ? entry.url !== before.url
+                  : entry.file.name !== before.file.name || entry.file.fileKey !== before.file.fileKey)) matches = false;
+              }
+            }
+            if (!matches) throw fail('VERIFY_FAILED', '登録後の一覧が確認した内容と一致しません。');
+            const registered = after[doc.target][doc.kind][position];
+            if (await api.downloadFile(registered.file.fileKey) !== content)
+              throw fail('VERIFY_FAILED', '登録後のファイルの内容が確認した内容と一致しません。');
+          } catch (error) {
+            throw fail('VERIFY_FAILED', '登録後の確認が完了していません。動作テスト環境の登録内容を取り直してください。' + (error?.message ? ' ' + error.message : ''));
+          }
+          return { kind: 'registered', appId: app, revision: after.revision, customize: after,
+            document: { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' } };
+        });
+      }
+      async function deploy(prepared) {
+        return execute(prepared, 'deploy', async (ticket, beginWrite) => {
+          beginWrite();
+          await api.deploy(app, { revision: ticket.snapshot.revision });
+          const status = await api.waitDeploy(app);
+          if (!['SUCCESS', 'PROCESSED'].includes(status)) throw fail('DEPLOY_UNCONFIRMED', '運用環境への反映結果を確認できません。');
+          return { kind: 'deployed', appId: app, revision: ticket.snapshot.revision, status };
+        });
+      }
+      return { prepareRegistration, register, prepareDeploy, deploy };
+    }
+
+    return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo, createManualRegistration };
   })();
 
   /* Browser composition. Authentication, limits and preview executors are reused;
@@ -19809,11 +19931,11 @@
   // ----------------------------
   // [Feature] Customize
   // 登録済みコード・手元の編集と、AI Assistantと共有する相談・修正案・差分を表示する。
-  // 手編集はローカル保存まで。AIの差分・反映はAI Assistantの採用した内容と確認を使う。
+  // 手編集は個別の確認で登録・デプロイする。AIの差分・反映はAI Assistantの採用した内容と確認を使う。
   // ----------------------------
   //   設定取得の関所（パネルの表示状態）: autoLoad: false なら組み立てだけ行い、一覧（カスタマイズ設定）はタブを開いたときに ensureLoaded で取る
   //   （省略時は今までどおり、組み立ての最後に取る）。取得済みの一覧は、古い印（markStale: ほかの場所で設定を変えた）が無ければ再利用する。
-  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null, autoLoad = true } = {}) {
+  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null, onSettingsChanged = null, autoLoad = true } = {}) {
     const view = root.querySelector('#view-customize');
     if (!view) return null;
 
@@ -19862,7 +19984,11 @@
         #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
         #kt-customize-refresh{width:34px;padding:4px}#kt-customize-consult{white-space:nowrap}
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
+        .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
+        #kt-customize-manual-actions{display:grid;gap:8px;margin-top:8px}#kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
+        #kt-customize-manual-confirm{margin-top:10px;padding:10px;border:1px solid var(--kt-line);border-radius:6px;background:var(--kt-paper);font-size:12px}#kt-customize-manual-confirm p{white-space:pre-line;overflow-wrap:anywhere;margin:0 0 10px}#kt-customize-manual-confirm>div{display:flex;gap:6px;flex-wrap:wrap}
+        .ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
         .kt-customize-menu{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
@@ -19881,13 +20007,20 @@
           <nav class="kt-customize-modes" aria-label="コードの表示" hidden><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
           <div id="kt-customize">
             <div class="kt-customize-editor-pane">
-              <div id="kt-customize-meta"></div>
+              <header class="kt-customize-editor-heading"><div id="kt-customize-meta"></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
+              <p id="kt-customize-editor-note">相談には動作テスト環境のコードを使います。手元の編集は送信しません。</p>
               <div id="kt-customize-editor"></div>
               <div id="kt-customize-height-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの高さ" aria-orientation="horizontal" aria-controls="kt-customize-editor" aria-valuemin="220" aria-valuemax="1000" aria-valuenow="440" title="ドラッグまたは上下キーで高さを調整"></div>
               <div id="kt-customize-comparison" hidden></div>
             </div>
             <div id="kt-customize-width-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの幅" aria-orientation="vertical" aria-controls="kt-customize-editor" aria-valuemin="45" aria-valuemax="80" aria-valuenow="65" title="ドラッグまたは左右キーで幅を調整"></div>
             <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
+              <section class="kt-customize-menu-section" aria-label="保存と反映">
+                <div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn">＋ 新規作成</button></div>
+                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn">運用環境へ反映（デプロイ）</button></div>
+                <p id="kt-customize-manual-status" role="status" aria-live="polite"></p><button id="kt-customize-manual-reload" class="btn" hidden>登録済みコードを読み直す</button>
+                <section id="kt-customize-manual-confirm" aria-label="手元の編集と反映の確認" hidden><p data-manual-description></p><div><button class="btn" data-manual-cancel>キャンセル</button><button class="btn" data-manual-confirm>確認して実行</button></div></section>
+              </section>
               <section class="kt-customize-menu-section" aria-label="ファイル"><h3>ファイル</h3>
               <div id="kt-customize-picker" class="kt-customize-picker">
                 <select id="kt-customize-source" class="btn" aria-label="ファイルの種類と対象">
@@ -19900,14 +20033,7 @@
               <p id="kt-customize-file-status" role="status"></p>
               <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
               </section>
-              <section class="kt-customize-menu-section" aria-label="相談と保存">
-              <button id="kt-customize-consult" class="btn kt-customize-primary" disabled>AIに相談</button>
-              <p id="kt-customize-editor-note">AI Assistantへ移ります。移動だけではAIを呼びません。手元の編集は送らず、送信時に取得する動作テスト環境のコードで相談します。</p>
-              <div class="kt-customize-editor-tools">
-                <button id="kt-customize-download" class="btn" disabled>ローカルに保存</button>
-                <button id="kt-customize-new" class="btn">＋ 新規作成</button>
-              </div>
-              </section>
+
               <section id="kt-customize-dependencies" class="kt-customize-menu-section" aria-label="フィールドの依存関係">
                 <header><h3>フィールドの依存関係</h3><button id="kt-customize-dependency-refresh" class="btn">依存関係を更新</button></header>
                 <p id="kt-customize-dependency-status" role="status">必要なときに、動作テスト環境の設定と登録済みコードを取得します。</p>
@@ -19937,6 +20063,10 @@
     const $sourceSel = $('#kt-customize-source');
     const $editorHost = $('#kt-customize-editor');
     const $env = $('#kt-customize-env');
+    const $register = $('#kt-customize-register'), $deploy = $('#kt-customize-deploy');
+    const $manualStatus = $('#kt-customize-manual-status'), $manualConfirm = $('#kt-customize-manual-confirm');
+    let manualBusy = false, manualPending = null, documentEpoch = 0;
+    const manual = KTReleaseCustomize.createManualRegistration({ appId, api: KTApi, onChanged: info => { markStale(); onSettingsChanged?.(info); } });
 
     // === Monaco ===
     const monaco = await loadMonaco();
@@ -20040,7 +20170,7 @@
       if (d.viewState) editor.restoreViewState?.(d.viewState);
       drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
       $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
-      $download.disabled = false; renderReferenceInfo(); comparison?.render();
+      $download.disabled = false; invalidateManualConfirmation(); updateManualButtons(); renderReferenceInfo(); comparison?.render();
     }
     async function selectFile(entry, conf) {
       retainEditor(); const ticket = ++fileReadSeq;
@@ -20066,7 +20196,8 @@
         b.setAttribute('aria-pressed', String(b.dataset.customizeMode === codeMode));
         if (b.dataset.customizeMode === 'comparison') b.textContent = codeMode === 'comparison' ? '差分を閉じる' : 'AIの修正案・差分';
       });
-      comparison?.render(); layoutCode();
+      if (inAssistant && manualPending) cancelManualConfirmation();
+      updateManualButtons(); comparison?.render(); layoutCode();
     }
     function setCodeMode(mode) {
       if (mode === 'comparison' && !codePane.closest('.ktr-code-slot')) return;
@@ -20080,7 +20211,7 @@
     }
     function attachAssistant(panel) {
       if (!panel || assistant === panel) return;
-      comparison?.dispose(); assistant = panel;
+      comparison?.dispose(); assistant = panel; observeManualAvailability();
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: () => activeDocument });
       panel.attachCodePanel({ element: codePane, home: codeHome, onVisible() {
         syncCodeSurface(); renderReferenceInfo();
@@ -20091,7 +20222,7 @@
     let listedFiles = [], listedConf = null;
     function updateConsultButton() {
       const entry = $file.value === '' ? null : listedFiles[Number($file.value)];
-      $consult.disabled = !(entry?.type === 'FILE' && listedConf?.kind === 'js' && lastCustomize?.source === 'preview' && typeof consult === 'function');
+      $consult.disabled = manualBusy || !(entry?.type === 'FILE' && listedConf?.kind === 'js' && lastCustomize?.source === 'preview' && typeof consult === 'function');
     }
     function syncFileSelection() {
       const matches = activeDocument && listedConf && activeDocument.target === listedConf.target && activeDocument.kind === listedConf.kind && activeDocument.environment === lastCustomize?.source;
@@ -20296,8 +20427,104 @@
     }
     $('#kt-customize-reference-info [data-open-deps]').addEventListener('click', () => root.ktTabs?.switchTab?.('deps'));
     const unsubscribeScan = KTScan.onChange(renderReferenceInfo);
-    view._ktCustomizeDispose = () => { dependencyRequest += 1; unsubscribeScan(); heightObserver.disconnect(); editorFieldListeners.forEach(listener => listener.dispose()); };
+    view._ktCustomizeDispose = () => { dependencyRequest += 1; unsubscribeScan(); manualEditListener.dispose(); manualStateListener?.(); heightObserver.disconnect(); editorFieldListeners.forEach(listener => listener.dispose()); };
     renderReferenceInfo();
+
+    // Manual edits use their own explicit confirmations; AI-created changes keep the Assistant approval path.
+    function aiBusy() { return ['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result'].includes(assistant?.controller?.getState?.().phase); }
+    function updateManualButtons() {
+      const busy = manualBusy || aiBusy();
+      $register.disabled = busy || !activeDocument || activeDocument.environment !== 'preview';
+      $deploy.disabled = busy;
+      $('#kt-customize-manual-reload').disabled = busy;
+      updateConsultButton();
+    }
+    function cancelManualConfirmation(message = '') {
+      manualPending = null; $manualConfirm.hidden = true;
+      if (message) $manualStatus.textContent = message;
+    }
+    function invalidateManualConfirmation() {
+      documentEpoch += 1;
+      if (manualPending) cancelManualConfirmation('対象またはコードが変わりました。内容を確認して、もう一度操作してください。');
+    }
+    function manualAvailable() {
+      if (manualBusy || codePane.closest('.ktr-code-slot')) return false;
+      if (aiBusy()) { cancelManualConfirmation('AI Assistantの処理が終わってから操作してください。'); return false; }
+      return true;
+    }
+    function showManualConfirmation(pending, description, label) {
+      manualPending = pending; $manualConfirm.querySelector('[data-manual-description]').textContent = description;
+      $manualConfirm.querySelector('[data-manual-confirm]').textContent = label; $manualConfirm.hidden = false;
+    }
+    const manualEditListener = editor.onDidChangeModelContent(() => { invalidateManualConfirmation(); updateManualButtons(); });
+    let manualStateListener = null;
+    function observeManualAvailability() {
+      manualStateListener?.();
+      manualStateListener = assistant?.controller?.subscribe?.(() => { if (aiBusy() && manualPending) cancelManualConfirmation('AI Assistantの処理が終わってから操作してください。'); updateManualButtons(); }) || null;
+    }
+    async function prepareManual(operation) {
+      if (!manualAvailable()) return;
+      const epoch = documentEpoch, document = activeDocument ? { ...activeDocument } : null, content = editor.getValue();
+      if (operation === 'register' && (!document || document.environment !== 'preview')) return;
+      manualBusy = true; updateManualButtons(); cancelManualConfirmation(); $manualStatus.textContent = '登録済みの設定を確認しています。';
+      try {
+        const prepared = operation === 'register' ? await manual.prepareRegistration({ document, content }) : await manual.prepareDeploy();
+        if (epoch !== documentEpoch || aiBusy() || codePane.closest('.ktr-code-slot')) { $manualStatus.textContent = '対象または状態が変わりました。もう一度操作してください。'; return; }
+        const target = document?.target === 'mobile' ? 'モバイル' : 'PC';
+        const description = operation === 'register'
+          ? `${document.name}（${target}）を動作テスト環境に${document.isNew ? '追加' : '登録し、現在の本文を置き換え'}ます。\nエディターに表示しているコードを登録します。運用環境は変更しません。`
+          : 'このアプリの未反映の変更をすべて運用環境へ反映します。\nJavaScriptだけでなく、フォーム・一覧・プロセス管理など、ほかの操作で変更した設定も対象です。動作テスト環境での確認を終えてから実行してください。\n手元の編集中のコードは、この操作では登録しません。';
+        showManualConfirmation({ operation, prepared, document, content, epoch }, description, operation === 'register' ? '動作テスト環境に登録する' : 'すべての変更を運用環境へ反映する');
+        $manualStatus.textContent = '';
+      } catch (error) { $manualStatus.textContent = error?.message || '準備できませんでした。'; if (operation === 'register' && document) $('#kt-customize-manual-reload').hidden = false; }
+      finally { manualBusy = false; updateManualButtons(); }
+    }
+    $register.addEventListener('click', () => prepareManual('register'));
+    $deploy.addEventListener('click', () => prepareManual('deploy'));
+    $manualConfirm.querySelector('[data-manual-cancel]').addEventListener('click', () => cancelManualConfirmation('取り消しました。設定は変更していません。'));
+    $manualConfirm.querySelector('[data-manual-confirm]').addEventListener('click', async () => {
+      if (!manualAvailable() || !manualPending) return;
+      const pending = manualPending;
+      if (pending.epoch !== documentEpoch || (pending.document && editor.getValue() !== pending.content)) { invalidateManualConfirmation(); return; }
+      cancelManualConfirmation(); manualBusy = true; updateManualButtons();
+      $manualStatus.textContent = pending.operation === 'deploy' ? '運用環境へ反映しています。' : '動作テスト環境に登録しています。';
+      try {
+        if (pending.operation === 'reload') {
+          drafts.delete(draftKey(activeDocument)); activeDocument = null; displayDocument(pending.nextDocument);
+          $('#kt-customize-manual-reload').hidden = true; $manualStatus.textContent = '最新の登録済みコードを開きました。';
+        } else if (pending.operation === 'register') {
+          const result = await manual.register(pending.prepared);
+          retainEditor(); const key = draftKey(pending.document), saved = drafts.get(key) || pending.document;
+          const updated = { ...saved, ...result.document, text: saved.text ?? pending.content, registeredText: pending.content };
+          drafts.set(key, updated);
+          if (activeDocument && draftKey(activeDocument) === key) { activeDocument = { ...updated, text: editor.getValue() }; drafts.set(key, activeDocument); }
+          renderDrafts(); $('#kt-customize-manual-reload').hidden = true;
+          $manualStatus.textContent = '動作テスト環境に登録し、読み戻して一致を確認しました。運用環境は変更していません。';
+          await refreshList().catch(() => { $manualStatus.textContent += ' ファイル一覧は取り直してください。'; });
+        } else {
+          await manual.deploy(pending.prepared);
+          $manualStatus.textContent = '運用環境への反映が完了しました。';
+          await refreshList().catch(() => { $manualStatus.textContent += ' ファイル一覧は取り直してください。'; });
+        }
+      } catch (error) {
+        $manualStatus.textContent = error?.message || '処理を完了できませんでした。登録状態を確認してください。';
+        if (pending.operation === 'register' && pending.document) $('#kt-customize-manual-reload').hidden = false;
+      } finally { manualBusy = false; updateManualButtons(); }
+    });
+    $('#kt-customize-manual-reload').addEventListener('click', async () => {
+      if (!manualAvailable() || !activeDocument) return;
+      const document = { ...activeDocument }, epoch = documentEpoch, content = editor.getValue();
+      manualBusy = true; updateManualButtons(); cancelManualConfirmation();
+      try {
+        const current = await getCustomize(appId), entries = current.data?.[document.target]?.[document.kind] || [];
+        const matches = entries.filter(entry => entry.type === 'FILE' && entry.file?.name === document.name);
+        if (current.source !== 'preview' || matches.length !== 1) throw Error('動作テスト環境の同じファイルを特定できません。ファイル一覧を確認してください。');
+        const text = await downloadByKey(matches[0].file.fileKey);
+        if (epoch !== documentEpoch || aiBusy() || codePane.closest('.ktr-code-slot')) return;
+        showManualConfirmation({ operation: 'reload', epoch, document, content, nextDocument: { ...document, fileKey: matches[0].file.fileKey, text, registeredText: text, isNew: false } }, `${document.name}を最新の登録済みコードで開き直します。\nこのファイルの手元の編集は置き換わります。残したい場合はキャンセルして、先に［ローカルに保存］を使ってください。\nkintoneの設定は変更しません。`, '最新のコードで開き直す');
+      } catch (error) { $manualStatus.textContent = error?.message || 'コードを読み直せませんでした。手元の編集は残しています。'; }
+      finally { manualBusy = false; updateManualButtons(); }
+    });
 
     // === 新規ファイルダイアログ ===
     function openNewFileDialog(defaultName, kindLabel) {
@@ -22281,6 +22508,7 @@
         customizeReady = renderCustomize(root, DATA, appId, {
           consult: (seed) => root.ktAi?.consult?.(seed) || { ok: false, message: 'AIの相談画面を準備できていません。' },
           getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
+          onSettingsChanged: info => settingsChanged({ ...info, source: 'customize' }),
           autoLoad: false,
         }).then((c) => { root.ktCustomize = c || null; c?.attachAssistant(root.ktAi); return root.ktCustomize; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); return null; });
         // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
