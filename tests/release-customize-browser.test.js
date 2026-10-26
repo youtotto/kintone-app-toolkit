@@ -31,16 +31,16 @@ async function mount(page) {
     for(const method of ['uploadFile','putPreviewCustomize','deploy','waitDeploy','deployAndWait'])T.KTApi[method]=denied('kintone.'+method);
     window.monacoModels=[]; window.monacoEditors=[]; window.monacoDiffs=[];
     const createModel = (value,language) => {
-      const model={text:String(value),language,disposed:false,listeners:new Set(),getValue(){return this.text;},setValue(text){this.text=String(text);for(const listener of this.listeners)listener();},dispose(){this.disposed=true;this.listeners.clear();},onDidChangeContent(listener){this.listeners.add(listener);return {dispose:()=>this.listeners.delete(listener)};}};
+      const model={text:String(value),language,disposed:false,listeners:new Set(),getValue(){return this.text;},getValueInRange(range){return range.testText||'';},getWordAtPosition(){return {word:this.testWord||''};},setValue(text){this.text=String(text);for(const listener of this.listeners)listener();},dispose(){this.disposed=true;this.listeners.clear();},onDidChangeContent(listener){this.listeners.add(listener);return {dispose:()=>this.listeners.delete(listener)};}};
       monacoModels.push(model); return model;
     };
     const createEditor = (host, options={}) => {
       const area=document.createElement('textarea');area.dataset.testEditor='true';area.style.cssText='width:100%;height:100%;box-sizing:border-box;font:13px monospace';host.appendChild(area);
       let model=options.model||createModel(options.value||'',options.language),off=null;
-      const listeners=new Set();
+      const listeners=new Set(),cursorListeners=new Set();
       const attach=()=>{off?.dispose();off=model.onDidChangeContent(()=>{area.value=model.getValue();for(const listener of listeners)listener();});area.value=model.getValue();};attach();
       area.readOnly=!!options.readOnly;area.addEventListener('input',()=>model.setValue(area.value));
-      const editor={host,area,disposed:false,getValue:()=>model.getValue(),setValue:value=>model.setValue(value),getModel:()=>model,setModel(value){model=value;attach();},onDidChangeModelContent(listener){listeners.add(listener);return {dispose:()=>listeners.delete(listener)};},saveViewState:()=>({selection:[area.selectionStart,area.selectionEnd],top:area.scrollTop}),restoreViewState(saved){if(saved?.selection)area.setSelectionRange(...saved.selection);if(saved)area.scrollTop=saved.top;},getPosition:()=>({lineNumber:1,column:1}),setPosition(){},updateOptions(value){if('readOnly' in value)area.readOnly=value.readOnly;},focus:()=>area.focus(),layout(){},dispose(){off?.dispose();editor.disposed=true;area.remove();}};
+      const editor={host,area,disposed:false,getValue:()=>model.getValue(),setValue:value=>model.setValue(value),getModel:()=>model,setModel(value){model=value;attach();},onDidChangeModelContent(listener){listeners.add(listener);return {dispose:()=>listeners.delete(listener)};},saveViewState:()=>({selection:[area.selectionStart,area.selectionEnd],top:area.scrollTop}),restoreViewState(saved){if(saved?.selection)area.setSelectionRange(...saved.selection);if(saved)area.scrollTop=saved.top;},getPosition:()=>({lineNumber:1,column:1}),getSelection:()=>editor.testSelection||{isEmpty:()=>true},onDidChangeCursorSelection(listener){cursorListeners.add(listener);return {dispose:()=>cursorListeners.delete(listener)};},setTestCursor(word,text=''){model.testWord=word;editor.testSelection={isEmpty:()=>!text,testText:text};for(const listener of cursorListeners)listener();},cursorListenerCount:()=>cursorListeners.size,setPosition(){},updateOptions(value){if('readOnly' in value)area.readOnly=value.readOnly;},focus:()=>area.focus(),layout(){},dispose(){off?.dispose();editor.disposed=true;area.remove();}};
       monacoEditors.push(editor);return editor;
     };
     window.loadMonaco = async()=>({ _kintoneFieldsReady:true,editor:{create:createEditor,createModel,setModelLanguage(model,language){model.language=language;},createDiffEditor(host,options={}){
@@ -53,7 +53,9 @@ async function mount(page) {
     window.matchingReferenceScan=clone(referenceScan);
     const data={appId:'310',appName:'カスタマイズ確認用',fields:{memo:{type:'SINGLE_LINE_TEXT',code:'memo',label:'備考'}},layout:[],status:{enable:false,states:{},actions:[]},views:{views:{}},customize};
     const base={ok:true,env:'preview',appId:'310',loadedAt:'2026-10-26T00:00:00Z',revision:{preview:'7',production:'7'},data,files:[...customize.desktop.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'desktop',text:sources[entry.file.fileKey],sourceAvailable:true})),...customize.mobile.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'mobile',text:sources[entry.file.fileKey],sourceAvailable:true}))],errors:[]};
-    T.KTDevBase.loadForRelease=async()=>clone(base);
+    base.files.forEach(file=>file.env='preview');
+    window.dependencyBase=base;window.baseReads=0;window.pendingDependency=null;window.holdDependency=false;window.dependencyFailure=false;
+    T.KTDevBase.loadForRelease=async()=>{baseReads++;const result=clone(dependencyBase);if(dependencyFailure)throw Error('Dependency fixture failure');if(holdDependency){holdDependency=false;return new Promise(resolve=>{pendingDependency=()=>resolve(result);});}return result;};
     const health={ok:true,supportedContractVersions:[C.CONTRACT_VERSION],entitlements:[{product:C.PRODUCT,features:[C.FEATURE,C.FEATURE_PLANNER]}],registry:{[C.PRODUCT]:{
       [C.FEATURE]:{implemented:true,promptVersions:[C.PROMPT_VERSION],conversation:[...C.CONVERSATION_MARKS,'releaseWorkspace','appExplanation']},
       [C.FEATURE_PLANNER]:{implemented:true,promptVersions:[C.PLANNER_PROMPT_VERSION],...C.PLANNER_MARKS,requirementOps:[...C.PLANNER_MARKS.requirementOps,'releaseWorkspace','formLayoutPlacement','fieldMaintenance']}
@@ -130,9 +132,13 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.ok(initialGeometry.editor.height>=260&&initialGeometry.editor.height<600,'短いコードの編集領域が画面いっぱいに伸びない');
         await page.screenshot({path:path.join(out,colorScheme+'-customize-menu.png'),fullPage:true});
         assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
+        assert.equal(await page.locator('#kt-customize-upload').count(),0,'Customizeに運用環境への反映操作を持たない');
+        assert.equal(await page.locator('[data-customize-mode="comparison"]').isVisible(),false,'CustomizeにAIの差分操作を出さない');
         const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
         const reference=page.locator('#kt-customize-reference-info [data-reference-content]');
-        assert.equal(await reference.isVisible(),true,'Menuの下で登録済みコードの参照情報を読める');
+        assert.equal(await reference.isVisible(),false,'登録済みコードの参照情報は必要時だけ開く');
+        await page.locator('#kt-customize-reference-info > summary').click();
+        assert.equal(await reference.isVisible(),true);
         assert.match(await reference.innerText(),/動作テスト環境/);assert.match(await reference.innerText(),/備考/);
         assert.match(await reference.innerText(),/編集画面を開いたとき（PC）/);assert.match(await reference.innerText(),/app\.record\.edit\.show/);
         assert.match(await reference.innerText(),/登録済みコードの解析結果/);assert.match(await reference.innerText(),/手元の編集は含みません/);
@@ -277,7 +283,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.evaluate(()=>proposalCalls.length),consentWait.calls,'同意せず閉じた場合にAIを呼ばない');
         await page.evaluate(()=>{work.consult({name:'same.js',target:'desktop',type:'FILE',environment:'preview'});CustomizeTest.KTAiClient.createSettingsStore().setConsent(true,'release-raw-source-1');});
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n','AI相談に手編集を差し込まない');
-        assert.equal(await page.locator('#kt-customize-upload').isVisible(),false,'AIの隣で運用環境の手反映ボタンを出さない');
+        assert.equal(await page.locator('#kt-customize-upload').count(),0,'AIの隣で運用環境の手反映ボタンを出さない');
         await page.locator('#tab-ai').click();
         assert.equal(await page.evaluate(()=>document.querySelector('#view-ai #kt-ai-host')===originalHost),true);
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -378,7 +384,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await editor(page).isVisible(),true,'比較を開いても手元のコードを残す');
         const comparisonTop=await page.locator('#kt-customize-comparison').boundingBox(),editorAbove=await page.locator('#kt-customize-editor').boundingBox();
         assert.ok(comparisonTop.y>=editorAbove.y+editorAbove.height,'比較はエディターの下に開く');
-        assert.equal(await page.locator('#kt-customize-upload').isVisible(),false);
+        assert.equal(await page.locator('#kt-customize-upload').count(),0);
         const comparison=()=>page.evaluate(()=>{const d=monacoDiffs.findLast(x=>!x.disposed);return {before:d.getModel().original.getValue(),after:d.getModel().modified.getValue(),readOnly:d.options.readOnly,originalEditable:d.options.originalEditable};});
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
         await page.locator('[data-comparison-file]').selectOption({index:1});
@@ -399,13 +405,18 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0);
         assert.equal(await widthHandle.isVisible(),true,'Customizeへ戻すと幅調整を戻す');
         assert.ok(Math.abs((await editorCssHeight(page))-440)<=2,'表示場所を変えても調整した高さを保つ');
-        await page.screenshot({path:path.join(out,colorScheme+'-customize-comparison-below.png'),fullPage:true});
+        assert.equal(await page.locator('[data-customize-mode="comparison"]').isVisible(),false,'Customizeへ戻るとAI差分の操作を隠す');
+        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),false,'CustomizeへAI差分を持ち出さない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n','差分を隠しても手編集を保持する');
+        await page.screenshot({path:path.join(out,colorScheme+'-customize-editor-only.png'),fullPage:true});
         await page.locator('#tab-ai').click();
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false,'AIタブへ戻るだけではコードを開かない');
         await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.evaluate(()=>JSON.stringify({adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared,runs:work.controller.getState().runs})),stateBeforeTabs);
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
+        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true,'AI Assistantで開き直すと差分表示を戻す');
+        assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false},'戻る前の比較対象を保持する');
         await page.screenshot({path:path.join(out,colorScheme+'-comparison.png'),fullPage:true});
         await page.evaluate(()=>{
           const prepared=displayState.prepared;
@@ -477,7 +488,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
         await page.screenshot({path:path.join(out,colorScheme+'-narrow-proposal.png'),fullPage:true});
         await page.locator('#tab-customize').click();
-        await page.locator('[data-customize-mode="editor"]').click();
+        assert.equal(await page.locator('[data-customize-mode="editor"]').isVisible(),false);
         const narrowCustomize=await geometry(page);
         assert.ok(narrowCustomize.editor.top>=narrowCustomize.menu.bottom,'狭い表示ではMenuとエディターを縦に並べる');
         assert.equal(await widthHandle.isVisible(),false,'狭い表示は幅調整なしで縦に並べる');
@@ -485,7 +496,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await heightHandle.press('ArrowUp');assert.ok(Math.abs((await editorCssHeight(page))-420)<=2);
         await heightHandle.press('ArrowDown');assert.ok(Math.abs((await editorCssHeight(page))-440)<=2);
         assert.equal(await page.locator('.kt-customize-menu').evaluate(el=>el.scrollHeight<=el.clientHeight+1),true,'Menu内の説明と最後の操作を枠内に収める');
-        assert.ok((await page.locator('#kt-customize-manual-actions').boundingBox()).y+(await page.locator('#kt-customize-manual-actions').boundingBox()).height<=narrowCustomize.menu.bottom,'末尾の操作をエディターへ重ねない');
+        assert.ok((await page.locator('#kt-customize-file-details').boundingBox()).y+(await page.locator('#kt-customize-file-details').boundingBox()).height<=narrowCustomize.menu.bottom,'末尾の情報をエディターへ重ねない');
         assert.ok(narrowCustomize.editor.width>=350,'狭い表示でもエディター幅を確保する');
         assert.ok(narrowCustomize.documentWidth<=narrowCustomize.viewport+1,'CustomizeのMenuで横はみ出しを増やさない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
@@ -504,4 +515,55 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
       }finally{await context.close();}
     });
   }finally{await browser.close();}
+});
+
+test('Customizeの依存関係は明示更新し、コードの選択は登録基準だけを参照する（外部通信なし）',{timeout:60000},async()=>{
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  try{for(const colorScheme of ['light','dark']){
+  const context=await browser.newContext({viewport:{width:1440,height:960},colorScheme,serviceWorkers:'block'}),errors=[],unexpected=[];
+  try{
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%}</style><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
+    await selected(page,'same.js','// PC original\nconst memo = 1;\n');
+    const field=page.locator('#kt-customize-field'),content=page.locator('#kt-customize-dependency-content'),status=page.locator('#kt-customize-dependency-status'),refresh=page.locator('#kt-customize-dependency-refresh');
+    assert.equal(await field.isDisabled(),true);const initialBaseReads=await page.evaluate(()=>baseReads);assert.equal(initialBaseReads,1,'会話開始時の取得以外を増やさない');
+    await page.evaluate(()=>{dependencyBase.data.fields.税_番号={code:'税_番号',label:'税の番号',type:'SINGLE_LINE_TEXT'};dependencyBase.data.fields.items={code:'items',label:'明細',type:'SUBTABLE',fields:{qty:{code:'qty',label:'数量',type:'NUMBER'}}};dependencyBase.data.fields.summary={code:'summary',label:'備考の確認',type:'SINGLE_LINE_TEXT',expression:'IF(memo="","未入力","入力済み")'};dependencyBase.files.find(f=>f.name==='second.js').text="kintone.events.on('app.record.edit.show', event => { event.record.memo.value = 'x'; return event; });";});
+    const aiBefore=await page.evaluate(()=>proposalCalls.length);await refresh.click();await assertEventually(()=>field.isDisabled(),false);
+    assert.equal(await page.evaluate(()=>baseReads),initialBaseReads+1);assert.match(await status.innerText(),/動作テスト環境/);
+    await field.selectOption('memo');assert.match(await content.innerText(),/備考/);assert.match(await content.innerText(),/second\.js/);assert.match(await content.innerText(),/備考の確認/);
+    const counts=await page.evaluate(()=>({base:baseReads,files:fileReads.length,scan:[...scanCalls],ai:proposalCalls.length,writes:[...operations]}));
+    await page.evaluate(()=>monacoEditors[0].setTestCursor('税_番号'));assert.equal(await field.inputValue(),'税_番号');assert.match(await content.innerText(),/税の番号/);
+    await page.evaluate(()=>monacoEditors[0].setTestCursor('数量'));assert.equal(await field.inputValue(),'税_番号','ラベルからコードを推定しない');
+    await page.evaluate(()=>monacoEditors[0].setTestCursor('memoSuffix'));assert.equal(await field.inputValue(),'税_番号','部分一致にしない');
+    await page.evaluate(()=>monacoEditors[0].setTestCursor('memo','memo qty'));assert.equal(await field.inputValue(),'税_番号','複数語の選択を補わない');
+    await page.evaluate(()=>monacoEditors[0].setTestCursor('memo','qty'));assert.equal(await field.inputValue(),'qty','選択文字とテーブル内のコードを完全一致で照合する');
+    await page.locator('#kt-customize-field-search').fill('備考');await field.selectOption('memo');assert.match(await content.innerText(),/備考/);await page.locator('#kt-customize-field-search').fill('');
+    await editor(page).fill('// hand edit\nconst memo = 42;\n');assert.match(await content.innerText(),/編集中|手元/);
+    assert.deepEqual(await page.evaluate(()=>({base:baseReads,files:fileReads.length,scan:[...scanCalls],ai:proposalCalls.length,writes:[...operations]})),counts,'選択・検索・手編集では取得・解析・AI・書き込みをしない');
+    await field.selectOption('memo');
+    await page.screenshot({path:path.join(out,colorScheme+'-dependency-selected.png'),fullPage:true});
+    await page.evaluate(()=>dependencyFailure=true);await refresh.click();await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/取得できません/);assert.equal(await field.isDisabled(),true);assert.doesNotMatch(await content.innerText(),/second\.js|備考の確認/,'取得失敗で古い結果を確認済みとして残さない');
+    await page.evaluate(()=>{dependencyFailure=false;holdDependency=true;});await refresh.click();await page.waitForFunction(()=>typeof pendingDependency==='function');assert.match(await status.innerText(),/取得しています/);assert.equal(await content.innerText(),'');
+    const readsWhileBusy=await page.evaluate(()=>baseReads);await page.evaluate(()=>document.querySelector('#kt-customize-dependency-refresh').dispatchEvent(new Event('click')));assert.equal(await page.evaluate(()=>baseReads),readsWhileBusy,'更新中に二重取得しない');
+    await filePicker(page).selectOption({label:'second.js'});await assertEventually(()=>editor(page).inputValue(),'// second original\n');await page.evaluate(()=>pendingDependency());await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/対象が変わった/);assert.equal(await field.isDisabled(),true,'遅い応答で別ファイルの表示を作らない');
+    await selected(page,'same.js','// hand edit\nconst memo = 42;\n');await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');
+    await page.evaluate(()=>holdDependency=true);await refresh.click();await page.waitForFunction(()=>typeof pendingDependency==='function');await page.evaluate(()=>{window.oldDependency=pendingDependency;customize.markStale();});assert.match(await status.innerText(),/設定が変わった/);
+    await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');assert.match(await content.innerText(),/second\.js/,'設定変更後は一覧更新を挟まず依存関係の更新だけで回復する');assert.match(await content.innerText(),/備考の確認/);await field.selectOption('税_番号');const latestText=await content.innerText();await page.evaluate(()=>oldDependency());assert.equal(await field.inputValue(),'税_番号');assert.equal(await content.innerText(),latestText,'古い更新結果で新しい選択や結果を上書きしない');
+    await page.evaluate(()=>dependencyBase.data.customize.revision='8');await page.locator('#kt-customize-refresh').click();await page.waitForFunction(()=>!document.querySelector('#kt-customize-file').disabled);
+    assert.equal(await field.isDisabled(),true);assert.match(await status.innerText(),/設定の版が変わった/);assert.equal(await content.innerText(),'','一覧の新しい版を見つけたら旧依存表示を失効する');
+    await refresh.click();await assertEventually(()=>refresh.isDisabled(),false);assert.match(await status.innerText(),/設定の版が変わった/);assert.equal(await field.isDisabled(),true,'既知の一覧より古い取得結果を確認済みにしない');
+    await page.evaluate(()=>dependencyBase.revision.preview='9');await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');
+    await page.locator('#kt-customize-refresh').click();await page.waitForFunction(()=>!document.querySelector('#kt-customize-file').disabled);assert.equal(await field.isDisabled(),false,'古い一覧の取得で新しい依存結果を失効しない');
+    await page.evaluate(()=>{const current=dependencyBase.files.find(f=>f.target==='desktop'&&f.name==='same.js');current.fileKey='pc-latest';current.text="kintone.events.on('app.record.edit.show', event => { event.record.memo.value = 'latest'; return event; });";dependencyBase.revision.preview='10';});
+    await refresh.click();await assertEventually(()=>field.isDisabled(),false);await field.selectOption('memo');
+    assert.match(await content.innerText(),/same\.js/);assert.match(await content.innerText(),/備考の確認/);assert.match(await content.innerText(),/一致|異な|更新|変わ/,'登録済み本文が更新されたことを示す');
+    assert.equal(await editor(page).inputValue(),'// hand edit\nconst memo = 42;\n','登録済み本文が外部更新されても手編集を置き換えず最新の依存結果を読む');
+    await page.screenshot({path:path.join(out,colorScheme+'-dependency-editor-retained.png'),fullPage:true});
+    await page.evaluate(()=>dependencyBase.env='production');await refresh.click();await assertEventually(()=>refresh.isDisabled(),false);assert.equal(await field.isDisabled(),true);assert.doesNotMatch(await content.innerText(),/second\.js|備考の確認/,'別環境の結果を混ぜない');
+    assert.equal(await editor(page).inputValue(),'// hand edit\nconst memo = 42;\n');
+    assert.equal(await page.evaluate(()=>proposalCalls.length),aiBefore);assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
+    await page.evaluate(()=>document.querySelector('#view-customize')._ktCustomizeDispose());assert.equal(await page.evaluate(()=>monacoEditors[0].cursorListenerCount()),0,'カーソル監視を破棄する');await page.evaluate(()=>work.dispose());
+  }finally{await context.close();}
+  }}finally{await browser.close();}
 });

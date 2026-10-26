@@ -60,6 +60,141 @@ const KTReleaseCustomize = (() => {
       fields: [...fields.values()].map(field => ({ ...field, access: [...field.access].sort(), lines: [...field.lines].sort((a, b) => a - b), confidence: [...field.confidence].sort() })),
       events: [...events.values()], unknownRefs };
   }
+
+  const cloneDependency = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  function dependencyFieldsOf(properties, parent = null) {
+    return Object.values(properties || {}).flatMap(field => !field || typeof field.code !== 'string' ? [] : [
+      { code: field.code, label: field.label || field.code, type: field.type || null, parent,
+        ...(typeof field.expression === 'string' ? { expression: field.expression } : {}) },
+      ...(field.type === 'SUBTABLE' ? dependencyFieldsOf(field.fields, field.code) : [])
+    ]);
+  }
+  // This explicit-refresh adapter only calls the existing Deps/Scanner analysis.
+  // No result from another environment, global cache, or edited buffer is supplied.
+  function createDependencySnapshot(base, analyze) {
+    const snapshot = {
+      status: 'unavailable', reason: '同じアプリ・環境の依存関係をまだ取得していません。',
+      appId: base?.appId == null ? null : String(base.appId), environment: base?.env || null,
+      loadedAt: base?.loadedAt || null, revision: base?.revision?.preview ?? null,
+      basis: 'registered', fields: [], files: [], deps: null, scan: null,
+      missingSettings: cloneDependency((base?.errors || []).filter(item => item.env === base?.env)),
+      unavailableFiles: [], limitations: [
+        '編集中のコードは解析していません。取得した登録済みのコードを表示しています。',
+        '変数で組み立てる参照、プラグインの内部処理、他アプリからの参照と実際の動作は未確認です。',
+        '参照が見つからなくても、依存関係がないとは限りません。'
+      ]
+    };
+    if (!base?.ok || base.env !== 'preview' || !snapshot.appId || !base.loadedAt
+      || !base.data || String(base.data.appId ?? base.appId) !== snapshot.appId || typeof analyze !== 'function') return snapshot;
+    const current = { ok: true, env: base.env, appId: base.appId, loadedAt: base.loadedAt,
+      data: { ...cloneDependency(base.data), relatedApps: {}, plugins: null },
+      files: cloneDependency(base.files || []), incoming: null, deps: null, scan: null };
+    // Source scope is explicit for loaded files. An unidentified source is not
+    // borrowed from a different environment, even if its filename matches.
+    current.files = current.files.map(file => file.env !== base.env
+      ? { name: file.name, target: file.target, kind: file.kind, type: file.type, env: file.env,
+        sourceAvailable: false, note: '同じ環境の本文か確認できません。' } : file);
+    snapshot.files = cloneDependency(current.files);
+    snapshot.fields = dependencyFieldsOf(current.data.fields?.properties || current.data.fields);
+    snapshot.unavailableFiles = current.files.filter(file => file.type !== 'FILE' || file.sourceAvailable === false || typeof file.text !== 'string')
+      .map(file => ({ name: file.name, target: file.target, reason: file.type === 'URL' ? 'URL指定の本文は未確認です。' : file.note || '本文を取得できていません。' }));
+    if (snapshot.missingSettings.length) snapshot.limitations.push('取得できなかった設定があります。確認できた範囲だけを表示します。');
+    if (snapshot.unavailableFiles.length) snapshot.limitations.push('本文を確認できていないファイルがあります。');
+    try {
+      analyze(current);
+      if (current.analysisError || !Array.isArray(current.deps?.edges) || !Array.isArray(current.scan?.results)
+        || !Array.isArray(current.scan?.files) || String(current.deps?.meta?.appId) !== snapshot.appId
+        || String(current.scan?.meta?.appId) !== snapshot.appId || current.scan.meta.source !== base.env
+        || current.scan.meta.scannedAt !== base.loadedAt) throw new Error('DEPENDENCIES_UNAVAILABLE');
+      snapshot.deps = cloneDependency(current.deps); snapshot.scan = cloneDependency(current.scan);
+      snapshot.status = 'ready'; snapshot.reason = null;
+    } catch (_) {
+      snapshot.reason = '依存関係の解析結果を取得できませんでした。';
+    }
+    return snapshot;
+  }
+  function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, snapshot, stale = false } = {}) {
+    const result = { status: 'unavailable', reason: '［依存関係を更新］で登録済みのコードと設定を確認してください。',
+      appId: appId == null ? null : String(appId), environment: environment || null,
+      loadedAt: snapshot?.loadedAt || null, revision: snapshot?.revision ?? null, basis: 'registered',
+      field: null, fields: [], jsReferences: [], formulaReferences: [], unavailableFiles: [],
+      missingSettings: [], documentNotice: null, limitations: cloneDependency(snapshot?.limitations || []) };
+    if (stale) return { ...result, status: 'stale', reason: '設定が変わったため、依存関係を更新してください。' };
+    if (snapshot?.status !== 'ready') return { ...result, reason: snapshot?.reason || result.reason };
+    if (!['preview', 'production'].includes(environment) || appId == null
+      || snapshot.appId !== String(appId) || snapshot.environment !== environment
+      || snapshot.scan?.meta?.source !== environment || String(snapshot.scan?.meta?.appId) !== String(appId)
+      || snapshot.scan?.meta?.scannedAt !== snapshot.loadedAt || String(snapshot.deps?.meta?.appId) !== String(appId)) {
+      return { ...result, reason: '同じアプリ・環境の依存関係を確認できていません。' };
+    }
+    // The editor supplies only the field-code selection. Retain its draft while
+    // showing independently verified, newly fetched registered-source references.
+    if (document && !document.isNew && document.kind === 'js') {
+      const identity = referenceInfoOf({ appId, document, scan: snapshot.scan });
+      if (identity.status !== 'ready') result.documentNotice = '開いているコードと今回取得した登録済みコードの一致は確認できていません。以下は今回取得した登録済みコードから調べた参照です。';
+    }
+    result.fields = cloneDependency(snapshot.fields);
+    result.missingSettings = cloneDependency(snapshot.missingSettings);
+    result.unavailableFiles = cloneDependency(snapshot.unavailableFiles);
+    if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
+    const fields = snapshot.fields.filter(field => field.code === fieldCode);
+    if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
+    result.field = cloneDependency(fields[0]);
+    const seenFiles = new Set();
+    for (const file of snapshot.files) {
+      const id = JSON.stringify([file.target, file.name]);
+      if (seenFiles.has(id)) continue;
+      seenFiles.add(id);
+      if (file.type !== 'FILE' || file.env !== environment || file.sourceAvailable === false || typeof file.text !== 'string') continue;
+      const fileInfo = referenceInfoOf({ appId, document: { name: file.name, target: file.target, kind: 'js', environment,
+        fileKey: file.fileKey, registeredText: file.text }, scan: snapshot.scan });
+      if (fileInfo.status !== 'ready') {
+        result.unavailableFiles.push({ name: file.name, target: file.target, reason: fileInfo.reason });
+        continue;
+      }
+      const reference = fileInfo.fields.find(field => field.code === fieldCode);
+      if (reference) result.jsReferences.push({ name: file.name, target: file.target,
+        current: document?.name === file.name && document.target === file.target && document.kind === 'js',
+        access: reference.access, lines: reference.lines, confidence: reference.confidence });
+    }
+    const formulas = new Map();
+    for (const edge of snapshot.deps.edges) {
+      if (edge.sourceType !== 'FIELD' || edge.targetType !== 'FIELD' || edge.targetId !== fieldCode
+        || edge.relationType !== 'REFERENCES' || edge.context?.settingType !== 'CALC'
+        || (edge.context?.appId != null && String(edge.context.appId) !== String(appId))) continue;
+      const definitions = snapshot.fields.filter(field => field.code === edge.sourceId
+        && ['CALC', 'SINGLE_LINE_TEXT'].includes(field.type) && typeof field.expression === 'string');
+      if (definitions.length !== 1) continue;
+      const definition = definitions[0], existing = formulas.get(definition.code);
+      formulas.set(definition.code, { ...cloneDependency(definition),
+        confidence: [...new Set([...(existing?.confidence || []), ...(typeof edge.confidence === 'string' ? [edge.confidence] : [])])] });
+    }
+    result.formulaReferences = [...formulas.values()];
+    return { ...result, status: 'ready', reason: null };
+  }
+  function renderDependencyInfo(info) {
+    if (!info || info.status !== 'ready') return '<p class="kt-muted">' + escape(info?.reason || '依存関係は未取得です。') + '</p>';
+    const platform = target => target === 'mobile' ? 'モバイル' : 'PC';
+    const accessLabels = { READ: '読み取り', WRITE: '書き換え', CONTROL: '入力の制御', ELEMENT: '画面の操作', SHOW_HIDE: '表示の切替',
+      FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
+    const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
+      + (ref.current ? '（開いているファイル）' : '') + '<br>'
+      + escape(ref.access.map(access => accessLabels[access] || '参照').join('・'))
+      + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
+      + '</li>').join('');
+    const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
+      + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
+    const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
+      ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
+    return '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>'
+      + '<p class="kt-muted">取得した登録済みコードと計算式の参照です。編集中のコードは解析していません。</p>'
+      + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
+      + '<h4>このフィールドを使うJavaScript</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+      + '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+      + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
+      + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
+  }
+
   function comparisonOf(state, selectedRunId = null) {
     const historical = selectedRunId != null;
     const run = historical || ['result', 'rollback-confirm', 'rolling-back', 'checking-result'].includes(state.phase)
@@ -134,6 +269,6 @@ const KTReleaseCustomize = (() => {
     const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
     return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
   }
-  return { createComparison, comparisonOf, referenceInfoOf };
+  return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseCustomize };

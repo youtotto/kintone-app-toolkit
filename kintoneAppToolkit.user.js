@@ -14711,6 +14711,141 @@
         fields: [...fields.values()].map(field => ({ ...field, access: [...field.access].sort(), lines: [...field.lines].sort((a, b) => a - b), confidence: [...field.confidence].sort() })),
         events: [...events.values()], unknownRefs };
     }
+
+    const cloneDependency = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    function dependencyFieldsOf(properties, parent = null) {
+      return Object.values(properties || {}).flatMap(field => !field || typeof field.code !== 'string' ? [] : [
+        { code: field.code, label: field.label || field.code, type: field.type || null, parent,
+          ...(typeof field.expression === 'string' ? { expression: field.expression } : {}) },
+        ...(field.type === 'SUBTABLE' ? dependencyFieldsOf(field.fields, field.code) : [])
+      ]);
+    }
+    // This explicit-refresh adapter only calls the existing Deps/Scanner analysis.
+    // No result from another environment, global cache, or edited buffer is supplied.
+    function createDependencySnapshot(base, analyze) {
+      const snapshot = {
+        status: 'unavailable', reason: '同じアプリ・環境の依存関係をまだ取得していません。',
+        appId: base?.appId == null ? null : String(base.appId), environment: base?.env || null,
+        loadedAt: base?.loadedAt || null, revision: base?.revision?.preview ?? null,
+        basis: 'registered', fields: [], files: [], deps: null, scan: null,
+        missingSettings: cloneDependency((base?.errors || []).filter(item => item.env === base?.env)),
+        unavailableFiles: [], limitations: [
+          '編集中のコードは解析していません。取得した登録済みのコードを表示しています。',
+          '変数で組み立てる参照、プラグインの内部処理、他アプリからの参照と実際の動作は未確認です。',
+          '参照が見つからなくても、依存関係がないとは限りません。'
+        ]
+      };
+      if (!base?.ok || base.env !== 'preview' || !snapshot.appId || !base.loadedAt
+        || !base.data || String(base.data.appId ?? base.appId) !== snapshot.appId || typeof analyze !== 'function') return snapshot;
+      const current = { ok: true, env: base.env, appId: base.appId, loadedAt: base.loadedAt,
+        data: { ...cloneDependency(base.data), relatedApps: {}, plugins: null },
+        files: cloneDependency(base.files || []), incoming: null, deps: null, scan: null };
+      // Source scope is explicit for loaded files. An unidentified source is not
+      // borrowed from a different environment, even if its filename matches.
+      current.files = current.files.map(file => file.env !== base.env
+        ? { name: file.name, target: file.target, kind: file.kind, type: file.type, env: file.env,
+          sourceAvailable: false, note: '同じ環境の本文か確認できません。' } : file);
+      snapshot.files = cloneDependency(current.files);
+      snapshot.fields = dependencyFieldsOf(current.data.fields?.properties || current.data.fields);
+      snapshot.unavailableFiles = current.files.filter(file => file.type !== 'FILE' || file.sourceAvailable === false || typeof file.text !== 'string')
+        .map(file => ({ name: file.name, target: file.target, reason: file.type === 'URL' ? 'URL指定の本文は未確認です。' : file.note || '本文を取得できていません。' }));
+      if (snapshot.missingSettings.length) snapshot.limitations.push('取得できなかった設定があります。確認できた範囲だけを表示します。');
+      if (snapshot.unavailableFiles.length) snapshot.limitations.push('本文を確認できていないファイルがあります。');
+      try {
+        analyze(current);
+        if (current.analysisError || !Array.isArray(current.deps?.edges) || !Array.isArray(current.scan?.results)
+          || !Array.isArray(current.scan?.files) || String(current.deps?.meta?.appId) !== snapshot.appId
+          || String(current.scan?.meta?.appId) !== snapshot.appId || current.scan.meta.source !== base.env
+          || current.scan.meta.scannedAt !== base.loadedAt) throw new Error('DEPENDENCIES_UNAVAILABLE');
+        snapshot.deps = cloneDependency(current.deps); snapshot.scan = cloneDependency(current.scan);
+        snapshot.status = 'ready'; snapshot.reason = null;
+      } catch (_) {
+        snapshot.reason = '依存関係の解析結果を取得できませんでした。';
+      }
+      return snapshot;
+    }
+    function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, snapshot, stale = false } = {}) {
+      const result = { status: 'unavailable', reason: '［依存関係を更新］で登録済みのコードと設定を確認してください。',
+        appId: appId == null ? null : String(appId), environment: environment || null,
+        loadedAt: snapshot?.loadedAt || null, revision: snapshot?.revision ?? null, basis: 'registered',
+        field: null, fields: [], jsReferences: [], formulaReferences: [], unavailableFiles: [],
+        missingSettings: [], documentNotice: null, limitations: cloneDependency(snapshot?.limitations || []) };
+      if (stale) return { ...result, status: 'stale', reason: '設定が変わったため、依存関係を更新してください。' };
+      if (snapshot?.status !== 'ready') return { ...result, reason: snapshot?.reason || result.reason };
+      if (!['preview', 'production'].includes(environment) || appId == null
+        || snapshot.appId !== String(appId) || snapshot.environment !== environment
+        || snapshot.scan?.meta?.source !== environment || String(snapshot.scan?.meta?.appId) !== String(appId)
+        || snapshot.scan?.meta?.scannedAt !== snapshot.loadedAt || String(snapshot.deps?.meta?.appId) !== String(appId)) {
+        return { ...result, reason: '同じアプリ・環境の依存関係を確認できていません。' };
+      }
+      // The editor supplies only the field-code selection. Retain its draft while
+      // showing independently verified, newly fetched registered-source references.
+      if (document && !document.isNew && document.kind === 'js') {
+        const identity = referenceInfoOf({ appId, document, scan: snapshot.scan });
+        if (identity.status !== 'ready') result.documentNotice = '開いているコードと今回取得した登録済みコードの一致は確認できていません。以下は今回取得した登録済みコードから調べた参照です。';
+      }
+      result.fields = cloneDependency(snapshot.fields);
+      result.missingSettings = cloneDependency(snapshot.missingSettings);
+      result.unavailableFiles = cloneDependency(snapshot.unavailableFiles);
+      if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
+      const fields = snapshot.fields.filter(field => field.code === fieldCode);
+      if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
+      result.field = cloneDependency(fields[0]);
+      const seenFiles = new Set();
+      for (const file of snapshot.files) {
+        const id = JSON.stringify([file.target, file.name]);
+        if (seenFiles.has(id)) continue;
+        seenFiles.add(id);
+        if (file.type !== 'FILE' || file.env !== environment || file.sourceAvailable === false || typeof file.text !== 'string') continue;
+        const fileInfo = referenceInfoOf({ appId, document: { name: file.name, target: file.target, kind: 'js', environment,
+          fileKey: file.fileKey, registeredText: file.text }, scan: snapshot.scan });
+        if (fileInfo.status !== 'ready') {
+          result.unavailableFiles.push({ name: file.name, target: file.target, reason: fileInfo.reason });
+          continue;
+        }
+        const reference = fileInfo.fields.find(field => field.code === fieldCode);
+        if (reference) result.jsReferences.push({ name: file.name, target: file.target,
+          current: document?.name === file.name && document.target === file.target && document.kind === 'js',
+          access: reference.access, lines: reference.lines, confidence: reference.confidence });
+      }
+      const formulas = new Map();
+      for (const edge of snapshot.deps.edges) {
+        if (edge.sourceType !== 'FIELD' || edge.targetType !== 'FIELD' || edge.targetId !== fieldCode
+          || edge.relationType !== 'REFERENCES' || edge.context?.settingType !== 'CALC'
+          || (edge.context?.appId != null && String(edge.context.appId) !== String(appId))) continue;
+        const definitions = snapshot.fields.filter(field => field.code === edge.sourceId
+          && ['CALC', 'SINGLE_LINE_TEXT'].includes(field.type) && typeof field.expression === 'string');
+        if (definitions.length !== 1) continue;
+        const definition = definitions[0], existing = formulas.get(definition.code);
+        formulas.set(definition.code, { ...cloneDependency(definition),
+          confidence: [...new Set([...(existing?.confidence || []), ...(typeof edge.confidence === 'string' ? [edge.confidence] : [])])] });
+      }
+      result.formulaReferences = [...formulas.values()];
+      return { ...result, status: 'ready', reason: null };
+    }
+    function renderDependencyInfo(info) {
+      if (!info || info.status !== 'ready') return '<p class="kt-muted">' + escape(info?.reason || '依存関係は未取得です。') + '</p>';
+      const platform = target => target === 'mobile' ? 'モバイル' : 'PC';
+      const accessLabels = { READ: '読み取り', WRITE: '書き換え', CONTROL: '入力の制御', ELEMENT: '画面の操作', SHOW_HIDE: '表示の切替',
+        FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
+      const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
+        + (ref.current ? '（開いているファイル）' : '') + '<br>'
+        + escape(ref.access.map(access => accessLabels[access] || '参照').join('・'))
+        + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
+        + '</li>').join('');
+      const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
+        + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
+      const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
+        ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
+      return '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>'
+        + '<p class="kt-muted">取得した登録済みコードと計算式の参照です。編集中のコードは解析していません。</p>'
+        + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
+        + '<h4>このフィールドを使うJavaScript</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+        + '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+        + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
+        + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
+    }
+
     function comparisonOf(state, selectedRunId = null) {
       const historical = selectedRunId != null;
       const run = historical || ['result', 'rollback-confirm', 'rolling-back', 'checking-result'].includes(state.phase)
@@ -14785,7 +14920,7 @@
       const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
       return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
     }
-    return { createComparison, comparisonOf, referenceInfoOf };
+    return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo };
   })();
 
   /* Browser composition. Authentication, limits and preview executors are reused;
@@ -19674,12 +19809,11 @@
   // ----------------------------
   // [Feature] Customize
   // 登録済みコード・手元の編集と、AI Assistantと共有する相談・修正案・差分を表示する。
-  // JSEdit 互換の編集・保存＋デプロイは従来どおり（利用者の明示操作だけ）。GitHub の Snippets 一覧は廃止（Pattern Library として AI 側へ）。
+  // 手編集はローカル保存まで。AIの差分・反映はAI Assistantの採用した内容と確認を使う。
   // ----------------------------
   //   設定取得の関所（パネルの表示状態）: autoLoad: false なら組み立てだけ行い、一覧（カスタマイズ設定）はタブを開いたときに ensureLoaded で取る
   //   （省略時は今までどおり、組み立ての最後に取る）。取得済みの一覧は、古い印（markStale: ほかの場所で設定を変えた）が無ければ再利用する。
-  //   onSettingsChanged: ［アプリに反映］が成功したときの知らせ（運用環境と動作テスト環境の設定が変わった。ほかの場所の取得済みを古いとする）
-  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null, autoLoad = true, onSettingsChanged = null } = {}) {
+  async function renderCustomize(root, DATA, appId, { consult = null, getInputs = null, autoLoad = true } = {}) {
     const view = root.querySelector('#view-customize');
     if (!view) return null;
 
@@ -19721,7 +19855,8 @@
         #kt-customize-width-resize{align-self:stretch;min-height:160px;cursor:col-resize}#kt-customize-width-resize:before{width:3px;left:8px;top:12px;bottom:12px}
         #kt-customize-height-resize{height:16px;flex:none;cursor:row-resize}#kt-customize-height-resize:before{height:3px;left:calc(50% - 28px);right:calc(50% - 28px);top:6px}
         #kt-customize-reference-info{font-size:12px;flex:none;overflow-wrap:anywhere;border-top:1px solid var(--kt-line);padding-top:12px}#kt-customize-reference-info summary{font-weight:600;cursor:pointer}#kt-customize-reference-info h4{font-size:12px;margin:12px 0 4px}#kt-customize-reference-info p{margin:6px 0;color:var(--kt-muted)}#kt-customize-reference-info ul{padding-left:20px;margin:4px 0;max-height:230px;overflow:auto}#kt-customize-reference-info li{margin:5px 0}#kt-customize-reference-info code{font-size:11px;color:var(--kt-muted)}
-        .kt-customize-modes{display:flex;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
+        #kt-customize-dependencies{font-size:12px;overflow-wrap:anywhere}#kt-customize-dependencies header{display:flex;flex-wrap:wrap;align-items:center;gap:8px}#kt-customize-dependencies header h3{flex:1;margin:0}#kt-customize-dependencies :is(input,select){width:100%;min-width:0;box-sizing:border-box;padding:7px;margin:4px 0;font:inherit;color:var(--kt-text);background:var(--kt-paper);border:1px solid var(--kt-line);border-radius:6px}#kt-customize-dependency-status{color:var(--kt-muted);margin:8px 0}#kt-customize-dependency-content h4{margin:10px 0 5px}#kt-customize-dependency-content ul{padding-left:18px;max-height:230px;overflow:auto}#kt-customize-dependency-content li{margin:6px 0}#kt-customize-dependency-content pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+        .kt-customize-modes{display:none;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
         .kt-customize-picker,.kt-customize-editor-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
         #kt-customize-picker select{min-width:0;max-width:100%;height:34px;padding:4px 6px}
         #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
@@ -19731,20 +19866,19 @@
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
         .kt-customize-menu{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
-        .kt-customize-menu h3{font-size:14px;margin:0}.kt-customize-menu .kt-customize-picker{display:grid;grid-template-columns:minmax(0,1fr) 34px}
+        .kt-customize-menu h3{font-size:13px;margin:0 0 8px}.kt-customize-menu-section{min-width:0}.kt-customize-menu-section+.kt-customize-menu-section{border-top:1px solid var(--kt-line);padding-top:12px}.kt-customize-primary{width:100%;font-weight:600!important;color:var(--kt-accent)!important;border-color:var(--kt-accent)!important}.kt-customize-menu .kt-customize-picker{display:grid;grid-template-columns:minmax(0,1fr) 34px}
         .kt-customize-menu #kt-customize-source,.kt-customize-menu #kt-customize-consult{grid-column:1/-1;width:100%}.kt-customize-menu #kt-customize-file{width:100%}
         .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}.kt-customize-menu .kt-customize-editor-tools>*{flex:1}
-        .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-editor-pane{order:1}
-        .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-manual-actions{order:2}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
+        .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-modes{display:flex}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-menu-section{border:0;padding:0}.ktr-code-slot .kt-customize-primary{width:auto}.ktr-code-slot .kt-customize-editor-pane{order:1}
+        .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
         @container kt-customize-home (max-width:899px){#kt-customize{display:flex;flex-direction:column;gap:12px}.kt-customize-menu{order:-1;align-self:stretch;overflow:visible;flex:none}#kt-customize-width-resize{display:none}}
         #kt-customize-editor{flex:none;height:var(--kt-editor-height,clamp(260px,45dvh,480px));min-height:220px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
-        #kt-customize-file-details,#kt-customize-manual-actions{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
+        #kt-customize-file-details{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
         #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
-        #kt-customize-manual-actions{padding:6px;border:1px solid var(--kt-line);border-radius:6px}#kt-customize-manual-actions p{margin:6px 0}
       </style>
       <div id="kt-customize-workspace">
         <section id="kt-customize-code-pane" aria-label="コードと差分">
-          <nav class="kt-customize-modes" aria-label="コードの表示"><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
+          <nav class="kt-customize-modes" aria-label="コードの表示" hidden><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
           <div id="kt-customize">
             <div class="kt-customize-editor-pane">
               <div id="kt-customize-meta"></div>
@@ -19753,8 +19887,8 @@
               <div id="kt-customize-comparison" hidden></div>
             </div>
             <div id="kt-customize-width-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの幅" aria-orientation="vertical" aria-controls="kt-customize-editor" aria-valuemin="45" aria-valuemax="80" aria-valuenow="65" title="ドラッグまたは左右キーで幅を調整"></div>
-            <aside class="kt-customize-menu" aria-label="Menu">
-              <h3>Menu</h3>
+            <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
+              <section class="kt-customize-menu-section" aria-label="ファイル"><h3>ファイル</h3>
               <div id="kt-customize-picker" class="kt-customize-picker">
                 <select id="kt-customize-source" class="btn" aria-label="ファイルの種類と対象">
                   <option value="JavaScript">JavaScript（PC）</option><option value="css">CSS（PC）</option>
@@ -19762,18 +19896,27 @@
                 </select>
                 <select id="kt-customize-file" class="btn" aria-label="登録済みファイル" disabled><option value="">ファイルを選択</option></select>
                 <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button>
-                <button id="kt-customize-consult" class="btn" disabled title="選んだJavaScriptについてAI Assistantで相談する">AIに相談</button>
               </div>
               <p id="kt-customize-file-status" role="status"></p>
               <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
+              </section>
+              <section class="kt-customize-menu-section" aria-label="相談と保存">
+              <button id="kt-customize-consult" class="btn kt-customize-primary" disabled>AIに相談</button>
+              <p id="kt-customize-editor-note">AI Assistantへ移ります。移動だけではAIを呼びません。手元の編集は送らず、送信時に取得する動作テスト環境のコードで相談します。</p>
               <div class="kt-customize-editor-tools">
                 <button id="kt-customize-download" class="btn" disabled>ローカルに保存</button>
                 <button id="kt-customize-new" class="btn">＋ 新規作成</button>
               </div>
-              <p id="kt-customize-editor-note">手元の編集はAIに送信しません。相談には送信時に取得する動作テスト環境のコードを使います。</p>
-              <details id="kt-customize-reference-info" open><summary>登録済みコードの参照情報</summary><div data-reference-content></div><button class="btn" data-open-deps>Depsで詳しく見る</button></details>
+              </section>
+              <section id="kt-customize-dependencies" class="kt-customize-menu-section" aria-label="フィールドの依存関係">
+                <header><h3>フィールドの依存関係</h3><button id="kt-customize-dependency-refresh" class="btn">依存関係を更新</button></header>
+                <p id="kt-customize-dependency-status" role="status">必要なときに、動作テスト環境の設定と登録済みコードを取得します。</p>
+                <input id="kt-customize-field-search" type="search" placeholder="フィールドを探す" aria-label="フィールドを探す" disabled>
+                <select id="kt-customize-field" aria-label="依存関係を確認するフィールド" disabled><option value="">フィールドを選択</option></select>
+                <div id="kt-customize-dependency-content"></div>
+              </section>
+              <details id="kt-customize-reference-info"><summary>登録済みコードの参照情報</summary><div data-reference-content></div><button class="btn" data-open-deps>Depsで詳しく見る</button></details>
               <details id="kt-customize-file-details"><summary>動作テスト環境と運用環境の違い</summary><div id="kt-customize-env" style="display:none"></div></details>
-              <details id="kt-customize-manual-actions"><summary>手編集の反映操作</summary><p>ここでは手元で編集したコードを運用環境に反映します。AIの修正案は、相談欄の反映前確認から動作テスト環境に反映してください。</p><button id="kt-customize-upload" class="btn" disabled>手編集のコードを運用環境に反映</button></details>
             </aside>
           </div>
         </section>
@@ -19788,7 +19931,6 @@
     const $fileStatus = $('#kt-customize-file-status');
     const $consult = $('#kt-customize-consult');
     const $download = $('#kt-customize-download');
-    const $upload = $('#kt-customize-upload');
     const $new = $('#kt-customize-new');
     const $meta = $('#kt-customize-meta');
     const $refresh = $('#kt-customize-refresh');
@@ -19818,8 +19960,6 @@
     };
 
     // === ヘルパ ===
-    const apiUrl = (p) => kintone.api.url(p, true);
-    const CURRENT = { target: 'desktop', name: null, kind: 'js' };
 
     // src値 → kind/js|css, target/desktop|mobile のマッピング
     const SRC = {
@@ -19839,54 +19979,6 @@
     // ★共通化：実体は KTApi（重複実装を廃止）
     const getCustomize = (app) => KTApi.getCustomize(app);
     const downloadByKey = (fileKey) => KTApi.downloadFile(fileKey);
-    const uploadOnce = (name, content, mime) => KTApi.uploadFile(name, content, mime);
-    function getKindByName(name) {
-      const n = String(name || '').toLowerCase().trim();
-      if (n.endsWith('.css')) return 'css';
-      if (n.endsWith('.js')) return 'js';
-      // 拡張子が無い/特殊な場合は nameヒントで雑に判定
-      return n.includes('css') ? 'css' : 'js';
-    }
-    async function putPreviewReplace(app, target /* 'desktop'|'mobile' */, name, fileKey) {
-      const kind = getKindByName(name);     // ← js or css
-      const { data, source } = await KTApi.getCustomize(app);
-      if (source !== 'preview') {
-        // Phase 21: 動作テスト環境の設定を取得できなかったときは更新しない。以前は運用環境の設定を元に PUT していたため、
-        //   動作テスト環境だけにある未反映の JS / CSS が黙って消えることがあった（取得失敗を「変更なし」と扱わない）
-        throw new Error('動作テスト環境のカスタマイズ設定を取得できなかったため、反映を中止しました（運用環境の設定を元に上書きすると、動作テスト環境にだけある変更が消えます）。権限と通信を確認してください');
-      }
-
-      const desk = data.desktop || { js: [], css: [] };
-      const mobi = data.mobile || { js: [], css: [] };
-
-      // 対象配列（js/css × desktop/mobile）を選択
-      const arr = (target === 'desktop')
-        ? (kind === 'css' ? desk.css : desk.js)
-        : (kind === 'css' ? mobi.css : mobi.js);
-
-      const next = (arr || []).filter(f => !(f.type === 'FILE' && f.file?.name === name));
-      next.push({ type: 'FILE', file: { fileKey, name } });
-
-      // 選んだ配列だけ上書き
-      if (target === 'desktop') {
-        if (kind === 'css') desk.css = next; else desk.js = next;
-      } else {
-        if (kind === 'css') mobi.css = next; else mobi.js = next;
-      }
-
-      const payload = {
-        app,
-        scope: data.scope || 'ALL',
-        desktop: desk,
-        mobile: mobi
-      };
-
-      await KTApi.putPreviewCustomize(app, payload);
-    }
-    // ★共通化：実体は KTApi.deployAndWait
-    const deployAndWait = (app, pollMs = 1500, timeoutMs = 60000) =>
-      KTApi.deployAndWait(app, { pollMs, timeoutMs });
-
     // ★修正：引用符未対応のローカル escapeHtml を廃止し、共通の escapeHtml を使用する
 
     // Selecting a file is local. Resolve its registered body from the fresh AI base at send time.
@@ -19943,12 +20035,12 @@
       $('#kt-customize-drafts-wrap').hidden = drafts.size < 2;
     }
     function displayDocument(d) {
-      retainEditor(); activeDocument = d; CURRENT.target = d.target; CURRENT.kind = d.kind; CURRENT.name = d.name; currentFileName = d.name;
+      retainEditor(); activeDocument = d; currentFileName = d.name;
       editor.setValue(d.text); setEditorLanguage(d.kind === 'css' ? 'css' : 'javascript');
       if (d.viewState) editor.restoreViewState?.(d.viewState);
       drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
       $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
-      $download.disabled = false; $upload.disabled = false; renderReferenceInfo(); comparison?.render();
+      $download.disabled = false; renderReferenceInfo(); comparison?.render();
     }
     async function selectFile(entry, conf) {
       retainEditor(); const ticket = ++fileReadSeq;
@@ -19966,27 +20058,32 @@
     }
     $drafts.addEventListener('change', () => { const next = drafts.get($drafts.value); if (!next) return; ++fileReadSeq; displayDocument(next); });
     let assistant = null, comparison = null, codeMode = 'editor';
-    function setCodeMode(mode) {
-      codeMode = mode; $('#kt-customize-comparison').hidden = mode !== 'comparison';
-      $('#kt-customize-manual-actions').hidden = mode === 'comparison';
+    function syncCodeSurface() {
+      const inAssistant = !!codePane.closest('.ktr-code-slot');
+      codePane.querySelector('.kt-customize-modes').hidden = !inAssistant;
+      $('#kt-customize-comparison').hidden = !inAssistant || codeMode !== 'comparison';
       codePane.querySelectorAll('[data-customize-mode]').forEach(b => {
-        b.setAttribute('aria-pressed', String(b.dataset.customizeMode === mode));
-        if (b.dataset.customizeMode === 'comparison') b.textContent = mode === 'comparison' ? '差分を閉じる' : 'AIの修正案・差分';
+        b.setAttribute('aria-pressed', String(b.dataset.customizeMode === codeMode));
+        if (b.dataset.customizeMode === 'comparison') b.textContent = codeMode === 'comparison' ? '差分を閉じる' : 'AIの修正案・差分';
       });
       comparison?.render(); layoutCode();
+    }
+    function setCodeMode(mode) {
+      if (mode === 'comparison' && !codePane.closest('.ktr-code-slot')) return;
+      codeMode = mode; syncCodeSurface();
     }
     codePane.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode === 'comparison' && codeMode === 'comparison' ? 'editor' : b.dataset.customizeMode)));
     function layoutCode() { editor.layout?.(); comparison?.layout(); }
     function onVisible() {
       assistant?.setCodeOpen(false);
-      layoutCode(); renderReferenceInfo();
+      syncCodeSurface(); renderReferenceInfo();
     }
     function attachAssistant(panel) {
       if (!panel || assistant === panel) return;
       comparison?.dispose(); assistant = panel;
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: () => activeDocument });
       panel.attachCodePanel({ element: codePane, home: codeHome, onVisible() {
-        layoutCode(); renderReferenceInfo();
+        syncCodeSurface(); renderReferenceInfo();
         ensureLoaded().catch(error => { $fileStatus.textContent = 'ファイル一覧を読み込めませんでした。' + (error?.message || ''); });
       } });
       if (root.ktPanel?.visibleTab?.() === 'customize') onVisible();
@@ -20035,7 +20132,7 @@
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
       // Changing the list never changes the editor's file identity or unsaved text.
       resetFilePicker('ファイル一覧を読み込んでいます。');
-      $download.disabled = !activeDocument; $upload.disabled = !activeDocument;
+      $download.disabled = !activeDocument;
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
       let got = null;
@@ -20055,6 +20152,7 @@
       if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       const { data, source } = got;
       lastCustomize = got;
+      if (source === 'preview' && dependencySnapshot && isNewerRevision(data.revision, dependencySnapshot.revision)) { dependencySnapshot = null; dependencyNote = '設定の版が変わったため未確認です。依存関係を更新してください。'; }
       listLoadedGen = gen; renderReferenceInfo();
       const bucket = conf.target === 'mobile' ? (data.mobile || { js: [], css: [] })
         : (data.desktop || { js: [], css: [] });
@@ -20107,7 +20205,7 @@
       return refreshList(typeof live === 'function' ? { live } : null);
     }
     /** ほかの場所で設定を変えた（開発支援の反映・登録など）: 取得済みの一覧を古いとする（取得はしない。次にタブを開いたときに取り直す） */
-    function markStale() { listGen += 1; fileReadSeq += 1; heldList = null; renderReferenceInfo(); }
+    function markStale() { listGen += 1; fileReadSeq += 1; heldList = null; dependencyRequest += 1; dependencyBusy = false; dependencySnapshot = null; dependencyNote = '設定が変わったため未確認です。依存関係を更新してください。'; renderReferenceInfo(); }
 
 
     // Layout controls change only CSS; the editor, drafts and AI state stay in place.
@@ -20135,7 +20233,54 @@
     wireResize($('#kt-customize-height-resize'), 'y', 220, 1000, 20, () => parseFloat(getComputedStyle($editorHost).height), value => codePane.style.setProperty('--kt-editor-height', value + 'px'));
     const heightObserver = new ResizeObserver(() => { const height = parseFloat(getComputedStyle($editorHost).height); if (height > 0) $('#kt-customize-height-resize').setAttribute('aria-valuenow', String(Math.round(height))); });
     heightObserver.observe($editorHost);
+    // Inspect dependencies only on explicit refresh. Cursor changes select an existing field code.
+    const $dependencyRefresh = $('#kt-customize-dependency-refresh'), $fieldSearch = $('#kt-customize-field-search'), $fieldChoice = $('#kt-customize-field');
+    let dependencySnapshot = null, dependencyRequest = 0, dependencyBusy = false, dependencyNote = '', dependencyCode = '';
+    function isNewerRevision(current, known) {
+      return current != null && known != null && Number.isFinite(Number(current)) && Number.isFinite(Number(known)) && Number(current) > Number(known);
+    }
+    function renderDependencies() {
+      const fields = dependencySnapshot?.fields || [], query = $fieldSearch.value.trim().toLocaleLowerCase();
+      const environment = activeDocument?.environment || lastCustomize?.source || 'preview';
+      const info = KTReleaseCustomize.dependencyInfoOf({ appId, document: activeDocument, environment, fieldCode: dependencyCode, snapshot: dependencySnapshot });
+      const available = !dependencyBusy && ['ready', 'select-field', 'unresolved'].includes(info.status);
+      $dependencyRefresh.disabled = dependencyBusy;
+      $fieldSearch.disabled = $fieldChoice.disabled = !available;
+      const visible = available ? fields.filter(field => field.code === dependencyCode || !query || [field.code, field.label, field.type].some(value => String(value || '').toLocaleLowerCase().includes(query))) : [];
+      $fieldChoice.innerHTML = '<option value="">フィールドを選択</option>' + visible.map(field => '<option value="' + escapeHtml(field.code) + '">' + escapeHtml(field.label + ' · ' + field.code) + '</option>').join('');
+      $fieldChoice.value = available ? dependencyCode : '';
+      const time = new Date(dependencySnapshot?.loadedAt), when = dependencySnapshot?.loadedAt && !Number.isNaN(time.getTime()) ? time.toLocaleString('ja-JP') + '取得' : '';
+      $('#kt-customize-dependency-status').textContent = dependencyBusy ? '依存関係を取得しています…' : dependencyNote || (available ? '動作テスト環境' + (when ? '・' + when : '') : '動作テスト環境の依存関係は未確認です。');
+      $('#kt-customize-dependency-content').innerHTML = dependencyBusy || dependencyNote ? '' : KTReleaseCustomize.renderDependencyInfo(info);
+    }
+    async function refreshDependencies() {
+      if (dependencyBusy) return;
+      const request = ++dependencyRequest, generation = listGen, document = activeDocument;
+      dependencyBusy = true; dependencySnapshot = null; dependencyNote = ''; renderDependencies();
+      try {
+        const base = await KTDevBase.loadForRelease({ appId, getImpl: kGet, download: key => KTApi.downloadFile(key) });
+        if (request !== dependencyRequest) return;
+        if (generation !== listGen || document !== activeDocument) { dependencyNote = '対象が変わったため取得結果を表示しません。依存関係を更新してください。'; return; }
+        if (lastCustomize?.source === 'preview' && isNewerRevision(lastCustomize.data?.revision, base.revision?.preview)) { dependencyNote = '設定の版が変わったため取得結果を表示しません。依存関係を更新してください。'; return; }
+        dependencySnapshot = KTReleaseCustomize.createDependencySnapshot(base, KTDevBase.analyze);
+        if (dependencySnapshot.status !== 'ready') dependencyNote = dependencySnapshot.reason || '依存関係を取得できませんでした。もう一度更新してください。';
+      } catch (error) { if (request === dependencyRequest) dependencyNote = '依存関係を取得できませんでした。もう一度更新してください。'; }
+      finally { if (request === dependencyRequest) { dependencyBusy = false; renderDependencies(); } }
+    }
+    function followEditorField() {
+      if (!dependencySnapshot || dependencyBusy || activeDocument?.kind !== 'js') return;
+      const model = editor.getModel(), selection = editor.getSelection?.();
+      const selected = selection && !selection.isEmpty?.() ? model?.getValueInRange?.(selection) : '';
+      const word = selected || model?.getWordAtPosition?.(editor.getPosition?.())?.word || '';
+      if (!word || !dependencySnapshot.fields.some(field => field.code === word)) return;
+      dependencyCode = word; renderDependencies();
+    }
+    $dependencyRefresh.addEventListener('click', refreshDependencies);
+    $fieldSearch.addEventListener('input', renderDependencies);
+    $fieldChoice.addEventListener('change', () => { dependencyCode = $fieldChoice.value; renderDependencies(); });
+    const editorFieldListeners = [editor.onDidChangeCursorSelection?.(followEditorField), editor.onDidChangeModelContent?.(followEditorField)].filter(Boolean);
     function renderReferenceInfo() {
+      renderDependencies();
       const input = typeof getInputs === 'function' ? getInputs() : null;
       const registered = activeDocument && lastCustomize?.data?.[activeDocument.target]?.[activeDocument.kind];
       const currentFiles = Array.isArray(registered) ? registered.filter(entry => entry.type === 'FILE' && entry.file?.name === activeDocument.name) : [];
@@ -20151,10 +20296,9 @@
     }
     $('#kt-customize-reference-info [data-open-deps]').addEventListener('click', () => root.ktTabs?.switchTab?.('deps'));
     const unsubscribeScan = KTScan.onChange(renderReferenceInfo);
-    view._ktCustomizeDispose = () => { unsubscribeScan(); heightObserver.disconnect(); };
+    view._ktCustomizeDispose = () => { dependencyRequest += 1; unsubscribeScan(); heightObserver.disconnect(); editorFieldListeners.forEach(listener => listener.dispose()); };
     renderReferenceInfo();
 
-    // === 保存+デプロイ（ワンボタン） ===
     // === 新規ファイルダイアログ ===
     function openNewFileDialog(defaultName, kindLabel) {
       return new Promise((resolve) => {
@@ -20242,110 +20386,6 @@
       retainEditor(); ++fileReadSeq;
       const d = { name, target: conf.target, kind: conf.kind, environment: 'preview', text: '', isNew: true };
       displayDocument(drafts.get(draftKey(d)) || d); setCodeMode('editor'); editor.focus();
-    });
-
-    function openUploadDialog(defaultName, fileType) {
-      return new Promise((resolve) => {
-
-        // ラッパ
-        const wrap = document.createElement('div');
-        wrap.id = 'kt-upload-dialog';
-        wrap.style.cssText = `
-          position: fixed; inset: 0; z-index: 9999;
-          background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;
-        `;
-
-        // ダイアログ
-        const box = document.createElement('div');
-        box.style.cssText = `
-          width: 520px; max-width: 92vw; border-radius: 12px;
-          background: ${document.documentElement.matches('[data-theme="dark"]') ? '#1c1c1c' : '#fff'};
-          color: inherit; padding: 16px 18px; box-shadow: 0 12px 30px rgba(0,0,0,.25);
-          border: 1px solid ${document.documentElement.matches('[data-theme="dark"]') ? '#333' : '#ddd'};
-        `;
-        box.innerHTML = `
-          <div style="font-weight:700; font-size:16px; margin-bottom:10px;">ファイルをアップロード</div>
-
-          <label style="display:block; font-size:12px; opacity:.8; margin:6px 0 4px;">ファイル名</label>
-          <input id="kt-up-name" type="text" value="${fileType}: ${defaultName || 'template.js'}"
-              style="display:block; width:100%; max-width:100%; box-sizing:border-box;
-                  padding:8px 10px; border-radius:8px; border:1px solid #8882;
-                  background:transparent; color:inherit" readonly/>
-            <div role="alert"
-              style="margin-top:12px; font-size:12px; line-height:1.6; border:1px solid #f59e0b55; background:#f59e0b0f; border-radius:8px; padding:10px 12px;">
-            <div style="font-weight:700; margin-bottom:6px;">⚠️ アップロードについて</div>
-            <ul style="margin:0 0 0 18px; padding:0;">
-              <li>OKボタンを押下すると、運用環境へファイルが上書きアップロードされます。</li>
-              <li>アップロードする前にバックアップを取ることをおすすめします。</li>
-            </ul>
-          </div>
-            <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
-            <button id="kt-up-cancel" class="btn" style="height:32px; padding:0 12px;">キャンセル</button>
-            <button id="kt-up-ok" class="btn" style="height:32px; padding:0 14px; font-weight:600;">OK</button>
-          </div>
-        `;
-
-        wrap.appendChild(box);
-        document.body.appendChild(wrap);
-
-        const $name = box.querySelector('#kt-up-name');
-        const $ok = box.querySelector('#kt-up-ok');
-        const $cancel = box.querySelector('#kt-up-cancel');
-
-        const close = (result) => {
-          wrap.remove();
-          resolve(result);
-        };
-
-        $ok.addEventListener('click', () => {
-          const name = ($name.value || '').trim();
-          if (!name) { $name.focus(); return; }
-          close(name);
-        });
-        $cancel.addEventListener('click', () => close(null));
-        wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
-        $name.select();
-      });
-    }
-    $upload.addEventListener('click', async () => {
-      if (codeMode !== 'editor') return;
-      try {
-        Spinner.show();
-        // ✅ 上書き先は必ず currentFileName を使う
-        if (!currentFileName) {
-          alert('上書き先のファイルが未選択です。先に「Customize」側で対象ファイルを選択してください。');
-          return;
-        }
-
-        const code = editor.getValue().trim();
-        if (!code) throw new Error('コードが空です');
-
-        //ダイアログで入力
-        // ★バグ修正：アップロード先が 'desktop' 固定になっており、
-        //   モバイルJS/CSSを選択していても desktop 側に登録されていた。
-        //   選択中のターゲット（CURRENT.target）を使用する。
-        const fileType = CURRENT.target === 'mobile' ? 'mobile' : 'desktop';
-        const form = await openUploadDialog(currentFileName, fileType);
-        if (!form) return; // cancel
-
-        const fileKey = await uploadOnce(currentFileName, code, getMimeByName(currentFileName));
-        // 設定取得の関所: 書き込んだら（失敗・時間切れでも、書き込みを始めた環境は）ほかの場所の取得済みを古いとする（取り直しは次に要るとき）
-        let wrotePreview = false, deployRequested = false;
-        try {
-          await putPreviewReplace(appId, fileType, currentFileName, fileKey);
-          wrotePreview = true;
-          deployRequested = true;
-          await deployAndWait(appId);
-        } finally {
-          if (wrotePreview && typeof onSettingsChanged === 'function') { try { onSettingsChanged({ preview: true, production: deployRequested, what: 'customize' }); } catch (e) { } }
-        }
-        alert(`✅ デプロイ完了：${currentFileName} `);
-        await refreshList();
-      } catch (e) {
-        alert('失敗: ' + (e?.message || e));
-      } finally {
-        Spinner.hide();
-      }
     });
 
     // === ダウンロード（エディタ内容を保存） ===
@@ -22242,7 +22282,6 @@
           consult: (seed) => root.ktAi?.consult?.(seed) || { ok: false, message: 'AIの相談画面を準備できていません。' },
           getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
           autoLoad: false,
-          onSettingsChanged: (info) => settingsChanged({ ...info, source: 'customize' }),
         }).then((c) => { root.ktCustomize = c || null; c?.attachAssistant(root.ktAi); return root.ktCustomize; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); return null; });
         // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
         root.ktAi = renderAiWorkspace(root, DATA, appId, {
