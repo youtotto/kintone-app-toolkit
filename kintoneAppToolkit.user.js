@@ -7388,7 +7388,7 @@
       CONTEXT_VERSION, LEVELS, DEFAULT_LIMITS, LEVEL_BUDGET_BYTES, relatedFilesFor, readOnlyFieldCodes, generatorOtherFilesOf, effectJsFilesOf,
       build, resolveFocus, buildDictionary, buildCoverage, buildAppOverview,
       toJSON, toMarkdown, toPrompt, measure, measureText, notifyCountText,
-      redactSecretLikeText, edgeKey,
+      redactSecretLikeText, edgeKey, factFromEdge,
       // AI Change Planner（Phase 7）
       PLANNER_CONTEXT_VERSION, PLANNER_LIMITS, buildPlan, toPlannerMarkdown, toPlannerPrompt, longestSharedSubstring,
       // AI Workspace（Phase 15）: 計画の修正・説明のための要約と Context
@@ -13608,7 +13608,8 @@
     return { create, hash, stampOf, generatedBody, questions };
   })();
 
-  /* Raw application facts and explicitly accepted input. No text matching or code analysis. */
+  /* Current application facts, existing Deps results and explicitly accepted input.
+   * Reuse the existing analysis; never interpret the conversation here. */
   'use strict';
   const KTReleaseContext = (() => {
     const clone = x => x == null ? x : JSON.parse(JSON.stringify(x));
@@ -13625,10 +13626,46 @@
       if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return ctx;
     }
-    function factsOf(base) {
+    function dependencyContext(base, tools) {
+      const provenance = { environment: base.env || null, appId: String(base.appId ?? ''), revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null };
+      const missingSettings = (base.errors || []).filter(e => e.env === 'preview').map(e => ({ key: e.what, label: e.label, code: e.code ?? null }));
+      const unavailableFiles = (base.files || []).filter(f => f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
+        .map(f => ({ name: f.name, target: f.target, reason: f.type === 'URL' ? 'url' : 'unavailable' }));
+      const summary = { ...provenance, status: 'unavailable', analyzedAt: null, missingSettings, unavailableFiles,
+        unchecked: ['動的に組み立てるフィールド名など、静的な解析で特定できない参照', 'URL指定のファイルとCSSの本文', 'プラグインの内部処理',
+          '他アプリからこのアプリへの参照', '参照先アプリの設定や処理との整合性', 'レコードの内容と実際の画面での動作'] };
+      let facts = [];
+      if (tools && base.ok && base.env === 'preview') {
+        // Never use Deps/scan/incoming caches or production file bodies. In particular,
+        // a fingerprint does not cover every setting, so do not cache these results.
+        const current = { ok: true, env: 'preview', appId: base.appId, loadedAt: base.loadedAt,
+          data: { ...clone(base.data), relatedApps: {}, plugins: null }, files: clone(base.files || []), incoming: null, deps: null, scan: null };
+        try {
+          tools.analyze(current);
+          if (current.analysisError || !current.deps || !current.scan) throw new Error('DEPENDENCIES_UNAVAILABLE');
+          facts = current.deps.edges.map(edge => ({ ...tools.factFromEdge(current.deps, edge, 'uses'),
+            kind: edge.sourceType === 'CUSTOMIZE' ? 'js-reference' : 'dependency',
+            basis: edge.sourceType === 'CUSTOMIZE' ? 'code' : 'setting', provenance: clone(provenance) }));
+          const unresolved = { fields: current.deps.meta?.unknownJsRefs || [], statuses: current.deps.meta?.unknownJsStatuses || [] };
+          if (unresolved.fields.length || unresolved.statuses.length) facts.push({ kind: 'js-unresolved-reference', confidence: 'UNCERTAIN', basis: 'code', provenance: clone(provenance),
+            statement: 'JavaScript内に、今回のフィールドやステータスの定義と照合できなかった参照の候補があります。実際の動作や変更の必要性は未確認です。', value: clone(unresolved) });
+          summary.status = 'analyzed'; summary.analyzedAt = current.deps.meta?.scannerMergedAt || current.deps.meta?.generatedAt || null;
+        } catch (_) {
+          // Failure is not an empty, successful graph. Raw settings remain available.
+          facts = []; summary.unchecked.unshift('依存関係の解析結果を取得できませんでした');
+        }
+      } else summary.unchecked.unshift('今回の取得結果から依存関係を解析していません');
+      facts.push({ kind: 'dependency-coverage', confidence: 'NOT_ANALYZED',
+        statement: summary.status === 'analyzed'
+          ? '依存関係は、今回取得できた動作テスト環境の設定とJavaScript本文だけから調べたものです。確かさと未確認の範囲を確認してください。参照が見つからないことは、依存関係が無い証明ではありません。'
+          : '今回の依存関係の解析結果は取得できていません。依存関係が無いとは判断せず、取得できた設定や本文と未確認の範囲を分けて説明してください。',
+        value: summary });
+      return { facts, analyzed: summary.status === 'analyzed' };
+    }
+    function factsOf(base, dependencies = { facts: [] }) {
       const data = base.data || {}, facts = [];
       const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
-      add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { revision: base.revision, app: appOf(base) });
+      add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
       // The small `field` descriptor is for the typed dictionary; `value` retains
       // the complete source definition (formula, lookup mappings, defaults, etc.).
       const addFields = (properties, parent = null) => {
@@ -13641,17 +13678,22 @@
       addFields(data.fields);
       const labels = { status: 'プロセス管理', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダーの条件通知', actions: 'アプリアクション', layout: 'フォーム', reports: 'グラフ', settings: 'アプリの設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', appPlugins: 'プラグイン', customize: 'JavaScript / CSS カスタマイズ' };
       for (const [key, value] of Object.entries(data)) {
-        if (!['fields', 'appId', 'appName', 'name'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
+        if (key === 'relatedApps' && Object.keys(value || {}).length) {
+          add(key, '参照先アプリの定義は、別途取得した運用環境の情報です。対象アプリの動作テスト環境と同じ時点・同じ環境の情報ではありません。', value,
+            { confidence: Object.values(value).some(app => app?.error) ? 'NOT_ANALYZED' : 'CERTAIN',
+              provenance: { environment: 'production', loadedAt: base.relatedLoadedAt ?? null } });
+        } else if (!['fields', 'appId', 'appName', 'name', 'plugins', 'relatedApps'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
       }
       for (const file of base.files || []) {
         const available = file.sourceAvailable !== false && typeof file.text === 'string';
         add('js-file', '登録済みファイル「' + file.name + '」', { id: file.fileKey || file.id, name: file.name, target: file.target, type: file.type, source: available ? file.text : null, sourceAvailable: available },
           { confidence: available ? 'CERTAIN' : 'NOT_ANALYZED' });
       }
+      for (const fact of dependencies.facts) facts.push({ ...clone(fact), id: 'E' + (facts.length + 1) });
       if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return facts;
     }
-    const coverageOf = base => ({ fields: true, dependencies: false, javascript: (base.files || []).every(f => f.sourceAvailable !== false), incoming: false, plugins: false, recordData: false });
+    const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
     function dictionaryOf(base) {
       const fields = fieldsOf(base.data?.fields), data = base.data || {};
       return { fieldCodes: fields.map(f => f.code), fieldLabels: fields.map(f => f.label), fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])),
@@ -13661,9 +13703,10 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }) {
+    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
+      const dependencies = dependencyContext(base, dependencyTools);
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-        focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base), coverage: coverageOf(base), truncation: { applied: false, sections: [] },
+        focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base, dependencies), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
@@ -13676,9 +13719,10 @@
           label: a.label, answer: a.answer, ...(a.question ? { question: a.question } : {}), ...(a.kind === 'delegated' ? { delegated: true } : {}) };
       });
     }
-    function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }) {
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base), dictionary: dictionaryOf(base),
-        coverage: coverageOf(base), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
+    function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }, dependencyTools = null) {
+      const dependencies = dependencyContext(base, dependencyTools);
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies), dictionary: dictionaryOf(base),
+        coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
         acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
     }
     function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {
@@ -14424,17 +14468,18 @@
       baseQueue = next; return next;
     }
     const client = budget.wrap(session.client, { limits: () => capability.limits });
+    const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge };
     const services = {
       async propose(input) {
         await requireFeature(KTAiClient.FEATURE);
         await requireFeature(KTAiClient.FEATURE_PLANNER);
-        const ctx = KTReleaseContext.proposal(input);
+        const ctx = KTReleaseContext.proposal(input, dependencyTools);
         const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
         return { ...r, facts: ctx.facts };
       },
       async plan(input) {
         await requireFeature(KTAiClient.FEATURE_PLANNER);
-        const r = await client.plan({ ctx: KTReleaseContext.plan(input), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
+        const r = await client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
         return { plan: r };
       },
       async generate(input) {

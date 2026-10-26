@@ -27,6 +27,13 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
   await page.exposeFunction('base',loadBase);await page.exposeFunction('api',async(name,args)=>mock.api[name](...args));
   await page.exposeFunction('service',async(name,ctx)=>{
    calls.push({name,ctx});if(name==='getHealth'){const result=E.clone(health);if(oldHealth)result.registry.toolkit['assistant-qa'].conversation=result.registry.toolkit['assistant-qa'].conversation.filter(x=>x!=='appExplanation');return result;}
+   if(name==='propose'||name==='plan'){
+    assert.equal(ctx.coverage.dependencies,true);
+    const scope=ctx.facts.find(f=>f.kind==='dependency-coverage');
+    assert.equal(scope.value.environment,'preview');assert.equal(scope.value.appId,'310');
+    assert.equal(scope.value.status,'analyzed');assert.ok(scope.value.loadedAt);
+    assert.equal(ctx.coverage.incoming,false);assert.ok(scope.value.unchecked.length);
+   }
    if(name==='propose'){
     proposalCount++;
     if(proposalCount<=2){

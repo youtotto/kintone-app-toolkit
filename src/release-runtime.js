@@ -69,17 +69,18 @@ function mountReleaseWorkspace(host, d) {
     baseQueue = next; return next;
   }
   const client = budget.wrap(session.client, { limits: () => capability.limits });
+  const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge };
   const services = {
     async propose(input) {
       await requireFeature(KTAiClient.FEATURE);
       await requireFeature(KTAiClient.FEATURE_PLANNER);
-      const ctx = KTReleaseContext.proposal(input);
+      const ctx = KTReleaseContext.proposal(input, dependencyTools);
       const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
       return { ...r, facts: ctx.facts };
     },
     async plan(input) {
       await requireFeature(KTAiClient.FEATURE_PLANNER);
-      const r = await client.plan({ ctx: KTReleaseContext.plan(input), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
+      const r = await client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
       return { plan: r };
     },
     async generate(input) {
