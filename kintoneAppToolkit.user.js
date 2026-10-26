@@ -19581,7 +19581,6 @@
 
     // === カラースキーム ===
     const C = getThemeColors();
-    const BG = C.bgSub2; // または C.bg
     const BD = C.border2;
     const isDark = C.isDark;
 
@@ -19604,102 +19603,83 @@
       document.head.appendChild(st);
     }
 
-    // === レイアウト ===
-    //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
+    // Compact file selection keeps the available height for code and the shared conversation.
     view.innerHTML = `
       <style>
-        #kt-customize-workspace{display:grid;grid-template-columns:minmax(0,1fr);height:100%;min-height:0;gap:16px;overflow:auto;container:kt-customize / inline-size}
+        #view-customize{container:kt-customize-view / inline-size}
+        #kt-customize-workspace{display:grid;grid-template-columns:minmax(0,1fr);height:100%;min-height:0;gap:20px;overflow:auto}
         #kt-customize-ai-slot{min-width:0;min-height:0;display:none}
-        #kt-customize-code-pane{display:flex;flex-direction:column;min-width:0;min-height:0;gap:8px}
-        #kt-customize-workspace.has-assistant{grid-template-columns:minmax(360px,1fr) minmax(440px,1.15fr)}
+        #kt-customize-code-pane{display:flex;flex-direction:column;min-width:0;min-height:0;gap:10px}
+        #kt-customize-workspace.has-assistant{grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}
         #kt-customize-workspace.has-assistant #kt-customize-ai-slot{display:block}
-        #kt-customize-workspace.has-assistant #kt-customize{flex-direction:column-reverse;gap:12px;flex:1;min-height:0;overflow:auto}
-        #kt-customize-workspace.has-assistant .kt-customize-files-pane{flex:0 0 auto!important;max-height:200px;min-height:90px;min-width:0}
-        #kt-customize-workspace.has-assistant .kt-customize-editor-pane{flex:1!important;min-width:0;min-height:250px}
+        #kt-customize{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:auto}
+        .kt-customize-editor-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:360px;gap:8px}
         #kt-customize-workspace [hidden]{display:none!important}
+        #kt-customize-workspace .ktr-in-customize{padding:0 8px 0 0}
         #kt-customize-workspace .ktr-in-customize .ktr-layout{display:flex;flex-direction:column;overflow:auto}
         #kt-customize-workspace .ktr-in-customize .ktr-conversation{flex:0 0 auto;overflow:visible}
-        #kt-customize-workspace .ktr-in-customize .ktr-chat-log{min-height:140px;max-height:32dvh}
+        #kt-customize-workspace .ktr-in-customize .ktr-chat-log{min-height:180px;max-height:42dvh}
         #kt-customize-workspace .ktr-in-customize .ktr-current{border-left:0;border-top:1px solid var(--kt-line);padding:16px 0 0;margin-top:16px;overflow:visible;flex:none}
         #kt-customize-comparison{flex:1;min-height:280px;min-width:0}
-        .kt-customize-modes{display:flex;gap:8px;flex-wrap:wrap}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
-        #kt-customize-drafts{max-width:100%;min-width:0;width:100%}
-        #kt-customize-manual-actions{font-size:12px;padding:6px;border:1px solid var(--kt-line);border-radius:6px}
-        #kt-customize-manual-actions p{margin:6px 0}
-        @media(max-width:1000px){#kt-customize-workspace.has-assistant{display:flex;flex-direction:column;overflow:auto}#kt-customize-ai-slot{flex:none;height:650px}#kt-customize-code-pane{flex:none;min-height:600px}}
+        .kt-customize-modes{display:flex;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
+        .kt-customize-picker,.kt-customize-editor-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
+        #kt-customize-picker select{min-width:0;max-width:100%;height:34px;padding:4px 6px}
+        #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
+        #kt-customize-refresh{width:34px;padding:4px}#kt-customize-consult{white-space:nowrap}
+        #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
+        #kt-customize-meta{flex:1 1 180px;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
+        #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
+        #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
+        #kt-customize-editor{flex:1;min-height:200px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
+        #kt-customize-file-details,#kt-customize-manual-actions{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
+        #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
+        #kt-customize-manual-actions{padding:6px;border:1px solid var(--kt-line);border-radius:6px}#kt-customize-manual-actions p{margin:6px 0}
+        @container kt-customize-view (max-width:900px){#kt-customize-workspace.has-assistant{display:flex;flex-direction:column;overflow:auto}#kt-customize-ai-slot{flex:none;height:620px}#kt-customize-code-pane{flex:none;min-height:600px;height:620px}#kt-customize-workspace .ktr-in-customize{padding-right:0}}
       </style>
       <div id="kt-customize-workspace">
-      <div id="kt-customize-ai-slot"></div>
-      <section id="kt-customize-code-pane" aria-label="コードと差分">
-      <nav class="kt-customize-modes" aria-label="コードの表示"><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
-      <div id="kt-customize-comparison" hidden></div>
-      <div id="kt-customize" class="kt-split-layout">
-        <!-- 左：エディタ -->
-        <div class="kt-split-col kt-flex-column kt-customize-editor-pane" style="flex:2; --kt-col-min:380px; gap:10px;">
-          <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button id="kt-customize-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-
-              <button id="kt-customize-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
+        <div id="kt-customize-ai-slot"></div>
+        <section id="kt-customize-code-pane" aria-label="コードと差分">
+          <nav class="kt-customize-modes" aria-label="コードの表示"><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
+          <div id="kt-customize-comparison" hidden></div>
+          <div id="kt-customize">
+            <div class="kt-customize-editor-pane">
+              <div id="kt-customize-picker" class="kt-customize-picker">
+                <select id="kt-customize-source" class="btn" aria-label="ファイルの種類と対象">
+                  <option value="JavaScript">JavaScript（PC）</option><option value="css">CSS（PC）</option>
+                  <option value="JavaScriptMobile">JavaScript（モバイル）</option><option value="cssMobile">CSS（モバイル）</option>
+                </select>
+                <select id="kt-customize-file" class="btn" aria-label="登録済みファイル" disabled><option value="">ファイルを選択</option></select>
+                <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button>
+                <button id="kt-customize-consult" class="btn" disabled title="選んだJavaScriptについて、このタブで相談する">AIに相談</button>
+              </div>
+              <p id="kt-customize-file-status" role="status"></p>
+              <details id="kt-customize-file-details"><summary>動作テスト環境と運用環境の違い</summary><div id="kt-customize-env" style="display:none"></div></details>
+              <div class="kt-customize-editor-tools">
+                <span id="kt-customize-meta"></span>
+                <button id="kt-customize-download" class="btn" disabled>ローカルに保存</button>
+                <button id="kt-customize-new" class="btn">＋ 新規作成</button>
+              </div>
+              <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
+              <p id="kt-customize-editor-note">手元の編集はAIに送信しません。相談には送信時に取得する動作テスト環境のコードを使います。</p>
+              <div id="kt-customize-editor"></div>
+              <details id="kt-customize-manual-actions"><summary>手編集の反映操作</summary><p>ここでは手元で編集したコードを運用環境に反映します。AIの修正案は、相談欄の反映前確認から動作テスト環境に反映してください。</p><button id="kt-customize-upload" class="btn" disabled>手編集のコードを運用環境に反映</button></details>
             </div>
-            <span id="kt-customize-meta"
-                  style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
           </div>
-
-          <label style="font-size:12px">手元に保持しているコード<select id="kt-customize-drafts" class="btn"><option value="">ファイルを選択してください</option></select></label>
-          <p style="font-size:12px;margin:0" id="kt-customize-editor-note">手元の編集はAIに送信しません。相談には送信時に取得する動作テスト環境のコードを使います。</p>
-          <div id="kt-customize-editor" class="kt-flex-fill"
-            style="
-              border:1px solid ${BD};
-              border-radius:8px;
-              background:${isDark ? '#0f0f0f' : '#fafafa'};
-            ">
-          </div>
-          <details id="kt-customize-manual-actions"><summary>手編集の反映操作</summary><p>ここでは手元で編集したコードを運用環境に反映します。AIの修正案は、相談欄の反映前確認から動作テスト環境に反映してください。</p><button id="kt-customize-upload" class="btn" disabled>手編集のコードを運用環境に反映</button></details>
-        </div>
-
-        <!-- 右：ファイル一覧（登録済みの JavaScript / CSS。PC / モバイル） -->
-        <div class="kt-split-col kt-flex-column kt-customize-files-pane" style="flex:1; --kt-col-min:240px; gap:10px;">
-          <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
-            padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
-            <div style="font-weight:600; padding-left:12px; margin:6px 0;">登録済みファイル</div>
-            <select id="kt-customize-source" class="btn" style="padding:3px 4px; height:32px;">
-              <option value="JavaScript">JavaScript（PC）</option>
-              <option value="css">CSS（PC）</option>
-              <option value="JavaScriptMobile">JavaScript（モバイル）</option>
-              <option value="cssMobile">CSS（モバイル）</option>
-            </select>
-          </div>
-
-          <div class="kt-flex-fixed" style="display:flex; gap:8px;">
-            <button id="kt-customize-refresh" class="btn" style="flex:1; height:32px;">↻ 一覧更新</button>
-          </div>
-
-          <div id="kt-customize-env" class="kt-flex-fixed" style="font-size:11px; opacity:.85; padding:0 4px; display:none;"></div>
-          <div id="kt-customize-list" class="kt-scroll-area"
-            style="
-              border:1px solid ${BD};
-              border-radius:8px;
-              background:${BG};
-              padding:6px;
-            ">
-          </div>
-          <div id="kt-customize-overview" class="kt-flex-fixed"></div>
-        </div>
+        </section>
       </div>
-      </section></div>
     `;
 
     // === 要素参照（このタブ内にスコープ） ===
     const $ = (s) => view.querySelector(s);
-    const $list = $('#kt-customize-list');
+    const $file = $('#kt-customize-file');
+    const $fileStatus = $('#kt-customize-file-status');
+    const $consult = $('#kt-customize-consult');
     const $download = $('#kt-customize-download');
     const $upload = $('#kt-customize-upload');
     const $new = $('#kt-customize-new');
     const $meta = $('#kt-customize-meta');
     const $refresh = $('#kt-customize-refresh');
     const $sourceSel = $('#kt-customize-source');
-    const $overview = $('#kt-customize-overview');
     const $editorHost = $('#kt-customize-editor');
     const $env = $('#kt-customize-env');
 
@@ -19796,26 +19776,6 @@
 
     // ★修正：引用符未対応のローカル escapeHtml を廃止し、共通の escapeHtml を使用する
 
-    // === ファイル行 ===
-    function fileRow({ name, size, badge = 'JS', note = '', onConsult = null, title = '' }) {
-      const el = document.createElement('div');
-      el.style.cssText = `display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${BD};cursor:pointer;`;
-      const sz = size ? Number(size) : 0; // "12345" でも OK
-      el.innerHTML = `
-        <div style="border:1px solid ${BD};border-radius:999px;padding:2px 6px;font-size:11px">${badge}</div>
-        <div style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(title || name)}">${escapeHtml(name)}${note ? `<span style="margin-left:6px; font-size:10px; color:#b26a00; border:1px solid #b26a00; border-radius:8px; padding:0 5px;">${escapeHtml(note)}</span>` : ''}</div>
-        <div style="opacity:.6;font-size:11px">${sz ? sz.toLocaleString() + ' Bytes' : ''}</div>
-      `;
-      // JavaScriptの相談対象を選ぶ。AIは送信時だけ呼び、会話は作り直さない。
-      if (typeof onConsult === 'function') {
-        const b = document.createElement('button');
-        b.type = 'button'; b.className = 'btn kt-customize-consult'; b.textContent = 'AIに相談'; b.title = 'このタブでコードを見ながらAIと相談する';
-        b.style.cssText = 'height:24px; padding:0 8px; font-size:11px; border-color:#6a1b9a; flex:none;';
-        b.addEventListener('click', async (ev) => { ev.stopPropagation(); ev.preventDefault(); b.disabled = true; try { await onConsult(); } finally { b.disabled = false; } });
-        el.appendChild(b);
-      }
-      return el;
-    }
     // Selecting a file is local. Resolve its registered body from the fresh AI base at send time.
     let lastCustomize = null;
     async function consultFile(entry, target) {
@@ -19867,25 +19827,29 @@
         $drafts.appendChild(option);
       }
       $drafts.value = activeDocument ? draftKey(activeDocument) : '';
+      $('#kt-customize-drafts-wrap').hidden = drafts.size < 2;
     }
     function displayDocument(d) {
       retainEditor(); activeDocument = d; CURRENT.target = d.target; CURRENT.kind = d.kind; CURRENT.name = d.name; currentFileName = d.name;
       editor.setValue(d.text); setEditorLanguage(d.kind === 'css' ? 'css' : 'javascript');
       if (d.viewState) editor.restoreViewState?.(d.viewState);
-      drafts.set(draftKey(d), d); renderDrafts();
+      drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
       $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
       $download.disabled = false; $upload.disabled = false;
     }
     async function selectFile(entry, conf) {
       retainEditor(); const ticket = ++fileReadSeq;
       const d = { name: entry.file.name, target: conf.target, kind: conf.kind, environment: lastCustomize?.source || 'preview', fileKey: entry.file.fileKey };
+      $fileStatus.textContent = d.name + ' を読み込んでいます。';
       try {
         const saved = drafts.get(draftKey(d));
         const text = saved ? saved.text : await downloadByKey(entry.file.fileKey);
         if (ticket !== fileReadSeq) return;
         // Retain edits made while another file was loading before replacing the editor.
-        displayDocument(saved || { ...d, text }); setCodeMode('editor');
-      } catch (error) { if (ticket === fileReadSeq) $meta.textContent = 'コードを読み込めませんでした。手元の編集は残しています。'; }
+        displayDocument(saved || { ...d, text }); setCodeMode('editor'); $fileStatus.textContent = '';
+      } catch (error) {
+        if (ticket === fileReadSeq) { syncFileSelection(); $fileStatus.textContent = d.name + ' を読み込めませんでした。表示中のコードと手元の編集は残しています。'; }
+      }
     }
     $drafts.addEventListener('change', () => { const next = drafts.get($drafts.value); if (!next) return; ++fileReadSeq; displayDocument(next); });
     let assistant = null, comparison = null, codeMode = 'editor';
@@ -19906,7 +19870,32 @@
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay });
       if (root.ktPanel?.visibleTab?.() === 'customize') onVisible();
     }
-    const rowsByName = new Map();   // Phase 18 §30: AI タブから「Customize で確認」→ 該当ファイルの行を示す
+    let listedFiles = [], listedConf = null;
+    function updateConsultButton() {
+      const entry = $file.value === '' ? null : listedFiles[Number($file.value)];
+      $consult.disabled = !(entry?.type === 'FILE' && listedConf?.kind === 'js' && lastCustomize?.source === 'preview' && typeof consult === 'function');
+    }
+    function syncFileSelection() {
+      const matches = activeDocument && listedConf && activeDocument.target === listedConf.target && activeDocument.kind === listedConf.kind && activeDocument.environment === lastCustomize?.source;
+      const index = matches ? listedFiles.findIndex(entry => entry.type === 'FILE' && entry.file?.name === activeDocument.name) : -1;
+      $file.value = index < 0 ? '' : String(index); updateConsultButton();
+    }
+    function resetFilePicker(message) {
+      listedFiles = []; listedConf = null; $file.innerHTML = '<option value="">ファイルを選択</option>'; $file.value = ''; $file.disabled = true;
+      $fileStatus.textContent = message; updateConsultButton();
+    }
+    $file.addEventListener('change', () => {
+      ++fileReadSeq; updateConsultButton(); $fileStatus.textContent = '';
+      const entry = $file.value === '' ? null : listedFiles[Number($file.value)];
+      if (entry?.type === 'FILE') selectFile(entry, listedConf);
+      else if (entry?.type === 'URL') $fileStatus.textContent = 'URL: ' + entry.url + '（エディターでは編集できません。表示中のコードは保持しています）';
+    });
+    $consult.addEventListener('click', async () => {
+      if ($consult.disabled) return;
+      const entry = listedFiles[Number($file.value)], target = listedConf.target;
+      $consult.disabled = true;
+      try { await consultFile(entry, target); } finally { updateConsultButton(); }
+    });
     // 設定取得の関所: 取得済みの一覧の世代（markStale で進む）・取得中の Promise・途中で止めた取得の続き（取れた preview の設定）
     let listGen = 0, listLoadedGen = -1, listLoading = null, heldList = null;
     /**
@@ -19924,10 +19913,8 @@
       const src = $sourceSel.value;
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
       // Changing the list never changes the editor's file identity or unsaved text.
-      $list.innerHTML = '<div style="padding:12px; opacity:.7">Loading...</div>';
-      $overview.style.display = 'none'; $overview.innerHTML = '';
+      resetFilePicker('ファイル一覧を読み込んでいます。');
       $download.disabled = !activeDocument; $upload.disabled = !activeDocument;
-      rowsByName.clear();
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
       let got = null;
@@ -19941,7 +19928,7 @@
       if (live && (!got || !live())) {
         // 途中で最小化した: 後続（運用環境の設定）は取らない。取れた設定は残し、次にタブを開いたときに続きから
         if (got) heldList = { got, gen };
-        $list.innerHTML = '<div style="padding:12px; opacity:.7">パネルを展開してタブを開くと、一覧の続きを読み込みます。</div>';
+        resetFilePicker('パネルを展開してタブを開くと、一覧の続きを読み込みます。');
         return { paused: true };
       }
       if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
@@ -19958,52 +19945,39 @@
       if (prodP) prodP.catch(() => { });
       renderEnvDiff(data, source, prodP, () => request === listRequestSeq && gen === listGen && src === $sourceSel.value);
 
-      $list.innerHTML = '';
       if (!files.length && !urls.length) {
-        $list.innerHTML = `<div style="padding:12px; opacity:.7">対象のファイルが見つかりませんでした。</div>`;
+        resetFilePicker('対象のファイルが見つかりませんでした。');
         return;
       }
 
-      // The editor retains its own language while the file list changes.
-      const badge = conf.target === 'mobile'
-        ? (conf.kind === 'js' ? 'mJS' : 'mCSS')
-        : (conf.kind === 'js' ? 'JS' : 'CSS');
       // 動作テスト環境だけにあるファイル（運用環境に無い名前）に印を付ける（§32）
       let prodNames = null;
       if (prodP) { try { const prod = await prodP; const pb = conf.target === 'mobile' ? (prod.mobile || {}) : (prod.desktop || {}); prodNames = new Set(((conf.kind === 'js' ? pb.js : pb.css) || []).map(x => (x.type === 'URL' ? x.url : x.file?.name))); } catch (e) { prodNames = null; } }
       if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       const noteOf = (name) => (prodNames && !prodNames.has(name) ? '動作テスト環境のみ' : '');
 
-      // 一覧は登録順（FILE と URL を混ぜて kintone の順序どおり）
+      // Preserve registration order without giving every file a permanent row.
+      listedFiles = arr; listedConf = conf;
       arr.forEach((entry, i) => {
-        if (entry.type === 'URL') {
-          const name = String(entry.url || '').split('/').pop() || String(entry.url || '');
-          const row = fileRow({ name, size: null, badge: conf.target === 'mobile' ? 'mURL' : 'URL', note: noteOf(entry.url), title: entry.url, onConsult: (conf.kind === 'js' && typeof consult === 'function') ? () => consultFile(entry, conf.target) : null });
-          row.style.cursor = 'default';
-          row.addEventListener('click', () => { $meta.textContent = `URL: ${entry.url}（エディタでは編集できません）`; }, { passive: true });
-          $list.appendChild(row);
-          return;
-        }
-        const f = entry;
-        const row = fileRow({ name: f.file.name, size: f.file.size, badge, note: noteOf(f.file.name), onConsult: (conf.kind === 'js' && typeof consult === 'function') ? () => consultFile(f, conf.target) : null });
-        row.addEventListener('click', () => { selectFile(f, conf); });
-        rowsByName.set(f.file.name, row);
-        $list.appendChild(row);
+        const option = document.createElement('option'); option.value = String(i);
+        const name = entry.type === 'URL' ? String(entry.url || '') : entry.file.name;
+        const note = noteOf(name);
+        option.textContent = name + (entry.type === 'URL' ? '（URL）' : '') + (note ? '（' + note + '）' : '');
+        $file.appendChild(option);
       });
+      $file.disabled = false; $fileStatus.textContent = ''; syncFileSelection();
     }
-    /** Phase 18 §30: AI タブの結果カードから。対象の一覧（PC / モバイル × JS / CSS）へ切り替えて、ファイル名の行を示す（選択はしない・書き込みなし） */
+    /** AIの結果から登録済みファイルを開く。手編集は保持し、AIや反映は実行しない。 */
     async function show({ target = 'desktop', kind = 'js', name = null } = {}) {
       const src = srcOf(target, kind);
       if ($sourceSel.value !== src) $sourceSel.value = src;
-      await refreshList();
-      const row = name ? rowsByName.get(name) || null : null;
-      if (row) {
-        row.style.outline = '2px solid #6a1b9a';
-        try { row.scrollIntoView?.({ block: 'nearest' }); } catch (e) { }
-        setTimeout(() => { row.style.outline = ''; }, 2500);
-      }
-      $meta.textContent = name ? (row ? `AI タブから: ${name}（${target === 'mobile' ? 'モバイル' : 'PC'}）` : `${name} は現在の一覧にありません（復元済み、または別の環境）`) : '';
-      return { found: !!row, src };
+      const loading = refreshList(), selectionTicket = fileReadSeq;
+      const loaded = await loading;
+      if (selectionTicket !== fileReadSeq || loaded?.stale || loaded?.paused || $sourceSel.value !== src || listedConf?.target !== target || listedConf?.kind !== kind) return { found: false, src };
+      const index = name ? listedFiles.findIndex(entry => entry.type === 'FILE' && entry.file?.name === name) : -1;
+      if (index >= 0) { $file.value = String(index); await selectFile(listedFiles[index], listedConf); updateConsultButton(); }
+      else if (name) $meta.textContent = name + ' は現在の一覧にありません（復元済み、または別の環境）';
+      return { found: index >= 0, src };
     }
     /** タブを開いたとき（設定取得の関所）: 一覧をまだ取っていない・古い印があるときだけ取る。取得中ならそれを待つ（二重に送らない）。有効な一覧は再利用する */
     function ensureLoaded({ live = null } = {}) {
@@ -20223,7 +20197,7 @@
 
     // 初期（autoLoad: false のときは、タブを開いたときに ensureLoaded で取る）
     if (autoLoad) await refreshList();
-    else $list.innerHTML = '<div style="padding:12px; opacity:.7">タブを開くと一覧を読み込みます。</div>';
+    else resetFilePicker('タブを開くと一覧を読み込みます。');
     return { show, refresh: refreshList, ensureLoaded, markStale, attachAssistant, onVisible };
   }
 

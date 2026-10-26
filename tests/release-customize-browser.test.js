@@ -18,13 +18,14 @@ async function mount(page) {
   await page.evaluate(async () => {
     const T = CustomizeTest, C = T.KTAiClient;
     const clone = value => structuredClone(value);
-    window.operations = []; window.fileReads = []; window.pendingFile = null;
+    window.operations = []; window.fileReads = []; window.pendingFile = null; window.fileFailure = null; window.holdNextCustomize = false; window.pendingList = null;
     const denied = name => () => { operations.push(name); throw Error('Forbidden in local browser test: ' + name); };
     const file = (name, fileKey) => ({type:'FILE', file:{name,fileKey,size:'40'}});
     const customize = {revision:'7',scope:'ALL',desktop:{js:[file('same.js','pc'),file('second.js','second'),file('slow.js','slow')],css:[file('style.css','css')]},mobile:{js:[file('same.js','mobile')],css:[]}};
     const sources = {pc:'// PC original\nconst memo = 1;\n',mobile:'// mobile original\nconst memo = 2;\n',second:'// second original\n',slow:'// slow original\n',css:'.memo { color: blue; }\n'};
-    T.KTApi.getCustomize = async (_app, options) => ({source:options?.preferPreview === false ? 'prod' : 'preview',data:clone(customize)});
-    T.KTApi.downloadFile = async key => { fileReads.push(key); if(key === 'slow')return new Promise(resolve => {window.pendingFile=()=>resolve(sources.slow);}); return sources[key]; };
+    window.addRegisteredFiles = count => { for(let i=0;i<count;i++){const key='extra-'+i;customize.desktop.js.push(file(key+'.js',key));sources[key]='// extra registered file '+i+'\n';} };
+    T.KTApi.getCustomize = async (_app, options) => { const result={source:options?.preferPreview === false ? 'prod' : 'preview',data:clone(customize)}; if(window.holdNextCustomize&&result.source==='preview'){window.holdNextCustomize=false;return new Promise(resolve=>{window.pendingList=()=>resolve(result);});} return result; };
+    T.KTApi.downloadFile = async key => { fileReads.push(key); if(key===window.fileFailure)throw Error('Fixture download failure'); if(key === 'slow')return new Promise(resolve => {window.pendingFile=()=>resolve(sources.slow);}); return sources[key]; };
     for(const method of ['uploadFile','putPreviewCustomize','deploy','waitDeploy','deployAndWait'])T.KTApi[method]=denied('kintone.'+method);
     window.monacoModels=[]; window.monacoEditors=[]; window.monacoDiffs=[];
     const createModel = (value,language) => {
@@ -70,9 +71,26 @@ async function mount(page) {
     shell.ktTabs.switchTab('customize');
   });
 }
-async function row(page,name){return page.locator('#kt-customize-list > div').filter({has:page.locator('[title="'+name+'"]')});}
+const filePicker = page => page.locator('#kt-customize-file');
 const editor = page => page.locator('#kt-customize-editor textarea[data-test-editor]');
-async function selected(page,name,value){await (await row(page,name)).click();await assertEventually(()=>editor(page).inputValue(),value);}
+async function selected(page,name,value){await filePicker(page).selectOption({label:name});await assertEventually(()=>editor(page).inputValue(),value);}
+async function geometry(page){return page.evaluate(async()=>{
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-customize-ai-slot'),code:rect('#kt-customize-code-pane'),editor:rect('#kt-customize-editor')};
+});}
+function assertHorizontal(g,label){
+  assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
+  assert.ok(Math.abs(g.ai.top-g.code.top)<=2,label+': 相談とコードを同じ高さに並べる');
+  assert.ok(g.ai.width>=320&&g.code.width>=380,label+': 相談とコードに読み書きできる幅を残す');
+  assert.ok(g.ai.left>=g.shell.left-1&&g.code.right<=g.shell.right+1,label+': 枠内に収まる');
+}
+function assertVertical(g,label){
+  assert.ok(g.code.top>=g.ai.bottom-2,label+': 上の相談と下のコードが重ならない');
+  assert.ok(g.ai.width>0&&g.code.width>0,label+': 両方を表示する');
+  assert.ok(g.ai.left>=g.shell.left-1&&g.ai.right<=g.shell.right+1&&g.code.left>=g.shell.left-1&&g.code.right<=g.shell.right+1,label+': 枠内に収まる');
+  assert.ok(g.documentWidth<=g.viewport+1,label+': ページ横スクロールを増やさない');
+}
 async function assertEventually(read,expected){for(let i=0;i<100;i++){const value=await read();if(value===expected)return;await new Promise(resolve=>setTimeout(resolve,20));}assert.equal(await read(),expected);}
 
 test('Customize内の共通会話・差分と手編集の保持（外部通信なし）',{timeout:90000},async t=>{
@@ -92,20 +110,57 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
         await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
+        const initialGeometry=await geometry(page);
+        assertHorizontal(initialGeometry,'全画面');
+        const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
+        // The picker keeps the editing area stable even when an app has many registered files.
+        await page.evaluate(()=>addRegisteredFiles(50));
+        await page.locator('#kt-customize-refresh').click();
+        await page.waitForFunction(()=>[...document.querySelector('#kt-customize-file').options].some(option=>option.textContent==='extra-49.js'));
+        assert.equal(await filePicker(page).evaluate(select=>select.tagName),'SELECT');
+        assert.equal(await filePicker(page).evaluate(select=>select.multiple||select.size>1),false,'登録済みファイルは1行の選択欄');
+        const manyGeometry=await geometry(page);
+        assertHorizontal(manyGeometry,'ファイルが多数ある全画面');
+        assert.ok(manyGeometry.editor.height>=initialGeometry.editor.height-2,'ファイルの数でエディターを狭くしない');
+        await selected(page,'extra-49.js','// extra registered file 49\n');
+        await selected(page,'same.js','// PC original\nconst memo = 1;\n');
+        assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'ファイルの選択・再取得ではAIを呼ばない');
         await editor(page).fill('// PC unsaved edit\nconst memo = 10;\n');
+        // A failed download must leave one consistent visible file and preserve its hand edits.
+        await page.evaluate(()=>{window.fileFailure='second';});
+        await filePicker(page).selectOption({label:'second.js'});
+        await page.waitForFunction(()=>document.querySelector('#kt-customize-file-status').textContent.includes('読み込めませんでした'));
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await filePicker(page).evaluate(select=>select.selectedOptions[0].textContent),'same.js','読み込めなかったBではなく表示中のAを選択欄に戻す');
+        assert.match(await page.locator('#kt-customize-meta').innerText(),/same\.js（PC）/,'表示中のAの名前を残す');
+        assert.match(await page.locator('#kt-customize-file-status').innerText(),/second\.js.*読み込めませんでした/,'Bの失敗は別の場所に表示する');
+        assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection);
+        await page.evaluate(()=>{window.fileFailure=null;});
         await selected(page,'second.js','// second original\n');
         await editor(page).fill('// second unsaved edit\n');
         await selected(page,'same.js','// PC unsaved edit\nconst memo = 10;\n');
         await page.locator('#kt-customize-source').selectOption('JavaScriptMobile');
         await selected(page,'same.js','// mobile original\nconst memo = 2;\n');
         await editor(page).fill('// mobile unsaved edit\n');
+        // An old show(PC) request must not select the mobile file with the same name.
+        await page.evaluate(()=>{window.holdNextCustomize=true;window.pendingList=null;window.pendingShow=customize.show({target:'desktop',kind:'js',name:'same.js'});});
+        await page.waitForFunction(()=>typeof pendingList==='function');
+        await page.locator('#kt-customize-source').selectOption('JavaScriptMobile');
+        await selected(page,'same.js','// mobile unsaved edit\n');
+        await page.locator('#kt-customize-consult').click();
+        const mobileBefore=await page.evaluate(()=>({target:work.controller.getState().consultationTarget,calls:proposalCalls.length,reads:[...fileReads],source:document.querySelector('#kt-customize-source').value,selection:document.querySelector('#kt-customize-file').selectedOptions[0].textContent,meta:document.querySelector('#kt-customize-meta').textContent}));
+        const staleShow=await page.evaluate(async()=>{pendingList();return await pendingShow;});
+        assert.equal(staleShow.found,false,'古いshowの一覧は別の対象の同名ファイルを開かない');
+        assert.equal(await editor(page).inputValue(),'// mobile unsaved edit\n');
+        assert.deepEqual(await page.evaluate(()=>({target:work.controller.getState().consultationTarget,calls:proposalCalls.length,reads:[...fileReads],source:document.querySelector('#kt-customize-source').value,selection:document.querySelector('#kt-customize-file').selectedOptions[0].textContent,meta:document.querySelector('#kt-customize-meta').textContent})),mobileBefore,'新しく選んだモバイル本文・相談対象・AI回数を変更しない');
         await page.locator('#kt-customize-source').selectOption('css');
         await selected(page,'style.css','.memo { color: blue; }\n');
+        assert.equal(await page.locator('#kt-customize-consult').isEnabled(),false,'CSSをJavaScriptの相談対象にしない');
         await editor(page).fill('.memo { color: red; }\n');
         await page.locator('#kt-customize-source').selectOption('JavaScript');
         await selected(page,'same.js','// PC unsaved edit\nconst memo = 10;\n');
         // A late download must not overwrite a newer file selection or its draft.
-        await (await row(page,'slow.js')).click();
+        await filePicker(page).selectOption({label:'slow.js'});
         await page.waitForFunction(()=>typeof pendingFile==='function');
         await selected(page,'second.js','// second unsaved edit\n');
         await page.evaluate(()=>pendingFile());
@@ -131,7 +186,7 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         await page.locator('#kt-release-input').fill('送信していない修正の相談');
         const before=await page.evaluate(()=>({taskId:work.controller.getState().taskId,messages:work.controller.getState().messages,proposal:work.controller.getState().proposal,calls:proposalCalls.length}));
         await page.locator('#tab-customize').click();
-        await (await row(page,'same.js')).locator('button.kt-customize-consult').click();
+        await page.locator('#kt-customize-consult').click();
         assert.equal(await page.locator('#view-customize').isVisible(),true,'相談を始めてもCustomizeに残る');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談','入力途中の相談を上書きしない');
         assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-ai-slot #kt-ai-host')===originalHost),true,'同じDOMを移動する');
@@ -219,14 +274,19 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         await page.locator('[data-customize-mode="editor"]').click();
         assert.equal(await editor(page).isVisible(),true);
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        await page.locator('#kt-full').click();
+        assertHorizontal(await geometry(page),'1440px画面のパネル');
+        // Simulate a narrower host panel while keeping the browser viewport wide.
+        await page.evaluate(()=>document.querySelector('#kt-toolkit').style.width='760px');
+        assertVertical(await geometry(page),'760px幅のパネル');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
+        await page.screenshot({path:path.join(out,colorScheme+'-panel.png'),fullPage:true});
+        await page.locator('#kt-full').click();
         await page.setViewportSize({width:430,height:932});
-        const geometry=await page.evaluate(()=>{
-          const shell=document.querySelector('#kt-toolkit').getBoundingClientRect(),ai=document.querySelector('#kt-customize-ai-slot').getBoundingClientRect(),code=document.querySelector('#kt-customize-code-pane').getBoundingClientRect();
-          return {viewport:innerWidth,shellRight:shell.right,aiWidth:ai.width,codeWidth:code.width,aiTop:ai.top,aiBottom:ai.bottom,codeTop:code.top,documentWidth:document.documentElement.scrollWidth};
-        });
-        assert.ok(geometry.shellRight<=geometry.viewport+1,'狭い画面で外枠がはみ出さない');
-        assert.ok(geometry.codeTop>=geometry.aiBottom-2,'狭い画面では相談とコードを縦に並べる');
-        assert.ok(geometry.documentWidth<=geometry.viewport+1,'ページ横スクロールを増やさない');
+        const narrowGeometry=await geometry(page);
+        assert.ok(narrowGeometry.shell.right<=narrowGeometry.viewport+1,'狭い画面で外枠がはみ出さない');
+        assertVertical(narrowGeometry,'430px全画面');
         await page.screenshot({path:path.join(out,colorScheme+'-narrow.png'),fullPage:true});
         await page.locator('[data-customize-mode="comparison"]').scrollIntoViewIfNeeded();
         await page.locator('[data-customize-mode="comparison"]').click();
