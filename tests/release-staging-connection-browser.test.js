@@ -30,6 +30,7 @@ test('検証用接続先の切替は未接続・会話前に限定し、保存�
    const page=await context.newPage();page.setDefaultTimeout(3000);page.on('pageerror',e=>errors.push(e.message));await page.goto('https://connection.test.invalid/');
    await page.addScriptTag({content:bundle()});
    await page.evaluate(options=>{
+    if(options.devMode!==false)localStorage.setItem('ktAi.devMode','1');
     const C=ConnectionTest;window.settings=C.KTAiClient.createSettingsStore();window.originalSave=settings.save.bind(settings);
     if(options.saved)originalSave(options.saved);
     settings.setConsent(true,'release-raw-source-1');
@@ -49,6 +50,19 @@ test('検証用接続先の切替は未接続・会話前に限定し、保存�
    const select=()=>page.locator('dialog [data-staging-select]');
    return {page,context,requests,errors,open,select,completeReady:()=>!!releaseComplete,complete:()=>releaseComplete()};
   }
+  await t.test('通常の接続画面には検証上限とstaging切替を出さず接続操作を保つ',async()=>{
+   const h=await setup({devMode:false});try{
+    await h.page.locator('[data-release-action="connect"]').first().click();
+    assert.equal(await h.page.locator('dialog [data-budget-panel]').count(),0);
+    assert.equal(await h.page.locator('dialog [data-staging-select]').count(),0);
+    assert.doesNotMatch(await h.page.locator('dialog').innerText(),/米ドル|呼び出し上限|開発者向け|staging/);
+    assert.equal(await h.page.locator('[data-connect]').isEnabled(),true);
+    await h.page.locator('[data-connect]').click();
+    await h.page.waitForFunction(()=>document.querySelector('[data-connect]').disabled===false);
+    assert.ok(h.requests.some(r=>r.url.endsWith('/v2/connect/start')));
+    assert.ok(h.requests.every(r=>!r.url.startsWith(STAGING+'/')));
+   }finally{await h.context.close();}assert.deepEqual(h.errors,[]);
+  });
   await t.test('未接続の既定環境からのみ固定stagingへ保存し、下書き・同意・利用記録を保つ',async()=>{
    const h=await setup();try{
     await h.page.locator('#kt-release-input').evaluate(el=>{el.value='まだ送らない下書き';el.dispatchEvent(new Event('input',{bubbles:true}));});await h.open();

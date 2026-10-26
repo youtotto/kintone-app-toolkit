@@ -74,8 +74,19 @@ const KTReleaseExecution = (() => {
         e.message === 'cycle' ? 'JavaScriptの一括登録の前後に、両立しない設定の依存関係があります。登録を複数回に分ける計画はまだ反映できません。' : '先に必要な手順が計画にありません。'); }
       return { steps: ordered, ids: js.map(s => s.id) };
     }
-    async function prepare({ plan, artifacts, base }) {
+    async function prepare({ plan, artifacts, base, previousBase = null }) {
       const current = toCurrent(base), operations = fileOperations(artifacts, plan);
+      if (previousBase && artifacts.length) {
+        const verificationBasis = value => ({ fields: value.fields?.properties || {},
+          status: { enable: value.status?.enable ?? false, states: value.status?.states ?? null, actions: value.status?.actions ?? null },
+          scope: value.customize?.scope ?? null,
+          files: (value.files || []).map(f => ({ target: f.target, name: f.name, text: f.text ?? null, sourceAvailable: f.sourceAvailable === true })),
+          registrations: Object.fromEntries(['desktop', 'mobile'].map(target => [target, (value.customize?.[target]?.js || []).map(f => ({ type: f.type, name: f.file?.name ?? f.name ?? null, url: f.url ?? null }))])) });
+        if (await hash(verificationBasis(toCurrent(previousBase))) !== await hash(verificationBasis(current))) {
+          return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: [{ code: 'VERIFICATION_CONTEXT_CHANGED',
+            message: 'JavaScriptの検証に使ったフィールド・プロセス管理・登録済みJavaScriptが変わりました。このコードはそのまま反映できません。最新の設定で変更案を作り直してください。' }] };
+        }
+      }
       const identityReasons = fileIdentityReasons(operations, current);
       if (identityReasons.length) return { ok: false, settings: null, files: null, operations, changes: [], confirmations: [], unchanged: [], reasons: identityReasons };
       const order = registrationOrder(plan.steps || [], operations);
@@ -216,8 +227,86 @@ const KTReleaseExecution = (() => {
         changes: (run.prepared.changes || []).filter(change => !restoredChanges.includes(change)), reasons: [...(files?.blockers || []), ...(settings?.blockers || [])],
         confirmations: [...(files?.warnings || []), ...(settings?.warnings || [])] };
     }
+    // Observe transport outcomes even when an existing executor catches the error.
+    function rollbackTransport() {
+      const state = { written: false, uncertain: false };
+      const rejected = e => /^(GAIA_|CB_)/.test(e?.code || '') || (e?.status >= 400 && e?.status < 500);
+      const tracked = new Proxy(api, { get(target, key) {
+        const fn = target[key]; if (typeof fn !== 'function') return fn;
+        const read = String(key).startsWith('get') || key === 'downloadFile';
+        const write = !read && key !== 'uploadFile';
+        return async (...args) => {
+          try { const result = await fn.apply(target, args); if (write) state.written = true; return result; }
+          catch (error) { if ((write && !rejected(error)) || (read && state.written)) state.uncertain = true; throw error; }
+        };
+      } });
+      return { api: tracked, state };
+    }
+    async function recheckRollback(run) {
+      let files = clone(run.rollback?.files || null), settings = clone(run.rollback?.settings || null);
+      const answer = (status, recoveryState, message, retryable = false, reasons = []) => ({ status, recoveryState, message, retryable, files, settings, reasons });
+      const r = run.result;
+      if (!run.rollback || !r || r.status === 'unknown' || !r.written ||
+          (r.files && (r.files.appId !== String(appId) || r.files.env !== 'preview')) ||
+          (r.settings && (r.settings.appId !== String(appId) || r.settings.env !== 'preview'))) {
+        return answer('unknown', 'unknown', '対象の反映と復元の記録を確認できません。', false, [{ code: 'ROLLBACK_EVIDENCE_MISMATCH', message: '復元の対象を確認してください。' }]);
+      }
+      const states = [];
+      try {
+        if (r.files?.put?.ok) {
+          const execution = r.files, before = execution.snapshot, after = execution.actualAfterRaw;
+          if (!before || !after) return answer('unknown', 'unknown', 'JavaScriptの反映前後の記録がありません。');
+          const current = jsExecutor.snapshotOf(await api.getPreviewCustomize(String(appId)));
+          // A replacement receives a new file key. Compare its exact saved source;
+          // every untouched entry must retain its identity and position.
+          let restored = !jsExecutor.diffSnapshots(before, current, { compareFileKey: false }).length;
+          if (restored) for (const target of ['desktop', 'mobile']) for (const kind of ['js', 'css']) {
+            const entries = before[target]?.[kind] || [];
+            for (let i = 0; i < entries.length; i++) {
+              const entry = entries[i], actual = current[target][kind][i];
+              if (entry.type !== 'FILE') continue;
+              const replacement = kind === 'js' && execution.steps?.find(st => st.kind === 'REPLACE_FILE' && st.target === target && st.name === entry.name && st.position === i);
+              if (replacement) {
+                if (typeof replacement.currentSource !== 'string' || typeof api.downloadFile !== 'function') return answer('unknown', 'unknown', '戻す前のJavaScript本文を照合できません。');
+                if (await api.downloadFile(actual.fileKey) !== replacement.currentSource) restored = false;
+              } else if (entry.fileKey !== actual.fileKey) restored = false;
+            }
+          }
+          if (restored) {
+            files = { ...files, executionId: execution.executionId, appId: execution.appId, env: execution.env,
+              status: 'ROLLED_BACK_VERIFIED', afterRollbackRevision: current.revision, restoredSnapshot: clone(current),
+              verification: { restoredToSnapshot: true }, message: '現在のJavaScriptは反映前の内容と一致しています。' };
+            states.push('restored');
+          } else if (!jsExecutor.diffSnapshots(after, current).length) {
+            files = { ...files, status: 'ROLLBACK_PENDING', restoredSnapshot: null, verification: null, message: 'JavaScriptは反映後の内容のままです。' };
+            states.push('applied');
+          } else return answer('partial', 'changed', 'JavaScriptが反映前後の記録と異なります。自動では元に戻しません。', false, [{ code: 'ROLLBACK_STALE', message: '現在のJavaScriptを確認してください。' }]);
+        }
+        if (settingWritten(r.settings)) {
+          const checked = await planExecutor.prepareRollback(clone(r.settings), run.prepared.settings, { api, observe: true });
+          settings = clone(checked);
+          if (!good(checked)) {
+            const unavailable = (checked.blockers || []).some(b => ['FETCH_FAILED', 'PERMISSION_DENIED', 'NO_SNAPSHOT', 'NO_ACTUAL_AFTER'].includes(b.code));
+            return answer(unavailable ? 'unknown' : 'partial', unavailable ? 'unknown' : 'changed', unavailable ? '現在の設定を取得できず、復元の結果を確認できません。' : '反映前後の記録と異なる設定があります。自動では元に戻しません。', false, checked.blockers || []);
+          }
+          if (!Array.isArray(checked.observations) || checked.observations.length !== checked.steps.length) return answer('unknown', 'unknown', '設定の復元結果を照合できません。');
+          const restored = checked.observations.filter(o => o.restored).length;
+          settings.steps = checked.steps.map(step => ({ ...step, status: checked.observations.find(o => o.stepId === step.stepId)?.restored ? 'ROLLBACK_VERIFIED' : 'ROLLBACK_PENDING' }));
+          settings.status = restored === checked.steps.length ? 'ROLLED_BACK_VERIFIED' : 'PREPARED';
+          settings.verification = { restoredToSnapshot: restored === checked.steps.length };
+          states.push(restored === checked.steps.length ? 'restored' : restored ? 'partial' : 'applied');
+        }
+        if (!states.length) return answer('unknown', 'unknown', '復元の対象を確認できません。');
+        if (states.every(s => s === 'restored')) return answer('complete', 'restored', '現在の設定を確認し、この反映の変更が元に戻っていることを確認しました。');
+        return answer('partial', states.every(s => s === 'applied') ? 'applied' : 'partial', states.every(s => s === 'applied') ? 'この反映の変更は、まだ元に戻っていません。戻す内容をもう一度確認できます。' : '一部の変更は元に戻っています。残りの内容をもう一度確認できます。', true);
+      } catch (error) {
+        return { ...answer('unknown', 'unknown', '現在の設定を取得できず、復元の結果を確認できません。'), error: { code: error?.code, message: error?.message } };
+      }
+    }
     async function rollback({ run, prepared, onProgress = () => {} }) {
       let files = clone(prepared.restoredFiles || null), settings = null, writeInFlight = false;
+      const transport = rollbackTransport();
+      const unknown = () => ({ status: 'unknown', files, settings, recoveryState: 'unknown', retryable: false, message: '復元の結果を確認できません。もう一度戻す前に、現在の設定を確認してください。' });
       try {
         if (!prepared.ok || run.result?.written == null || run.result?.status === 'unknown' || run.rollback?.status === 'unknown' ||
           (!!files !== (run.rollback?.files?.status === 'ROLLED_BACK_VERIFIED')) ||
@@ -228,10 +317,11 @@ const KTReleaseExecution = (() => {
         if (restoredReasons.length) return { status: 'partial', files, reasons: restoredReasons, message: 'JavaScriptを戻した後に設定が変わったため、残りを戻していません。' };
         if (prepared.files) {
           let readback = null;
-          const rollbackApi = { ...api, async getPreviewCustomize(...args) { const current = await api.getPreviewCustomize(...args); readback = clone(current); return current; } };
+          const rollbackApi = { ...transport.api, async getPreviewCustomize(...args) { const current = await transport.api.getPreviewCustomize(...args); readback = clone(current); return current; } };
           writeInFlight = true;
           files = await jsExecutor.executeRollback(prepared.files, { api: rollbackApi, execution: clone(run.result.files), onProgress: result => { files = result; onProgress(result); } });
           writeInFlight = false;
+          if (transport.state.uncertain) return unknown();
           // Preserve the same response that the existing executor verified, not a later
           // read which could already contain another person's change.
           if (files.status === 'ROLLED_BACK_VERIFIED' && String(readback?.revision) === String(files.afterRollbackRevision)) files.restoredSnapshot = jsExecutor.snapshotOf(readback);
@@ -244,8 +334,9 @@ const KTReleaseExecution = (() => {
           if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
           if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
           writeInFlight = true;
-          settings = await planExecutor.executeRollback(checked, { api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
+          settings = await planExecutor.executeRollback(checked, { api: transport.api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
           writeInFlight = false;
+          if (transport.state.uncertain) return unknown();
           if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
         }
         return { status: 'complete', files, settings, message: 'この反映で変更した内容を元に戻しました。' };
@@ -255,7 +346,7 @@ const KTReleaseExecution = (() => {
           error: { code: error?.code, message: error?.message } };
       }
     }
-    return { prepare, apply, prepareRollback, rollback };
+    return { prepare, apply, prepareRollback, rollback, recheckRollback };
   }
   return { create };
 })();

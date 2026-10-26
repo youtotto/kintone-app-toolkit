@@ -13,9 +13,17 @@ const KTReleaseWorkspace = (() => {
   }
   const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
   const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
-  const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back']);
+  const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
   const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
   const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
+  // Rechecking never regenerates code or reuses an approval. It is available only
+  // while this task has no execution and every required artifact is complete.
+  const canReprepare = state => !!state.plan && !state.proposalPending &&
+    ['blocked', 'incomplete'].includes(state.phase) &&
+    !(state.runs || []).some(run => run.taskId === state.taskId) &&
+    !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
+    (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
+    (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
   // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
   function mainPlan(value) {
     const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -97,20 +105,21 @@ const KTReleaseWorkspace = (() => {
       if (unfinished) { set({ phase: 'incomplete', progress: '' }); return; }
       await prepareInner(live);
     }
-    async function prepareInner(live = () => true) {
+    async function prepareInner(live = () => true, acceptFresh = false) {
       if ((state.plan?.customizations || []).some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'))) {
         set({ phase: 'incomplete', prepared: null, progress: '' }); return;
       }
       set({ phase: 'preparing', progress: '反映する内容を確認しています。' });
       const fresh = await getBase('prepare');
       if (!live()) return;
-      if (stampOf(fresh) !== stampOf(base)) { set({ phase: 'blocked', prepared: null, error: { code: 'BASE_CHANGED', message: '作成中に設定が変わりました。最新の設定で変更案を作り直してください。' }, progress: '' }); return; }
-      const prepared = await execution.prepare({ plan: clone(state.plan), artifacts: clone(state.artifacts), base: fresh });
+      if (!acceptFresh && stampOf(fresh) !== stampOf(base)) { set({ phase: 'blocked', prepared: null, error: { code: 'BASE_CHANGED', message: '作成中に設定が変わりました。最新の設定で確認し直してください。' }, progress: '' }); return; }
+      const prepared = await execution.prepare({ plan: clone(state.plan), artifacts: clone(state.artifacts), base: fresh, ...(acceptFresh ? { previousBase: base } : {}) });
       if (!live()) return;
       const signature = await hash({ plan: state.plan, artifacts: state.artifacts, baseStamp: stampOf(fresh), changes: prepared.changes, confirmations: prepared.confirmations });
       if (!live()) return;
       prepared.baseStamp = stampOf(fresh); prepared.signature = signature;
-      base = fresh;
+      // A rejected recheck must not become the basis of the old verification.
+      if (prepared.ok) base = fresh;
       set({ prepared, progress: '', phase: !prepared.ok ? 'blocked' : prepared.changes?.length ? 'review' : 'unchanged' });
     }
     async function send(text, { documentOnly = false } = {}) {
@@ -143,7 +152,7 @@ const KTReleaseWorkspace = (() => {
           const changedBase = activePlan && fresh && stampOf(fresh) !== stampOf(previousBase);
           base = activePlan ? previousBase : fresh || previousBase;
           set({ ...previous, error: error || (previous.error?.operation === 'document' ? null : previous.error), ...(changedBase ? { phase: 'blocked', prepared: null,
-            error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + '資料を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+            error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + '資料を確認している間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
         };
         const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
         cancelDocument = stop;
@@ -195,7 +204,7 @@ const KTReleaseWorkspace = (() => {
           const changedBase = activePlan && stampOf(fresh) !== stampOf(previousBase);
           base = activePlan ? previousBase : fresh;
           set({ ...previousWork, proposalPending: unresolved, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
-            error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案は最新の設定で作り直してください。' } } : {}) });
+            error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
           return;
         }
         if (!state.goal) state.goal = value;
@@ -242,13 +251,18 @@ const KTReleaseWorkspace = (() => {
         await build(signal, live);
       }, 'incomplete');
     }
+    async function reprepare() {
+      if (!canReprepare(state) || !available()) return false;
+      invalidate();
+      return activity('preparing', async (_, live) => prepareInner(live, true));
+    }
     async function apply() {
       if (state.phase !== 'review' || !state.prepared?.ok) return false;
       const approved = clone(state.prepared);
       return activity('applying', async (_, live) => {
         const fresh = await getBase('execute');
         if (!live()) return;
-        if (stampOf(fresh) !== approved.baseStamp) { set({ phase: 'blocked', prepared: null, error: { code: 'BASE_CHANGED', message: '確認後に設定が変わりました。この案は反映していません。最新の設定で変更案を作り直してください。' } }); return; }
+        if (stampOf(fresh) !== approved.baseStamp) { set({ phase: 'blocked', prepared: null, error: { code: 'BASE_CHANGED', message: '確認後に設定が変わりました。この案は反映していません。最新の設定で確認し直してください。' } }); return; }
         const checked = await execution.prepare({ plan: clone(state.plan), artifacts: clone(state.artifacts), base: fresh });
         const sig = await hash({ plan: state.plan, artifacts: state.artifacts, baseStamp: stampOf(fresh), changes: checked.changes, confirmations: checked.confirmations });
         if (!checked.ok || sig !== approved.signature) { set({ phase: 'blocked', prepared: null, error: { code: 'APPROVAL_CHANGED', message: '承認した内容と反映する内容が一致しないため、反映していません。変更案を確認し直してください。' } }); return; }
@@ -260,6 +274,21 @@ const KTReleaseWorkspace = (() => {
         } catch (e) { run.status = 'unknown'; run.result = { status: 'unknown', written: null, message: '反映の結果を確認できません。再度反映せず、現在の状態を確認してください。', error: errorOf(e) }; }
         set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
       }, 'blocked');
+    }
+    async function recheckRollback(runId) {
+      const run = state.runs.find(r => r.id === runId);
+      if (!run || run.rollback?.status !== 'unknown' || !available() || typeof execution.recheckRollback !== 'function') return false;
+      return activity('checking-result', async (_, live) => {
+        let checked;
+        try { checked = await execution.recheckRollback(clone(run)); }
+        catch (e) { checked = { ...clone(run.rollback), status: 'unknown', message: '復元の結果を確認できません。設定は変更していません。', error: errorOf(e) }; }
+        if (!live()) return;
+        if (!checked || !['complete', 'partial', 'failed', 'unknown'].includes(checked.status)) {
+          checked = { ...clone(run.rollback), status: 'unknown', message: '復元の確認結果を受け取れませんでした。設定は変更していません。' };
+        }
+        run.rollback = clone(checked);
+        set({ phase: 'result', resultRunId: run.id, rollback: null, progress: '' });
+      }, 'result');
     }
     async function requestRollback(runId) {
       const run = state.runs.find(r => r.id === runId);
@@ -282,7 +311,7 @@ const KTReleaseWorkspace = (() => {
     }
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-      send, adopt, resume, apply, requestRollback, rollback,
+      send, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
       showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
       showChanges() { set({ explanationId: null }); return true; },
       async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
@@ -299,7 +328,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

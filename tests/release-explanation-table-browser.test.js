@@ -20,6 +20,7 @@ function toolkitSource() {
   assert.ok(end >= 0);
   return source.slice(0, end) + '\nglobalThis.TableShellTest={mountRoot};\n' + source.slice(end);
 }
+const workspaceSource = fs.readFileSync(process.env.KT_RELEASE_WORKSPACE_SRC || path.join(root, 'src/release-workspace.js'), 'utf8');
 const viewSource = fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC || path.join(root, 'src/release-view.js'), 'utf8')
   + '\nglobalThis.TableReleaseView=KTReleaseView;\n';
 const colors = { heading: 'rgb(245, 247, 250)', text: 'rgb(32, 43, 61)', paper: 'rgb(255, 255, 255)', border: 'rgb(217, 225, 235)' };
@@ -42,6 +43,7 @@ for (const colorScheme of ['dark', 'light']) {
       page.on('pageerror', error => errors.push(error.message));
       await page.goto('https://table-styles.test.invalid/');
       await page.addScriptTag({ content: toolkitSource() });
+      await page.addScriptTag({ content: workspaceSource });
       await page.addScriptTag({ content: viewSource });
       await page.evaluate(state => {
         const shell = TableShellTest.mountRoot();

@@ -46,6 +46,7 @@ test('検証用上限は接続の詳細だけで設定し、会話中は切り�
     await page.goto('https://budget.test.invalid/');
     await page.addScriptTag({ content: browserBundle() });
     await page.evaluate(async ({ names, prod }) => {
+      localStorage.setItem('ktAi.devMode', '1');
       const config = { id: 'previous-test-only', limitUsd: 1.6, maxCalls: 14, createdAt: '2026-10-24T00:00:00.000Z' };
       localStorage.setItem('ktAi.budget.v1.budget.test.invalid', JSON.stringify(config));
       window.testBudget = BudgetTest.KTAiBudget.create({ storage: localStorage, session: sessionStorage, host: 'budget.test.invalid', locks: null, sessionId: 'browser-test-only' });
