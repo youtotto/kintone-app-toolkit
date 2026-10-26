@@ -19650,9 +19650,9 @@
     // Keep one editor and draft store; AI Assistant can temporarily display this same code pane.
     view.innerHTML = `
       <style>
-        #kt-customize-workspace{display:flex;flex-direction:column;height:100%;min-height:0;overflow:auto}
+        #kt-customize-workspace{display:flex;flex-direction:column;height:100%;min-height:0;overflow:auto;container:kt-customize-home / inline-size}
         #kt-customize-code-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;gap:10px}
-        #kt-customize{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:auto}
+        #kt-customize{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:16px;flex:1;min-width:0;min-height:0;overflow:auto}
         .kt-customize-editor-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:360px;gap:8px}
         #kt-customize-code-pane [hidden]{display:none!important}
         #kt-customize-comparison{flex:1;min-height:280px;min-width:0}
@@ -19662,9 +19662,16 @@
         #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
         #kt-customize-refresh{width:34px;padding:4px}#kt-customize-consult{white-space:nowrap}
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
-        #kt-customize-meta{flex:1 1 180px;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
+        #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
+        .kt-customize-menu{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
+        .kt-customize-menu h3{font-size:14px;margin:0}.kt-customize-menu .kt-customize-picker{display:grid;grid-template-columns:minmax(0,1fr) 34px}
+        .kt-customize-menu #kt-customize-source,.kt-customize-menu #kt-customize-consult{grid-column:1/-1;width:100%}.kt-customize-menu #kt-customize-file{width:100%}
+        .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}.kt-customize-menu .kt-customize-editor-tools>*{flex:1}
+        .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-editor-pane{order:1}
+        .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-manual-actions{order:2}
+        @container kt-customize-home (max-width:699px){#kt-customize{display:flex;flex-direction:column}.kt-customize-menu{order:-1;align-self:stretch;overflow:visible;flex:none}}
         #kt-customize-editor{flex:1;min-height:200px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
         #kt-customize-file-details,#kt-customize-manual-actions{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
         #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
@@ -19676,6 +19683,11 @@
           <div id="kt-customize-comparison" hidden></div>
           <div id="kt-customize">
             <div class="kt-customize-editor-pane">
+              <div id="kt-customize-meta"></div>
+              <div id="kt-customize-editor"></div>
+            </div>
+            <aside class="kt-customize-menu" aria-label="Menu">
+              <h3>Menu</h3>
               <div id="kt-customize-picker" class="kt-customize-picker">
                 <select id="kt-customize-source" class="btn" aria-label="ファイルの種類と対象">
                   <option value="JavaScript">JavaScript（PC）</option><option value="css">CSS（PC）</option>
@@ -19686,17 +19698,15 @@
                 <button id="kt-customize-consult" class="btn" disabled title="選んだJavaScriptについてAI Assistantで相談する">AIに相談</button>
               </div>
               <p id="kt-customize-file-status" role="status"></p>
-              <details id="kt-customize-file-details"><summary>動作テスト環境と運用環境の違い</summary><div id="kt-customize-env" style="display:none"></div></details>
+              <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
               <div class="kt-customize-editor-tools">
-                <span id="kt-customize-meta"></span>
                 <button id="kt-customize-download" class="btn" disabled>ローカルに保存</button>
                 <button id="kt-customize-new" class="btn">＋ 新規作成</button>
               </div>
-              <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
               <p id="kt-customize-editor-note">手元の編集はAIに送信しません。相談には送信時に取得する動作テスト環境のコードを使います。</p>
-              <div id="kt-customize-editor"></div>
+              <details id="kt-customize-file-details"><summary>動作テスト環境と運用環境の違い</summary><div id="kt-customize-env" style="display:none"></div></details>
               <details id="kt-customize-manual-actions"><summary>手編集の反映操作</summary><p>ここでは手元で編集したコードを運用環境に反映します。AIの修正案は、相談欄の反映前確認から動作テスト環境に反映してください。</p><button id="kt-customize-upload" class="btn" disabled>手編集のコードを運用環境に反映</button></details>
-            </div>
+            </aside>
           </div>
         </section>
       </div>

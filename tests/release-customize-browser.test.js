@@ -77,7 +77,7 @@ async function selected(page,name,value){await filePicker(page).selectOption({la
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor')};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu')};
 });}
 function assertHorizontal(g,label){
   assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
@@ -113,7 +113,11 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         const initialGeometry=await geometry(page);
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0,'Customizeにチャットを複製しない');
         assert.equal(await page.locator('#kt-release-input').isVisible(),false,'Customizeは編集に集中する');
-        assert.ok(initialGeometry.code.width>initialGeometry.shell.width*.85,'Customizeのコードを広く使う');
+        assert.ok(initialGeometry.editor.width>initialGeometry.shell.width*.65,'Customizeの左エディターを広く使う');
+        assert.ok(initialGeometry.menu.left>=initialGeometry.editor.right+8,'Menuはエディターの右に置く');
+        assert.ok(initialGeometry.menu.width>=250&&initialGeometry.menu.width<=340,'Menuは操作できる幅に収める: '+JSON.stringify(initialGeometry));
+        assert.ok(initialGeometry.editor.height>=600,'Menuの説明でエディターの高さを減らさない');
+        await page.screenshot({path:path.join(out,colorScheme+'-customize-menu.png'),fullPage:true});
         assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
         const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
         // The picker keeps the editing area stable even when an app has many registered files.
@@ -123,7 +127,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await filePicker(page).evaluate(select=>select.tagName),'SELECT');
         assert.equal(await filePicker(page).evaluate(select=>select.multiple||select.size>1),false,'登録済みファイルは1行の選択欄');
         const manyGeometry=await geometry(page);
-        assert.ok(manyGeometry.code.width>manyGeometry.shell.width*.85,'ファイルが多数でもCustomizeのコード幅を保つ');
+        assert.ok(manyGeometry.editor.width>=initialGeometry.editor.width-2,'ファイルが多数でもCustomizeのコード幅を保つ');
         assert.ok(manyGeometry.editor.height>=initialGeometry.editor.height-2,'ファイルの数でエディターを狭くしない');
         await selected(page,'extra-49.js','// extra registered file 49\n');
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
@@ -397,6 +401,16 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('.ktr-current').isVisible(),true);
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
         await page.screenshot({path:path.join(out,colorScheme+'-narrow-proposal.png'),fullPage:true});
+        await page.locator('#tab-customize').click();
+        await page.locator('[data-customize-mode="editor"]').click();
+        const narrowCustomize=await geometry(page);
+        assert.ok(narrowCustomize.editor.top>=narrowCustomize.menu.bottom,'狭い表示ではMenuとエディターを縦に並べる');
+        assert.equal(await page.locator('.kt-customize-menu').evaluate(el=>el.scrollHeight<=el.clientHeight+1),true,'Menu内の説明と最後の操作を枠内に収める');
+        assert.ok((await page.locator('#kt-customize-manual-actions').boundingBox()).y+(await page.locator('#kt-customize-manual-actions').boundingBox()).height<=narrowCustomize.menu.bottom,'末尾の操作をエディターへ重ねない');
+        assert.ok(narrowCustomize.editor.width>=350,'狭い表示でもエディター幅を確保する');
+        assert.ok(narrowCustomize.documentWidth<=narrowCustomize.viewport+1,'CustomizeのMenuで横はみ出しを増やさない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        await page.screenshot({path:path.join(out,colorScheme+'-customize-narrow.png'),fullPage:true});
         assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'相談への移動とコード開閉だけではAIを呼ばない');
         assert.deepEqual(await page.evaluate(()=>operations),[],'有料機能とkintoneの書き込みは呼ばない');
         assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
