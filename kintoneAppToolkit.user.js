@@ -8030,11 +8030,14 @@
 
     /** 既存の一覧 ＋ 新しい一覧 = 完全な payload（既存を落とさない） */
     HANDLERS.ADD_VIEW = {
-      prepare(step, { change = null }) {
-        const after = change?.after;
+      prepare(step, { change = null, fieldsNow = null, temporaryIdMap = {} }) {
+        let after = change?.after;
         if (!after || !after.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Toolkit の確認の結果に追加後の一覧定義がありません' };
         if ((after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `一覧の形式 ${after.type} は Toolkit から自動で追加できません（表形式のみ）` };
         if (!Array.isArray(after.fields) || !after.fields.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドが決まっていないため追加できません' };
+        const sort = prepareViewSort(after.sort, fieldsNow, temporaryIdMap);
+        if (sort.unsupported) return sort;
+        after = { ...after, sort: sort.value };
         return {
           payload: { view: { type: 'LIST', name: after.name, fields: [...after.fields], filterCond: after.filterCond || '', sort: after.sort || '' } },
           expect: { name: after.name, type: 'LIST', fields: [...after.fields], filterCond: after.filterCond || '', sort: after.sort || '' },
@@ -8636,8 +8639,22 @@
       },
     };
 
-    /** UPDATE_VIEW（Phase 11）: 表形式の一覧の表示フィールド / 絞り込み / 並び順だけ。形式・カレンダー・カスタマイズ HTML は対象外 */
+    /** 一覧の並び順: 準備済みフィールドの参照を解決し、追加・変更で同じ形式と存在を確かめる。 */
     const SORT_RE = /^[^\s,]+\s+(asc|desc)$/i;
+    function prepareViewSort(value, fieldsNow, temporaryIdMap) {
+      const parts = String(value || '').split(',');
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i].trim();
+        if (!part) continue;
+        if (!SORT_RE.test(part)) return { unsupported: 'INVALID_SORT', message: `並び順「${part}」は「フィールドコード asc|desc」の形ではありません` };
+        const ref = part.split(/\s+/)[0];
+        const code = Object.prototype.hasOwnProperty.call(temporaryIdMap, ref) ? temporaryIdMap[ref] : ref;
+        if (fieldsNow && !fieldsNow[code] && !BUILTIN_VIEW_CODES.includes(code)) return { unsupported: 'INVALID_SORT', message: `並び順のフィールド「${code}」が動作テスト環境にありません` };
+        // フィールド位置だけを一度置き換える。名前や条件の値、置換後のコードは読み替えない。
+        parts[i] = parts[i].replace(part, () => code + part.slice(ref.length));
+      }
+      return { value: parts.join(',') };
+    }
     /** Review 時点の同一性（diff.target.identity）と現在のフィールド（kintone の raw）のルックアップ設定を比べ、違う属性名を返す（空なら同一） */
     function lookupIdentityMismatch(f, identity) {
       if (!f) return ['missing'];
@@ -8939,12 +8956,18 @@
     };
 
     HANDLERS.UPDATE_VIEW = {
-      prepare(step, { change = null, fieldsNow = null }) {
-        const before = change?.before, after = change?.after, identity = change?.identity;
+      prepare(step, { change = null, fieldsNow = null, temporaryIdMap = {} }) {
+        const before = change?.before, identity = change?.identity;
+        let after = change?.after;
         if (!before || !after || !before.name) return { unsupported: 'NO_VIEW_SPEC', message: 'Toolkit の確認の結果に変更前後の一覧定義がありません。計画を作り直してください' };
         if ((before.type || 'LIST') !== 'LIST' || (after.type || 'LIST') !== 'LIST') return { unsupported: 'VIEW_TYPE_NOT_SUPPORTED', message: `${before.type === 'CALENDAR' ? 'カレンダー形式' : before.type === 'CUSTOM' ? 'カスタマイズ形式' : before.type} の一覧は変更しません（表形式のみ）` };
         if (before.builtinType) return { unsupported: 'BUILTIN_VIEW_NOT_SUPPORTED', message: 'kintone 組み込みの一覧は変更しません' };
         if (!identity) return { unsupported: 'NO_VIEW_SPEC', message: 'Review に対象の同一性（identity）がありません。計画を作り直してください' };
+        if (normCondE(before.sort) !== normCondE(after.sort)) {
+          const sort = prepareViewSort(after.sort, fieldsNow, temporaryIdMap);
+          if (sort.unsupported) return sort;
+          after = { ...after, sort: sort.value };
+        }
         const changes = {};
         if (!same(before.fields || [], after.fields || [])) changes.fields = { from: [...(before.fields || [])], to: [...(after.fields || [])] };
         if (normCondE(before.filterCond) !== normCondE(after.filterCond)) changes.filterCond = { from: before.filterCond || '', to: String(after.filterCond || '').trim() };
@@ -8952,13 +8975,6 @@
         if (!Object.keys(changes).length) return { unsupported: 'NO_CHANGE', message: '変更内容がありません' };
         if (changes.fields) {
           if (!changes.fields.to.length) return { unsupported: 'VIEW_FIELDS_MISSING', message: '表示フィールドを全て外す変更は反映しません' };
-        }
-        if (changes.sort && changes.sort.to) {
-          for (const part of changes.sort.to.split(',').map(x => x.trim()).filter(Boolean)) {
-            if (!SORT_RE.test(part)) return { unsupported: 'INVALID_SORT', message: `並び順「${part}」は「フィールドコード asc|desc」の形ではありません` };
-            const code = part.split(/\s+/)[0];
-            if (fieldsNow && !fieldsNow[code] && !BUILTIN_VIEW_CODES.includes(code)) return { unsupported: 'INVALID_SORT', message: `並び順のフィールド「${code}」が動作テスト環境にありません` };
-          }
         }
         const payloadChanges = {};
         if (changes.fields) payloadChanges.fields = [...changes.fields.to];
@@ -9562,7 +9578,7 @@
             const checked = KTQueryCheck.check(condition, { fields: conditionFields, usage });
             if (!checked.ok) fail('COND_INVALID', checked.errors.map(e => e.message).join('。'));
           }
-          const built = HANDLERS[type].prepare(op, { change, fieldsNow: fields, processNow: process });
+          const built = HANDLERS[type].prepare(op, { change, fieldsNow: fields, processNow: process, temporaryIdMap: prepared.temporaryIdMap });
           if (built.unsupported === 'NO_CHANGE') { skip(); continue; }
           if (built.unsupported) fail(built.unsupported, built.message);
           if (typeof HANDLERS[type].recheck === 'function') { const duplicate = HANDLERS[type].recheck(built, { generalNow: current.generalNotify, perRecordNow: current.perRecordNotify, remindersNow: current.reminderNotify }); if (duplicate.verdict === 'EXACT_DUPLICATE') { skip(); continue; } }
