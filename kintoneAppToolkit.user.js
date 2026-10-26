@@ -9642,6 +9642,20 @@
       const yieldUi = () => new Promise(r => setTimeout(r, 0));
       const stepLogs = new Map();
       for (const st of prepared.steps) { const l = { stepId: st.stepId, actionType: st.actionType, title: st.title, status: st.status === STEP.PENDING ? STEP.PENDING : st.status, reason: st.reason, message: st.message, summary: st.prepared?.summary || '', requests: [], revision: null, verification: null, error: null, before: null, after: null, ...(st.warnings?.length ? { warnings: clone(st.warnings) } : {}) }; stepLogs.set(st.stepId, l); log.steps.push(l); }
+      // Submitted requests are evidence of intent, never proof of a completed write.
+      log.writeIntents = [];
+      let activeStepIds = [];
+      const untrackedApi = api;
+      api = { ...api };
+      for (const name of ['addPreviewFields', 'updatePreviewFields', 'deletePreviewFields', 'putPreviewLayout', 'putPreviewViews', 'putPreviewGeneralNotifications', 'putPreviewPerRecordNotifications', 'putPreviewReminders', 'putPreviewStatus', 'putPreviewActions']) {
+        if (typeof untrackedApi[name] !== 'function') continue;
+        api[name] = async (app, payload, rev) => {
+          const intent = { method: name, stepIds: [...activeStepIds], payload: clone(payload), revision: rev == null ? null : String(rev), acknowledged: false, rejected: false };
+          log.writeIntents.push(intent);
+          try { const response = await untrackedApi[name](app, payload, rev); intent.acknowledged = true; intent.responseRevision = String(response?.revision ?? ''); return response; }
+          catch (error) { intent.error = strErr(error); intent.rejected = /^(GAIA_|CB_)/.test(error?.code || '') || (error?.status >= 400 && error?.status < 500); throw error; }
+        };
+      }
       let revision = prepared.revision.preview;
       let failed = false;
       const done = new Set(), registered = new Set();
@@ -9678,6 +9692,7 @@
           if (unmet.length) { for (const gl of logs) { gl.status = STEP.SKIPPED; gl.reason = 'DEPENDENCY_NOT_VERIFIED'; gl.message = `依存する ${[...new Set(unmet)].join(', ')} が検証済みでないため実行していません`; progress(gl); } continue; }
           for (const gl of logs) { gl.status = STEP.RUNNING; progress(gl); }
           await yieldUi();
+          activeStepIds = members.map(m => m.stepId);
           const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, processBaseline };
           try {
             const applied = await PROCESS_GROUP.apply(ctx, members);
@@ -9714,6 +9729,7 @@
         const depsOk = st.dependsOn.every(d => depMet(d));
         if (!depsOk) { l.status = STEP.SKIPPED; l.reason = 'DEPENDENCY_NOT_VERIFIED'; l.message = '依存する手順が検証済みでないため実行していません'; progress(l); continue; }
         l.status = STEP.RUNNING; progress(l); await yieldUi();
+        activeStepIds = [st.stepId];
         const handler = HANDLERS[st.actionType];
         const ctx = { api, appId: prepared.appId, revision, snapshot: prepared.snapshot, layoutPolicy: prepared.layoutPolicy, actionsBaseline };
         try {
@@ -9870,6 +9886,75 @@
     // Phase 14: アプリアクション全体（全体置換 API。id は送らず、snapshot の全アクションを PUT 形に）
     const putAppActions = (api, appId, snap, revision) => api.putPreviewActions(appId, { actions: Object.fromEntries(Object.entries(actionsOf(snap)).map(([k, a]) => [k, actionForPut(a)])) }, revision); putAppActions.path = '/k/v1/preview/app/actions.json';
     const eqAppActions = (a, b) => same(stripActionIds(actionsOf(a)), stripActionIds(actionsOf(b)));
+    // Compare only structured submitted requests, using existing rollback equality.
+    // A matching current state does not prove that a lost request succeeded earlier.
+    async function recheckPreview(execution, prepared, { api } = {}) {
+      const result = clone(execution);
+      const answer = (state, message, current = null) => ({ state, message, execution: result, current });
+      if (!execution || !prepared || execution.appId !== prepared.appId || execution.executionId !== prepared.executionId ||
+          execution.env !== ENV || !sameFieldDefinition(execution.snapshot, prepared.snapshot) ||
+          !Array.isArray(execution.writeIntents) || (prepared.operationVersion === '1' && operationFingerprint(prepared) !== prepared.operationFingerprint))
+        return answer('unknown', '承認した設定と、実際に送信した変更の記録を照合できません。');
+      const current = await fetchPreviewAll(api, execution.appId);
+      const revisions = Object.values(current).map(x => x?.revision).filter(x => x != null).map(String);
+      if (!revisions.length || new Set(revisions).size !== 1) return answer('unknown', '取得中に設定が変わったため、反映結果を確定できません。');
+      // GET adds an empty destination app code; PUT omits that empty key.
+      // Keep all other attributes, including unexpected ones, in the comparison.
+      const actionReadback = raw => ({ actions: Object.fromEntries(Object.entries(actionsOf(raw)).map(([name, action]) => {
+        const value = clone(action); if (value.destApp?.code === '') delete value.destApp.code;
+        return [name, value];
+      })) });
+      const equal = (a, b) => sameFieldDefinition(a.fields, b.fields) &&
+        same(layoutShape(a.layout?.layout), layoutShape(b.layout?.layout)) && eqViews(a.views, b.views) &&
+        eqGeneral(a.generalNotify, b.generalNotify) && eqPerRecord(a.perRecordNotify, b.perRecordNotify) &&
+        eqReminders(a.reminderNotify, b.reminderNotify) && eqProcess(a.status, b.status) && eqAppActions(actionReadback(a.actions), actionReadback(b.actions));
+      const intents = execution.writeIntents, candidates = [{ raw: clone(prepared.snapshot), count: 0 }];
+      const byId = new Map(prepared.steps.map(step => [step.stepId, step]));
+      let raw = clone(prepared.snapshot), minimum = 0, unmodeled = false;
+      for (const [index, intent] of intents.entries()) {
+        if (!intent.stepIds?.length || intent.stepIds.some(id => !byId.has(id))) return answer('unknown', '送信した設定の対象を照合できません。', current);
+        if (intent.rejected) { if (index !== intents.length - 1) return answer('unknown', '送信の順序を確認できません。', current); break; }
+        const payload = clone(intent.payload);
+        const collection = { putPreviewViews: 'views', putPreviewGeneralNotifications: 'generalNotify', putPreviewPerRecordNotifications: 'perRecordNotify', putPreviewReminders: 'reminderNotify', putPreviewStatus: 'status', putPreviewActions: 'actions' }[intent.method];
+        if (collection) raw[collection] = intent.method === 'putPreviewViews' ? { views: payload } : payload;
+        else if (intent.method === 'putPreviewLayout') raw.layout = { layout: payload };
+        else if (intent.method === 'updatePreviewFields') {
+          for (const [code, value] of Object.entries(payload || {})) {
+            const p = byId.get(intent.stepIds[0])?.prepared;
+            if (!raw.fields?.properties?.[code]) return answer('unknown', '変更前のフィールドの記録がありません。', current);
+            raw.fields.properties[code] = p?.maintenance && p.payload.code === code ? clone(p.after) :
+              { ...raw.fields.properties[code], ...value, ...(value.lookup ? { lookup: { ...raw.fields.properties[code].lookup, ...value.lookup } } : {}) };
+          }
+        } else if (intent.method === 'deletePreviewFields') {
+          for (const code of payload) { delete raw.fields.properties[code]; raw.layout.layout = withoutLayoutField(raw.layout.layout, code); }
+        } else {
+          // POST field defaults and automatic placement need evidence not preserved
+          // by older handlers. Do not turn an unprovable result into success.
+          unmodeled = true; if (intent.acknowledged) minimum = index + 1; break;
+        }
+        candidates.push({ raw: clone(raw), count: index + 1 });
+        if (intent.acknowledged) minimum = index + 1;
+      }
+      const matching = candidates.filter(c => c.count >= minimum && equal(c.raw, current));
+      if (matching.length !== 1) return answer(matching.length || unmodeled ? 'unknown' : 'changed', unmodeled ? '送信した変更だけでは、フィールド追加後の設定と配置を確定できません。' : matching.length ? '反映前後の設定を一つに特定できません。' : '現在の設定が、この反映の前後の記録と異なります。', current);
+      const matched = matching[0], applied = intents.slice(0, matched.count);
+      for (const step of result.steps) {
+        if (['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(step.actionType)) continue;
+        const sent = intents.filter(i => i.stepIds.includes(step.stepId)), confirmed = applied.filter(i => i.stepIds.includes(step.stepId));
+        if (!sent.length) continue;
+        step.previousOutcome = step.previousOutcome || { status: step.status, reason: step.reason, error: clone(step.error), partial: clone(step.partial), verification: clone(step.verification) };
+        if (confirmed.length === sent.length) { step.status = STEP.VERIFIED; step.reason = 'READBACK_MATCH'; step.message = '現在の設定が、送信した変更後の内容と一致しています。'; step.verification = { ok: true, observed: true, revision: revisions[0] }; }
+        else if (confirmed.length) { step.status = STEP.FAILED; step.reason = 'READBACK_PARTIAL'; step.partial = { partial: 'READBACK_CONFIRMED', requestCount: confirmed.length }; step.message = '現在の設定は、途中までの変更と一致しています。'; }
+        else { step.status = STEP.FAILED; step.reason = 'READBACK_NOT_APPLIED'; step.partial = null; step.message = '現在の設定に、この手順の変更は反映されていません。'; }
+      }
+      result.previousOutcome ||= { status: result.status, actualAfterRaw: clone(result.actualAfterRaw), afterRevision: result.afterRevision };
+      result.actualAfterRaw = clone(current); result.afterRevision = revisions[0];
+      result.readback = { observed: true, matchedRequests: matched.count, submittedRequests: intents.length, revision: revisions[0] };
+      const remaining = prepared.steps.filter(s => s.status === STEP.PENDING).some(s => !['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(s.actionType) && result.steps.find(x => x.stepId === s.stepId)?.status !== STEP.VERIFIED);
+      result.status = matched.count ? remaining ? RUN.PARTIAL : RUN.DONE : RUN.FAILED;
+      return answer(matched.count ? remaining ? 'partial' : 'applied' : 'not-applied', '現在の設定を、承認した変更と照合しました。', current);
+    }
+
     const ROLLBACK_STRATEGIES = {
       RESTORE_PROCESS_SETTINGS: restoreStrategy('status', { get: (api, a) => api.getPreviewStatus(a), put: putStatus, equal: eqProcess, kinds: ['process'], label: 'プロセス管理' }),
       /** ADD / UPDATE_APP_ACTION → snapshot のアプリアクション全体を PUT（全体置換）。反映直後と現在が 1 件でも違えば ROLLBACK_STALE。コピー先アプリには触れない */
@@ -10196,7 +10281,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, HANDLERS, ROLLBACK_STRATEGIES,
-      prepareOperations, operationFingerprint, executePreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, layoutHasCode, createKintoneApi,
+      prepareOperations, operationFingerprint, executePreview, recheckPreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
@@ -13359,6 +13444,20 @@
       !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
       (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
       (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
+    // Only service states and error codes choose recovery actions; prose is not interpreted.
+    function creationStateOf(state) {
+      const artifacts = state.artifacts || [], unfinished = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready');
+      const codes = new Set([state.error?.code, ...unfinished.map(a => a.error?.code || a.result?.error?.code)]);
+      const unverified = unfinished.some(a => a.result?.artifactOutcome?.state === 'unverified') ||
+        ['SANDBOX_OUTDATED', 'SANDBOX_UNAVAILABLE', 'REQUIRED_EFFECTS_UNRESOLVED', 'CONDITION_SOURCE_UNVERIFIABLE', 'OUTCOME_REQUIRED', 'ARTIFACT_MISMATCH', 'BODY_MISMATCH'].some(code => codes.has(code));
+      const declined = codes.has('GENERATION_DECLINED') || unfinished.some(a => a.result?.artifactOutcome?.reasonCodes?.includes('GENERATION_DECLINED'));
+      const kind = unverified ? 'unverified' : declined ? 'declined' : codes.has('BUDGET_EXCEEDED') ? 'limit' :
+        unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
+        unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
+      return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
+        !unverified && !declined &&
+        !(state.plan.questions || []).some(q => q && q.blocking !== false) };
+    }
     // Selection is a local draft, never an adoption or a new interpretation of text.
     function suggestionRequest(state) {
       const ids = new Set(state.selectedSuggestionIds || []);
@@ -13623,7 +13722,7 @@
         }, 'incomplete');
       }
       async function resume() {
-        if (!state.plan || state.phase !== 'incomplete') return false;
+        if (!creationStateOf(state).canResume) return false;
         return activity('building', async (signal, live) => {
           const fresh = await getBase('resume');
           if (!live()) return;
@@ -13655,24 +13754,32 @@
           set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
         }, 'blocked');
       }
-      async function recheckRollback(runId) {
-        const run = state.runs.find(r => r.id === runId);
-        if (!run || run.rollback?.status !== 'unknown' || !available() || typeof execution.recheckRollback !== 'function') return false;
+      async function recheckRun(runId, kind) {
+        const run = state.runs.find(r => r.id === runId), restoring = kind === 'rollback';
+        const value = restoring ? run?.rollback : run?.result, method = restoring ? 'recheckRollback' : 'recheckApply';
+        if (!run || (restoring ? value?.status : run.status) !== 'unknown' || (!restoring && run.rollback) || !available() || typeof execution[method] !== 'function') return false;
+        const previous = { phase: state.phase, resultRunId: state.resultRunId, progress: state.progress, error: clone(state.error) };
+        const currentRun = run.taskId === state.taskId && state.phase === 'result' && (!state.resultRunId || state.resultRunId === run.id);
+        const label = restoring ? '復元' : '反映';
         return activity('checking-result', async (_, live) => {
+          set({ progress: label + '結果を確認しています。' });
           let checked;
-          try { checked = await execution.recheckRollback(clone(run)); }
-          catch (e) { checked = { ...clone(run.rollback), status: 'unknown', message: '復元の結果を確認できません。設定は変更していません。', error: errorOf(e) }; }
+          try { checked = await execution[method](clone(run)); }
+          catch (e) { checked = { ...clone(value), status: 'unknown', message: label + 'の結果を確認できません。設定は変更していません。', error: errorOf(e) }; }
           if (!live()) return;
           if (!checked || !['complete', 'partial', 'failed', 'unknown'].includes(checked.status)) {
-            checked = { ...clone(run.rollback), status: 'unknown', message: '復元の確認結果を受け取れませんでした。設定は変更していません。' };
+            checked = { ...clone(value), status: 'unknown', message: label + 'の確認結果を受け取れませんでした。設定は変更していません。' };
           }
-          run.rollback = clone(checked);
-          set({ phase: 'result', resultRunId: run.id, rollback: null, progress: '' });
-        }, 'result');
+          if (restoring) run.rollback = clone(checked);
+          else { run.result = clone(checked); run.status = checked.status; }
+          set(currentRun ? { phase: 'result', resultRunId: run.id, progress: '', error: null, ...(restoring ? { rollback: null } : {}) } : previous);
+        }, previous.phase);
       }
+      const recheckApply = runId => recheckRun(runId, 'apply');
+      const recheckRollback = runId => recheckRun(runId, 'rollback');
       async function requestRollback(runId) {
         const run = state.runs.find(r => r.id === runId);
-        if (!run || !run.result?.written || run.rollback?.status === 'complete' || !available()) return false;
+        if (!run || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
         return activity('preparing', async (_, live) => {
           const prepared = await execution.prepareRollback(clone(run));
           if (!live()) return;
@@ -13691,7 +13798,7 @@
       }
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-        send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
+        send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
         setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
         showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { set({ explanationId: null }); return true; },
@@ -13709,7 +13816,7 @@
         },
       };
     }
-    return { create, hash, stampOf, generatedBody, questions, canReprepare, suggestionRequest };
+    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest };
   })();
 
   /* Current application facts, existing Deps results and explicitly accepted input.
@@ -14075,6 +14182,87 @@
             error: { code: error?.code, message: error?.message } };
         }
       }
+      async function recheckApply(run) {
+        const original = run.result;
+        let settings = clone(original?.settings || null), files = clone(original?.files || null);
+        const answer = (status, recoveryState, message, written = null, reasons = []) => ({
+          ...clone(original), status, recoveryState, message, written, retryable: status !== 'unknown',
+          settings, files, reasons: [...(original?.reasons || []), ...reasons],
+          rows: (run.prepared?.changes || []).map(change => {
+            const step = change.kind === 'javascript' ? files?.steps?.find(x => x.changeId === change.id) : settings?.steps?.find(x => x.stepId === change.id);
+            return { title: change.title || change.file, status: step?.status || 'SKIPPED', message: step?.message || 'この変更は実行していません。' };
+          })
+        });
+        const unknown = message => answer('unknown', 'unknown', message);
+        const changed = message => answer('unknown', 'changed', message, null, [{ code: 'APPLY_RESULT_CHANGED', message }]);
+        if (!original || original.status !== 'unknown' || run.rollback || !run.prepared?.ok ||
+            (run.prepared.settings && (run.prepared.settings.appId !== String(appId) || run.prepared.settings.env !== 'preview')) ||
+            (run.prepared.files && (run.prepared.files.appId !== String(appId) || run.prepared.files.env !== 'preview')) ||
+            (settings && (settings.appId !== String(appId) || settings.env !== 'preview')) ||
+            (files && (files.appId !== String(appId) || files.env !== 'preview')))
+          return unknown('対象の反映の記録を確認できません。');
+        let settingsRevision = null, filesRevision = null;
+        try {
+          if (settings) {
+            if (typeof planExecutor.recheckPreview !== 'function') return unknown('設定の送信記録を照合する処理がありません。');
+            const checked = await planExecutor.recheckPreview(settings, run.prepared.settings, { api });
+            if (checked.state === 'changed') return changed(checked.message);
+            if (checked.state === 'unknown') return unknown(checked.message);
+            settings = checked.execution; settingsRevision = checked.current?.fields?.revision;
+          } else if (pending(run.prepared.settings).length) return unknown('設定の処理が止まった位置を確認できません。');
+          const basis = original.filesPrepared || run.prepared.files;
+          if (basis?.snapshot) {
+            if (basis.appId !== String(appId) || basis.env !== 'preview' || (files && (files.executionId !== basis.executionId || jsExecutor.diffSnapshots(files.snapshot, basis.snapshot).length)))
+              return unknown('承認したJavaScriptと登録の記録が一致しません。');
+            const actual = await api.getPreviewCustomize(String(appId)), current = jsExecutor.snapshotOf(actual);
+            filesRevision = current.revision;
+            const before = files?.snapshot || basis.snapshot;
+            if (!jsExecutor.diffSnapshots(before, current).length) {
+              if (files?.put?.ok) return changed('登録済みのJavaScriptが、登録前の状態へ変更されています。');
+              if (files) {
+                files.previousOutcome ||= { status: files.status, put: clone(files.put), verification: clone(files.verification), error: clone(files.error), actualAfterRaw: clone(files.actualAfterRaw), afterRevision: files.afterRevision };
+                files.previewUnchanged = true; files.status = 'FAILED';
+                files.readback = { observed: true, state: 'not-applied', revision: current.revision };
+                for (const step of files.steps || []) { step.status = 'FAILED'; step.reason = 'READBACK_NOT_APPLIED'; step.message = '現在の登録内容は、反映前のJavaScriptと一致しています。'; }
+              }
+            } else {
+              if (!files?.put || !files.steps?.length || files.steps.some(s => !s.uploadKey))
+                return changed('現在のJavaScriptが、登録前の記録と異なります。');
+              const intended = jsExecutor.buildAfter(before, files.steps, Object.fromEntries(files.steps.map(s => [s.changeId, s.uploadKey])));
+              if (jsExecutor.diffSnapshots(intended, current, { compareFileKey: false }).length)
+                return changed('現在のJavaScriptの名前・対象・順序が、承認した登録内容と異なります。');
+              const observed = clone(files), downloaded = {};
+              for (const step of observed.steps) {
+                const entry = current[step.target]?.js?.[step.position];
+                if (!entry?.fileKey || typeof api.downloadFile !== 'function') return unknown('登録したJavaScriptの本文を照合できません。');
+                downloaded[entry.fileKey] = await api.downloadFile(entry.fileKey);
+                if (typeof downloaded[entry.fileKey] !== 'string') return unknown('登録したJavaScriptの本文を取得できません。');
+                step.previousOutcome ||= { status: step.status, reason: step.reason, message: step.message, verification: clone(step.verification) };
+                step.status = 'APPLIED';
+              }
+              observed.verification = jsExecutor.verifyAfter(observed, actual, { downloaded });
+              if (!observed.verification.ok) return changed('現在のJavaScriptの本文または登録内容が、承認した内容と異なります。');
+              observed.previousOutcome ||= { status: files.status, put: clone(files.put), verification: clone(files.verification), error: clone(files.error), actualAfterRaw: clone(files.actualAfterRaw), afterRevision: files.afterRevision };
+              observed.put = { ...observed.put, ok: true, confirmedByReadback: true };
+              observed.previewUnchanged = false; observed.status = 'DONE'; observed.actualAfterRaw = current; observed.afterRevision = current.revision;
+              observed.readback = { observed: true, state: 'applied', revision: current.revision };
+              for (const step of observed.steps) { step.reason = 'READBACK_MATCH'; step.message = '現在のJavaScriptが、承認した本文・対象・順序と一致しています。'; }
+              files = observed;
+            }
+          } else if ((run.prepared.changes || []).some(c => c.kind === 'javascript')) return unknown('登録前のJavaScriptの記録がありません。');
+          // Revisions are a consistency guard, not evidence that a request succeeded.
+          const end = settingsRevision != null ? await api.getPreviewFields(String(appId)) : filesRevision != null ? await api.getPreviewCustomize(String(appId)) : null;
+          if (!end || [settingsRevision, filesRevision].filter(x => x != null).some(x => String(x) !== String(end.revision)))
+            return unknown('確認の途中で設定が変わったため、反映結果を確定できません。');
+          const rows = answer('', '', '').rows, written = settingWritten(settings) || !!files?.put?.ok;
+          if (!rows.length) return unknown('照合する変更内容がありません。');
+          if (rows.every(row => row.status === 'VERIFIED')) return answer('complete', 'applied', '現在の設定とJavaScriptが、承認した反映内容と一致しています。', true);
+          return written ? answer('partial', 'partial', '一部は承認した内容と一致し、残りは反映されていません。続きの書き込みは行っていません。', true) :
+            answer('failed', 'not-applied', '現在の設定に、この反映の変更は入っていません。書き込みの再実行は行っていません。', false);
+        } catch (error) {
+          return { ...unknown('現在の設定を取得できず、反映の結果を確認できません。'), error: { ...clone(original.error), recheck: { code: error?.code, message: error?.message } } };
+        }
+      }
       // A completed script restoration remains part of this run when a later setting
       // restoration fails. Its exact readback must still match before skipping it.
       async function restoredFileReasons(run, restored) {
@@ -14223,7 +14411,7 @@
             error: { code: error?.code, message: error?.message } };
         }
       }
-      return { prepare, apply, prepareRollback, rollback, recheckRollback };
+      return { prepare, apply, prepareRollback, rollback, recheckRollback, recheckApply };
     }
     return { create };
   })();
@@ -14374,11 +14562,15 @@
         ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
         ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
         ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-        ${noticesHtml(state)}
+        ${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
         ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
         <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
         ${(state.artifacts || []).length ? '<p class="ktr-note">作成したJavaScriptの検証は完了しています。実際の画面での動作は反映後に確かめます。</p>' : ''}
         <div class="ktr-actions">${button('apply', '動作テスト環境に反映', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+    }
+    function provisionalsHtml(rows) {
+      const choices = (rows || []).filter(row => row && typeof row.choice === 'string' && row.choice.trim());
+      return choices.length ? `<section><h3>計画で決めたこと</h3><p class="ktr-note">変更案を作る際にAIが決めた内容です。変更したい点は、反映前に相談してください。</p><ul>${choices.map((row, index) => `<li><span>${esc(row.choice)}</span>${row.reason ? `<p class="ktr-note">${esc(row.reason)}</p>` : ''}${row.changeHint ? `<details data-release-panel="plan-choice-${index}"><summary>変更したいとき</summary><p>${esc(row.changeHint)}</p></details>` : ''}</li>`).join('')}</ul></section>` : '';
     }
     // Display the service's existing explanation fields. These do not create blockers
     // or additional approval steps; only identical strings are deduplicated.
@@ -14409,14 +14601,28 @@
       }).join('');
     }
     const reprepareHtml = options => `<div class="ktr-actions">${button('reprepare', '最新の設定で確認し直す', { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">AIは呼び出さず、現在の変更案を確認し直します。kintoneへの反映は行いません。</p>`;
+    const creationMessages = {
+      incomplete: { title: '作成途中です', label: '作成途中', help: '残りを作成してから、全体を確認します。', action: '残りを作成' },
+      interrupted: { title: '作成を完了できませんでした', label: '作成未完了', help: '接続などの原因を確認してから、未完了の内容を作成し直せます。', action: '未完了の内容を作成し直す' },
+      failed: { title: '検証で不一致がありました', label: '検証不一致', help: '作成したコードの検証に通りませんでした。理由を確認し、相談で内容を修正するか、未完了の内容を作成し直してください。', action: '未完了の内容を作成し直す' },
+      unverified: { title: '検証できない内容があります', label: '検証できません', help: 'コードの誤りとは判定していません。表示された理由を確認してください。内容の修正が必要な場合は相談欄から伝えられます。検証できない原因が残る間は、同じ内容を作成し直しません。' },
+      declined: { title: '作成できない内容があります', label: '作成できません', help: 'AIが作成しなかった理由を確認し、変更したい内容を相談欄から伝えてください。' },
+      limit: { title: 'AIの利用上限に達しました', label: '利用上限', help: '接続画面で利用状況を確認してください。利用可能になったら、未完了の内容だけ作成を再開できます。', action: '未完了の作成を再開' }
+    };
+    function creationMessage(state) {
+      if (workspace.canReprepare(state)) return { title: '反映内容の確認が必要です', label: '反映内容の確認' };
+      if (!state.plan) return { title: '計画を作成できませんでした', label: '計画未完了' };
+      return creationMessages[workspace.creationStateOf(state).kind];
+    }
     function incompleteHtml(state, options) {
       if (workspace.canReprepare(state)) return `<section class="ktr-section"><h2>反映内容の確認が必要です</h2><p>作成した変更案は残っています。現在の設定で反映できるか確認してください。</p>${reprepareHtml(options)}</section>`;
       if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。相談で内容を修正するか、もう一度作成してください。</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
       const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
       const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
       const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
+      const recovery = workspace.creationStateOf(state), wording = creationMessages[recovery.kind];
       const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-      return `<section class="ktr-section"><h2>作成途中です</h2><p>${finished.length ? "完成した内容は残っています。残りを作成してから、全体を確認します。" : "作成は完了していません。残っている内容を作成してから、全体を確認します。"}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+      return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${recovery.kind === 'limit' ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : recovery.kind === 'limit' ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
     }
     function runHtml(run, options = {}, historical = false) {
       if (!run) return '<p>反映の記録はありません。</p>';
@@ -14425,7 +14631,7 @@
       const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
         (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
         run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-      const canRestore = !!run.result?.written && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+      const canRestore = run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
       const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
       const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
       const checkMobile = platforms.has('mobile');
@@ -14438,7 +14644,7 @@
         ${!run.rollback && status === 'complete' && checkMobile ? '<p>モバイルの動作は、動作テスト環境では確認できません。モバイル画面での確認は別途必要です。</p>' : ''}
         ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
         ${status === 'unknown' ? `<p>${run.rollback ? 'もう一度戻す前に、現在の状態を確認してください。' : '同じ変更をもう一度反映せず、現在の設定を確認してください。'}</p>` : ''}
-        <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
+        <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
     }
     function rollbackHtml(state, options) {
       const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
@@ -14463,11 +14669,13 @@
     function render(state, options = {}) {
       const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
       const codePanel = typeof options.codePanelState === 'function' ? options.codePanelState() : {};
-      const codeAttention = codePanel.open && !historical ? ({ incomplete: '作成が完了していません。', blocked: '反映前の確認が完了していません。' }[state.phase] || '') : '';
+      const creation = state.phase === 'incomplete' ? creationMessage(state) : null;
+      const currentPhaseText = state.phase === 'checking-result' ? state.progress || phaseText[state.phase] : phaseText[state.phase];
+      const codeAttention = codePanel.open && !historical ? (creation?.title || (state.phase === 'blocked' ? '反映前の確認が完了していません。' : '')) : '';
       const explanation = !historical ? (state.explanations || []).find(item => item.id === state.explanationId) : null;
       let body = '';
       if (historical) body = runHtml(historical, { ...options, operationBusy: busy.has(state.phase) }, true);
-      else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '返答を考えています' : phaseText[state.phase])}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${explanation ? explanationHtml(explanation) : state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
+      else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '返答を考えています' : currentPhaseText)}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${explanation ? explanationHtml(explanation) : state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
       else if (explanation) body = explanationHtml(explanation);
       else if (state.phase === 'proposal') body = proposalHtml(state, options);
       else if (state.phase === 'review') body = reviewHtml(state, options);
@@ -14480,7 +14688,7 @@
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
@@ -14566,6 +14774,7 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
+        if (action === 'focus-consultation') { if (!busy.has(state.phase)) host.querySelector?.('#kt-release-input')?.focus?.(); return; }
         if (action === 'code') {
           const opened = options.onToggleCode?.();
           if (opened === false) host.querySelector?.('[data-release-action="code"]')?.focus?.({ preventScroll: true });
@@ -14599,7 +14808,8 @@
         if (action === 'request-rollback') { selectedRunId = null; return controller.requestRollback(id); }
         if (action === 'rollback') return controller.rollback(id);
         if (action === 'reprepare') return controller.reprepare();
-        if (action === 'recheck-rollback') { selectedRunId = null; return controller.recheckRollback(id); }
+        if (action === 'recheck-apply') return controller.recheckApply(id);
+        if (action === 'recheck-rollback') return controller.recheckRollback(id);
         if (['adopt', 'resume', 'apply', 'cancel'].includes(action)) { notice = ''; return controller[action](); }
         if (action === 'copy-code' || action === 'download-code') {
           const artifact = state.artifacts.find(a => a.customizationId === id), result = artifact?.result;

@@ -144,11 +144,15 @@ const KTReleaseView = (() => {
       ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
       ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
       ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-      ${noticesHtml(state)}
+      ${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
       ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
       <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
       ${(state.artifacts || []).length ? '<p class="ktr-note">作成したJavaScriptの検証は完了しています。実際の画面での動作は反映後に確かめます。</p>' : ''}
       <div class="ktr-actions">${button('apply', '動作テスト環境に反映', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+  }
+  function provisionalsHtml(rows) {
+    const choices = (rows || []).filter(row => row && typeof row.choice === 'string' && row.choice.trim());
+    return choices.length ? `<section><h3>計画で決めたこと</h3><p class="ktr-note">変更案を作る際にAIが決めた内容です。変更したい点は、反映前に相談してください。</p><ul>${choices.map((row, index) => `<li><span>${esc(row.choice)}</span>${row.reason ? `<p class="ktr-note">${esc(row.reason)}</p>` : ''}${row.changeHint ? `<details data-release-panel="plan-choice-${index}"><summary>変更したいとき</summary><p>${esc(row.changeHint)}</p></details>` : ''}</li>`).join('')}</ul></section>` : '';
   }
   // Display the service's existing explanation fields. These do not create blockers
   // or additional approval steps; only identical strings are deduplicated.
@@ -179,14 +183,28 @@ const KTReleaseView = (() => {
     }).join('');
   }
   const reprepareHtml = options => `<div class="ktr-actions">${button('reprepare', '最新の設定で確認し直す', { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">AIは呼び出さず、現在の変更案を確認し直します。kintoneへの反映は行いません。</p>`;
+  const creationMessages = {
+    incomplete: { title: '作成途中です', label: '作成途中', help: '残りを作成してから、全体を確認します。', action: '残りを作成' },
+    interrupted: { title: '作成を完了できませんでした', label: '作成未完了', help: '接続などの原因を確認してから、未完了の内容を作成し直せます。', action: '未完了の内容を作成し直す' },
+    failed: { title: '検証で不一致がありました', label: '検証不一致', help: '作成したコードの検証に通りませんでした。理由を確認し、相談で内容を修正するか、未完了の内容を作成し直してください。', action: '未完了の内容を作成し直す' },
+    unverified: { title: '検証できない内容があります', label: '検証できません', help: 'コードの誤りとは判定していません。表示された理由を確認してください。内容の修正が必要な場合は相談欄から伝えられます。検証できない原因が残る間は、同じ内容を作成し直しません。' },
+    declined: { title: '作成できない内容があります', label: '作成できません', help: 'AIが作成しなかった理由を確認し、変更したい内容を相談欄から伝えてください。' },
+    limit: { title: 'AIの利用上限に達しました', label: '利用上限', help: '接続画面で利用状況を確認してください。利用可能になったら、未完了の内容だけ作成を再開できます。', action: '未完了の作成を再開' }
+  };
+  function creationMessage(state) {
+    if (workspace.canReprepare(state)) return { title: '反映内容の確認が必要です', label: '反映内容の確認' };
+    if (!state.plan) return { title: '計画を作成できませんでした', label: '計画未完了' };
+    return creationMessages[workspace.creationStateOf(state).kind];
+  }
   function incompleteHtml(state, options) {
     if (workspace.canReprepare(state)) return `<section class="ktr-section"><h2>反映内容の確認が必要です</h2><p>作成した変更案は残っています。現在の設定で反映できるか確認してください。</p>${reprepareHtml(options)}</section>`;
     if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。相談で内容を修正するか、もう一度作成してください。</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
     const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
     const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
     const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
+    const recovery = workspace.creationStateOf(state), wording = creationMessages[recovery.kind];
     const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-    return `<section class="ktr-section"><h2>作成途中です</h2><p>${finished.length ? "完成した内容は残っています。残りを作成してから、全体を確認します。" : "作成は完了していません。残っている内容を作成してから、全体を確認します。"}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}<div class="ktr-actions">${button('resume', '残りを作成', { primary: true, disabled: !state.plan, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+    return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${recovery.kind === 'limit' ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : recovery.kind === 'limit' ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
   }
   function runHtml(run, options = {}, historical = false) {
     if (!run) return '<p>反映の記録はありません。</p>';
@@ -195,7 +213,7 @@ const KTReleaseView = (() => {
     const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
       (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
       run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-    const canRestore = !!run.result?.written && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+    const canRestore = run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
     const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
     const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
     const checkMobile = platforms.has('mobile');
@@ -208,7 +226,7 @@ const KTReleaseView = (() => {
       ${!run.rollback && status === 'complete' && checkMobile ? '<p>モバイルの動作は、動作テスト環境では確認できません。モバイル画面での確認は別途必要です。</p>' : ''}
       ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
       ${status === 'unknown' ? `<p>${run.rollback ? 'もう一度戻す前に、現在の状態を確認してください。' : '同じ変更をもう一度反映せず、現在の設定を確認してください。'}</p>` : ''}
-      <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
+      <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
   }
   function rollbackHtml(state, options) {
     const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
@@ -233,11 +251,13 @@ const KTReleaseView = (() => {
   function render(state, options = {}) {
     const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
     const codePanel = typeof options.codePanelState === 'function' ? options.codePanelState() : {};
-    const codeAttention = codePanel.open && !historical ? ({ incomplete: '作成が完了していません。', blocked: '反映前の確認が完了していません。' }[state.phase] || '') : '';
+    const creation = state.phase === 'incomplete' ? creationMessage(state) : null;
+    const currentPhaseText = state.phase === 'checking-result' ? state.progress || phaseText[state.phase] : phaseText[state.phase];
+    const codeAttention = codePanel.open && !historical ? (creation?.title || (state.phase === 'blocked' ? '反映前の確認が完了していません。' : '')) : '';
     const explanation = !historical ? (state.explanations || []).find(item => item.id === state.explanationId) : null;
     let body = '';
     if (historical) body = runHtml(historical, { ...options, operationBusy: busy.has(state.phase) }, true);
-    else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '返答を考えています' : phaseText[state.phase])}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${explanation ? explanationHtml(explanation) : state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
+    else if (busy.has(state.phase)) body = `<section class="ktr-section ktr-progress" aria-live="polite"><div class="ktr-working-heading">${activity}<h2>${esc(state.phase === 'consulting' ? '返答を考えています' : currentPhaseText)}</h2></div><p role="status">${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : '処理を進めています。'))}</p>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : '<p class="ktr-note">処理が終わるまで、この画面を開いたままにしてください。</p>'}</section>${explanation ? explanationHtml(explanation) : state.adopted || state.proposal ? proposalHtml(state, { ...options, readOnly: true, proposal: state.adopted || state.proposal }) : ''}`;
     else if (explanation) body = explanationHtml(explanation);
     else if (state.phase === 'proposal') body = proposalHtml(state, options);
     else if (state.phase === 'review') body = reviewHtml(state, options);
@@ -250,7 +270,7 @@ const KTReleaseView = (() => {
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
     const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
     const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
       <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
   }
   function create(host, options = {}) {
@@ -336,6 +356,7 @@ const KTReleaseView = (() => {
       const state = controller.getState();
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
       if (action === 'send') return send();
+      if (action === 'focus-consultation') { if (!busy.has(state.phase)) host.querySelector?.('#kt-release-input')?.focus?.(); return; }
       if (action === 'code') {
         const opened = options.onToggleCode?.();
         if (opened === false) host.querySelector?.('[data-release-action="code"]')?.focus?.({ preventScroll: true });
@@ -369,7 +390,8 @@ const KTReleaseView = (() => {
       if (action === 'request-rollback') { selectedRunId = null; return controller.requestRollback(id); }
       if (action === 'rollback') return controller.rollback(id);
       if (action === 'reprepare') return controller.reprepare();
-      if (action === 'recheck-rollback') { selectedRunId = null; return controller.recheckRollback(id); }
+      if (action === 'recheck-apply') return controller.recheckApply(id);
+      if (action === 'recheck-rollback') return controller.recheckRollback(id);
       if (['adopt', 'resume', 'apply', 'cancel'].includes(action)) { notice = ''; return controller[action](); }
       if (action === 'copy-code' || action === 'download-code') {
         const artifact = state.artifacts.find(a => a.customizationId === id), result = artifact?.result;

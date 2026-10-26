@@ -396,7 +396,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         });
         assert.equal(await page.locator('.ktr-header-notice .ktr-error').count(),0);
         assert.equal(await page.locator('.ktr-code-attention').isVisible(),true,'最上位のerrorが無くても未完成を伝える');
-        assert.match(await page.locator('.ktr-code-attention').innerText(),/作成が完了していません/);
+        assert.match(await page.locator('.ktr-code-attention').innerText(),/検証で不一致がありました/);
         await page.locator('.ktr-code-attention [data-release-action="code"]').click();
         assert.equal(await page.locator('.ktr-current').isVisible(),true);
         assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/モバイルの備考の編集制御を確認できませんでした/,'案に戻って生成物の不合格理由を読める');

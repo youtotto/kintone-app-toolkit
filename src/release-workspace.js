@@ -24,6 +24,20 @@ const KTReleaseWorkspace = (() => {
     !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
     (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
     (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
+  // Only service states and error codes choose recovery actions; prose is not interpreted.
+  function creationStateOf(state) {
+    const artifacts = state.artifacts || [], unfinished = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready');
+    const codes = new Set([state.error?.code, ...unfinished.map(a => a.error?.code || a.result?.error?.code)]);
+    const unverified = unfinished.some(a => a.result?.artifactOutcome?.state === 'unverified') ||
+      ['SANDBOX_OUTDATED', 'SANDBOX_UNAVAILABLE', 'REQUIRED_EFFECTS_UNRESOLVED', 'CONDITION_SOURCE_UNVERIFIABLE', 'OUTCOME_REQUIRED', 'ARTIFACT_MISMATCH', 'BODY_MISMATCH'].some(code => codes.has(code));
+    const declined = codes.has('GENERATION_DECLINED') || unfinished.some(a => a.result?.artifactOutcome?.reasonCodes?.includes('GENERATION_DECLINED'));
+    const kind = unverified ? 'unverified' : declined ? 'declined' : codes.has('BUDGET_EXCEEDED') ? 'limit' :
+      unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
+      unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
+    return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
+      !unverified && !declined &&
+      !(state.plan.questions || []).some(q => q && q.blocking !== false) };
+  }
   // Selection is a local draft, never an adoption or a new interpretation of text.
   function suggestionRequest(state) {
     const ids = new Set(state.selectedSuggestionIds || []);
@@ -288,7 +302,7 @@ const KTReleaseWorkspace = (() => {
       }, 'incomplete');
     }
     async function resume() {
-      if (!state.plan || state.phase !== 'incomplete') return false;
+      if (!creationStateOf(state).canResume) return false;
       return activity('building', async (signal, live) => {
         const fresh = await getBase('resume');
         if (!live()) return;
@@ -320,24 +334,32 @@ const KTReleaseWorkspace = (() => {
         set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
       }, 'blocked');
     }
-    async function recheckRollback(runId) {
-      const run = state.runs.find(r => r.id === runId);
-      if (!run || run.rollback?.status !== 'unknown' || !available() || typeof execution.recheckRollback !== 'function') return false;
+    async function recheckRun(runId, kind) {
+      const run = state.runs.find(r => r.id === runId), restoring = kind === 'rollback';
+      const value = restoring ? run?.rollback : run?.result, method = restoring ? 'recheckRollback' : 'recheckApply';
+      if (!run || (restoring ? value?.status : run.status) !== 'unknown' || (!restoring && run.rollback) || !available() || typeof execution[method] !== 'function') return false;
+      const previous = { phase: state.phase, resultRunId: state.resultRunId, progress: state.progress, error: clone(state.error) };
+      const currentRun = run.taskId === state.taskId && state.phase === 'result' && (!state.resultRunId || state.resultRunId === run.id);
+      const label = restoring ? '復元' : '反映';
       return activity('checking-result', async (_, live) => {
+        set({ progress: label + '結果を確認しています。' });
         let checked;
-        try { checked = await execution.recheckRollback(clone(run)); }
-        catch (e) { checked = { ...clone(run.rollback), status: 'unknown', message: '復元の結果を確認できません。設定は変更していません。', error: errorOf(e) }; }
+        try { checked = await execution[method](clone(run)); }
+        catch (e) { checked = { ...clone(value), status: 'unknown', message: label + 'の結果を確認できません。設定は変更していません。', error: errorOf(e) }; }
         if (!live()) return;
         if (!checked || !['complete', 'partial', 'failed', 'unknown'].includes(checked.status)) {
-          checked = { ...clone(run.rollback), status: 'unknown', message: '復元の確認結果を受け取れませんでした。設定は変更していません。' };
+          checked = { ...clone(value), status: 'unknown', message: label + 'の確認結果を受け取れませんでした。設定は変更していません。' };
         }
-        run.rollback = clone(checked);
-        set({ phase: 'result', resultRunId: run.id, rollback: null, progress: '' });
-      }, 'result');
+        if (restoring) run.rollback = clone(checked);
+        else { run.result = clone(checked); run.status = checked.status; }
+        set(currentRun ? { phase: 'result', resultRunId: run.id, progress: '', error: null, ...(restoring ? { rollback: null } : {}) } : previous);
+      }, previous.phase);
     }
+    const recheckApply = runId => recheckRun(runId, 'apply');
+    const recheckRollback = runId => recheckRun(runId, 'rollback');
     async function requestRollback(runId) {
       const run = state.runs.find(r => r.id === runId);
-      if (!run || !run.result?.written || run.rollback?.status === 'complete' || !available()) return false;
+      if (!run || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
       return activity('preparing', async (_, live) => {
         const prepared = await execution.prepareRollback(clone(run));
         if (!live()) return;
@@ -356,7 +378,7 @@ const KTReleaseWorkspace = (() => {
     }
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-      send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
+      send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
       setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
       showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
       showChanges() { set({ explanationId: null }); return true; },
@@ -374,7 +396,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions, canReprepare, suggestionRequest };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

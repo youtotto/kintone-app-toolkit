@@ -198,6 +198,87 @@ const KTReleaseExecution = (() => {
           error: { code: error?.code, message: error?.message } };
       }
     }
+    async function recheckApply(run) {
+      const original = run.result;
+      let settings = clone(original?.settings || null), files = clone(original?.files || null);
+      const answer = (status, recoveryState, message, written = null, reasons = []) => ({
+        ...clone(original), status, recoveryState, message, written, retryable: status !== 'unknown',
+        settings, files, reasons: [...(original?.reasons || []), ...reasons],
+        rows: (run.prepared?.changes || []).map(change => {
+          const step = change.kind === 'javascript' ? files?.steps?.find(x => x.changeId === change.id) : settings?.steps?.find(x => x.stepId === change.id);
+          return { title: change.title || change.file, status: step?.status || 'SKIPPED', message: step?.message || 'この変更は実行していません。' };
+        })
+      });
+      const unknown = message => answer('unknown', 'unknown', message);
+      const changed = message => answer('unknown', 'changed', message, null, [{ code: 'APPLY_RESULT_CHANGED', message }]);
+      if (!original || original.status !== 'unknown' || run.rollback || !run.prepared?.ok ||
+          (run.prepared.settings && (run.prepared.settings.appId !== String(appId) || run.prepared.settings.env !== 'preview')) ||
+          (run.prepared.files && (run.prepared.files.appId !== String(appId) || run.prepared.files.env !== 'preview')) ||
+          (settings && (settings.appId !== String(appId) || settings.env !== 'preview')) ||
+          (files && (files.appId !== String(appId) || files.env !== 'preview')))
+        return unknown('対象の反映の記録を確認できません。');
+      let settingsRevision = null, filesRevision = null;
+      try {
+        if (settings) {
+          if (typeof planExecutor.recheckPreview !== 'function') return unknown('設定の送信記録を照合する処理がありません。');
+          const checked = await planExecutor.recheckPreview(settings, run.prepared.settings, { api });
+          if (checked.state === 'changed') return changed(checked.message);
+          if (checked.state === 'unknown') return unknown(checked.message);
+          settings = checked.execution; settingsRevision = checked.current?.fields?.revision;
+        } else if (pending(run.prepared.settings).length) return unknown('設定の処理が止まった位置を確認できません。');
+        const basis = original.filesPrepared || run.prepared.files;
+        if (basis?.snapshot) {
+          if (basis.appId !== String(appId) || basis.env !== 'preview' || (files && (files.executionId !== basis.executionId || jsExecutor.diffSnapshots(files.snapshot, basis.snapshot).length)))
+            return unknown('承認したJavaScriptと登録の記録が一致しません。');
+          const actual = await api.getPreviewCustomize(String(appId)), current = jsExecutor.snapshotOf(actual);
+          filesRevision = current.revision;
+          const before = files?.snapshot || basis.snapshot;
+          if (!jsExecutor.diffSnapshots(before, current).length) {
+            if (files?.put?.ok) return changed('登録済みのJavaScriptが、登録前の状態へ変更されています。');
+            if (files) {
+              files.previousOutcome ||= { status: files.status, put: clone(files.put), verification: clone(files.verification), error: clone(files.error), actualAfterRaw: clone(files.actualAfterRaw), afterRevision: files.afterRevision };
+              files.previewUnchanged = true; files.status = 'FAILED';
+              files.readback = { observed: true, state: 'not-applied', revision: current.revision };
+              for (const step of files.steps || []) { step.status = 'FAILED'; step.reason = 'READBACK_NOT_APPLIED'; step.message = '現在の登録内容は、反映前のJavaScriptと一致しています。'; }
+            }
+          } else {
+            if (!files?.put || !files.steps?.length || files.steps.some(s => !s.uploadKey))
+              return changed('現在のJavaScriptが、登録前の記録と異なります。');
+            const intended = jsExecutor.buildAfter(before, files.steps, Object.fromEntries(files.steps.map(s => [s.changeId, s.uploadKey])));
+            if (jsExecutor.diffSnapshots(intended, current, { compareFileKey: false }).length)
+              return changed('現在のJavaScriptの名前・対象・順序が、承認した登録内容と異なります。');
+            const observed = clone(files), downloaded = {};
+            for (const step of observed.steps) {
+              const entry = current[step.target]?.js?.[step.position];
+              if (!entry?.fileKey || typeof api.downloadFile !== 'function') return unknown('登録したJavaScriptの本文を照合できません。');
+              downloaded[entry.fileKey] = await api.downloadFile(entry.fileKey);
+              if (typeof downloaded[entry.fileKey] !== 'string') return unknown('登録したJavaScriptの本文を取得できません。');
+              step.previousOutcome ||= { status: step.status, reason: step.reason, message: step.message, verification: clone(step.verification) };
+              step.status = 'APPLIED';
+            }
+            observed.verification = jsExecutor.verifyAfter(observed, actual, { downloaded });
+            if (!observed.verification.ok) return changed('現在のJavaScriptの本文または登録内容が、承認した内容と異なります。');
+            observed.previousOutcome ||= { status: files.status, put: clone(files.put), verification: clone(files.verification), error: clone(files.error), actualAfterRaw: clone(files.actualAfterRaw), afterRevision: files.afterRevision };
+            observed.put = { ...observed.put, ok: true, confirmedByReadback: true };
+            observed.previewUnchanged = false; observed.status = 'DONE'; observed.actualAfterRaw = current; observed.afterRevision = current.revision;
+            observed.readback = { observed: true, state: 'applied', revision: current.revision };
+            for (const step of observed.steps) { step.reason = 'READBACK_MATCH'; step.message = '現在のJavaScriptが、承認した本文・対象・順序と一致しています。'; }
+            files = observed;
+          }
+        } else if ((run.prepared.changes || []).some(c => c.kind === 'javascript')) return unknown('登録前のJavaScriptの記録がありません。');
+        // Revisions are a consistency guard, not evidence that a request succeeded.
+        const end = settingsRevision != null ? await api.getPreviewFields(String(appId)) : filesRevision != null ? await api.getPreviewCustomize(String(appId)) : null;
+        if (!end || [settingsRevision, filesRevision].filter(x => x != null).some(x => String(x) !== String(end.revision)))
+          return unknown('確認の途中で設定が変わったため、反映結果を確定できません。');
+        const rows = answer('', '', '').rows, written = settingWritten(settings) || !!files?.put?.ok;
+        if (!rows.length) return unknown('照合する変更内容がありません。');
+        if (rows.every(row => row.status === 'VERIFIED')) return answer('complete', 'applied', '現在の設定とJavaScriptが、承認した反映内容と一致しています。', true);
+        return written ? answer('partial', 'partial', '一部は承認した内容と一致し、残りは反映されていません。続きの書き込みは行っていません。', true) :
+          answer('failed', 'not-applied', '現在の設定に、この反映の変更は入っていません。書き込みの再実行は行っていません。', false);
+      } catch (error) {
+        return { ...unknown('現在の設定を取得できず、反映の結果を確認できません。'), error: { ...clone(original.error), recheck: { code: error?.code, message: error?.message } } };
+      }
+    }
     // A completed script restoration remains part of this run when a later setting
     // restoration fails. Its exact readback must still match before skipping it.
     async function restoredFileReasons(run, restored) {
@@ -346,7 +427,7 @@ const KTReleaseExecution = (() => {
           error: { code: error?.code, message: error?.message } };
       }
     }
-    return { prepare, apply, prepareRollback, rollback, recheckRollback };
+    return { prepare, apply, prepareRollback, rollback, recheckRollback, recheckApply };
   }
   return { create };
 })();
