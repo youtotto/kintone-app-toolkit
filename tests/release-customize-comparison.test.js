@@ -125,3 +125,19 @@ test('会話で選んだ過去の反映記録に比較も追随し、現在へ�
   chooseHistory(null); assert.equal(f.editors.at(-1).model.modified.text, 'current body'); assert.equal(f.buttons[0].textContent, '現在のコード');
   f.api.dispose(); assert.equal(displayListeners.size, 0);
 });
+
+test('上下表示の比較は手元の編集中の差分ではないと伝え、別ファイルでも選択を勝手に変えない', () => {
+  let editing = { target: 'desktop', name: 'same.js', text: 'unsaved code' };
+  const f = fixture(state([file('desktop'), file('mobile', 'same.js', { content: 'mobile after' })]), { getEditingFile: () => editing });
+  assert.match(f.elements.note.textContent, /手元の編集中のコードとの差分ではありません/);
+  assert.doesNotMatch(f.elements.note.textContent, /別のファイル/);
+  f.choose(1);
+  const selected = f.elements.file.value;
+  assert.match(f.elements.note.textContent, /上のエディターとは別のファイル/);
+  editing = { target: 'desktop', name: 'another.js' }; f.api.render();
+  assert.equal(f.elements.file.value, selected);
+  assert.equal(f.editors.at(-1).model.modified.text, 'mobile after');
+  editing = { target: 'mobile', name: 'same.js' }; f.api.render();
+  assert.doesNotMatch(f.elements.note.textContent, /別のファイル/);
+  assert.match(f.elements.note.textContent, /手元の編集中のコードとの差分ではありません/);
+});

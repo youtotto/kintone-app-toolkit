@@ -3,6 +3,63 @@
 const KTReleaseCustomize = (() => {
   const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const keyOf = file => JSON.stringify([file.target, file.name, file.changeId]);
+  // Reuse a scan only when its app, environment and registered source can be identified.
+  // Draft text is deliberately excluded: this function does not analyze edited code.
+  function referenceInfoOf({ appId, document, scan, stale = false } = {}) {
+    const result = { status: 'unavailable', reason: '未取得', source: document?.environment || null,
+      scannedAt: scan?.meta?.scannedAt || null, basis: 'registered', fields: [], events: [], unknownRefs: [] };
+    const unavailable = (reason, status = 'unavailable') => ({ ...result, status, reason });
+    if (!document || document.isNew || !document.fileKey) return unavailable('登録済みのファイルを選んでください。');
+    if (document.kind !== 'js') return unavailable('参照情報はJavaScriptで表示します。', 'unsupported');
+    if (stale) return unavailable('設定が変わったため、解析結果を確認できていません。', 'stale');
+    if (!['preview', 'production'].includes(document.environment) || !['desktop', 'mobile'].includes(document.target)
+      || appId == null || scan?.meta?.appId == null || String(scan.meta.appId) !== String(appId)
+      || scan.meta.source !== document.environment) return unavailable('同じアプリ・環境の解析結果を確認できていません。');
+    if (!Array.isArray(scan.files) || !Array.isArray(scan.results) || !scan.fileEvents || typeof scan.fileEvents !== 'object' || Array.isArray(scan.fileEvents)) {
+      return unavailable('このファイルの解析結果をまだ取得していません。');
+    }
+    const files = scan.files.filter(file => file?.name === document.name && file.target === document.target && file.kind === document.kind);
+    if (files.length !== 1) return unavailable(files.length ? '同名のファイルがあるため、解析結果を特定できません。' : 'このファイルの解析結果をまだ取得していません。');
+    const file = files[0];
+    if (file.note || file.analyzed === false || file.type === 'URL' || file.url) return unavailable('このファイルの解析は確認できていません。');
+    const sameKey = file.fileKey != null && file.fileKey !== '' && String(file.fileKey) === String(document.fileKey);
+    const sameBody = typeof document.registeredText === 'string' && typeof file.text === 'string' && document.registeredText === file.text;
+    if (!sameKey && !sameBody) return unavailable('登録済みのコードと一致する解析結果を確認できていません。');
+    const eventKey = `${document.target}:js:${document.name}`;
+    const eventRows = Object.prototype.hasOwnProperty.call(scan.fileEvents, eventKey) ? scan.fileEvents[eventKey] : [];
+    if (!Array.isArray(eventRows)) return unavailable('このファイルの解析結果を確認できていません。');
+    const fields = new Map(), events = new Map();
+    for (const row of scan.results) {
+      if (typeof row?.code !== 'string' || !Array.isArray(row.matches)) continue;
+      const matches = row.matches.filter(match => match?.file === document.name && match.target === document.target && match.kind === document.kind);
+      if (!matches.length) continue;
+      let field = fields.get(row.code);
+      if (!field) {
+        field = { code: row.code, label: row.label || row.code, type: row.type || null, access: new Set(), lines: new Set(), confidence: new Set() };
+        fields.set(row.code, field);
+      }
+      for (const match of matches) {
+        if (typeof match.access === 'string') field.access.add(match.access);
+        if (Number.isInteger(match.line) && match.line > 0) field.lines.add(match.line);
+        if (typeof match.confidence === 'string') field.confidence.add(match.confidence);
+      }
+    }
+    for (const event of eventRows) {
+      const name = typeof event === 'string' ? event : event?.name;
+      if (typeof name !== 'string' || !name) continue;
+      events.set(name, { name, direct: events.get(name)?.direct === true || event?.direct === true });
+    }
+    const unknownRefs = (Array.isArray(scan.unknownRefs) ? scan.unknownRefs : []).flatMap(ref => {
+      if (typeof ref?.code !== 'string' || !Array.isArray(ref.files)) return [];
+      const matched = ref.files.filter(item => item?.name === `${document.target}:${document.name}`);
+      if (!matched.length) return [];
+      return [{ code: ref.code, confidence: ref.confidence || null,
+        lines: [...new Set(matched.flatMap(item => Array.isArray(item.lines) ? item.lines : []).filter(line => Number.isInteger(line) && line > 0))].sort((a, b) => a - b) }];
+    });
+    return { ...result, status: 'ready', reason: null,
+      fields: [...fields.values()].map(field => ({ ...field, access: [...field.access].sort(), lines: [...field.lines].sort((a, b) => a - b), confidence: [...field.confidence].sort() })),
+      events: [...events.values()], unknownRefs };
+  }
   function comparisonOf(state, selectedRunId = null) {
     const historical = selectedRunId != null;
     const run = historical || ['result', 'rollback-confirm', 'rolling-back', 'checking-result'].includes(state.phase)
@@ -10,7 +67,7 @@ const KTReleaseCustomize = (() => {
     const prepared = historical ? run?.prepared || null : run ? run.prepared : state.prepared;
     return { run, prepared, files: (prepared?.files?.changes || []).filter(file => ['desktop', 'mobile'].includes(file.target) && typeof file.name === 'string') };
   }
-  function createComparison(host, { controller, monaco, getSelectedRunId = () => null, subscribeDisplay = null } = {}) {
+  function createComparison(host, { controller, monaco, getSelectedRunId = () => null, subscribeDisplay = null, getEditingFile = () => null } = {}) {
     if (!host || !controller || !monaco?.editor) throw new Error('コードの比較に必要な情報がありません。');
     host.innerHTML = `<section class="ktr-code-comparison" aria-label="AIの修正案と差分"><style>
       .ktr-code-comparison{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:360px;height:100%;color:var(--kt-text,#253247);background:var(--kt-paper,#fff);font:14px/1.6 system-ui,sans-serif}
@@ -54,7 +111,10 @@ const KTReleaseCustomize = (() => {
       const stateNote = run ? 'この反映の記録に保存された変更前と修正案です。現在の登録内容を取り直した表示ではありません。'
         : prepared.ok ? '反映前の確認に使用しているコードです。確認後の登録は、相談欄の「動作テスト環境に反映」から行います。'
           : '反映前の確認は完了していません。この比較だけでは反映できません。';
-      note.textContent = stateNote + (file.kind === 'ADD_FILE' ? ' 新しいファイルのため、変更前は空欄です。' : file.reason === 'JS_UNCHANGED' ? ' 既存のコードと同じため、このファイルは登録しません。' : '') + ' この表示からコードは編集できません。';
+      const editingFile = getEditingFile();
+      const differentFile = editingFile && (editingFile.target !== file.target || editingFile.name !== file.name);
+      note.textContent = stateNote + (file.kind === 'ADD_FILE' ? ' 新しいファイルのため、変更前は空欄です。' : file.reason === 'JS_UNCHANGED' ? ' 既存のコードと同じため、このファイルは登録しません。' : '')
+        + ' 手元の編集中のコードとの差分ではありません。' + (differentFile ? ' 上のエディターとは別のファイルを比較しています。' : '') + ' この表示からコードは編集できません。';
       if (shown?.key === selected && shown.mode === mode && shown.before === before && shown.after === after) { editor?.layout(); return; }
       release();
       const optionsEditor = { readOnly: true, domReadOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, wordWrap: 'on' };
@@ -74,6 +134,6 @@ const KTReleaseCustomize = (() => {
     const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
     return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
   }
-  return { createComparison, comparisonOf };
+  return { createComparison, comparisonOf, referenceInfoOf };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseCustomize };

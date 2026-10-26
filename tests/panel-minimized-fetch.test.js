@@ -29,6 +29,17 @@ const fakeMonaco = (() => {
 /** 1 回のページ（sandbox）。storage を渡すと、同じ localStorage で読み込み直す（画面遷移） */
 function makeEnv({ mini = null, storage = null, data = null, admin = true, layout = null, gateway = null } = {}) {
   const { doc, byId } = makeFakeDocument();
+  // This fetch-count test uses a flat DOM. Resolve only the reference panel's two descendant selectors;
+  // rendering and resize behavior remain covered by release-customize-browser.test.js.
+  const setElement = byId.set.bind(byId);
+  byId.set = (id, element) => {
+    const query = element.querySelector.bind(element);
+    element.querySelector = selector => {
+      const child = /^#kt-customize-reference-info (\[data-reference-content\]|\[data-open-deps\])$/.exec(String(selector));
+      return child && byId.has('kt-customize-reference-info') ? byId.get('view-customize').querySelector(child[1]) : query(selector);
+    };
+    return setElement(id, element);
+  };
   const store = storage || makeStorage(mini == null ? {} : { [MINI_KEY]: mini });
   const T = loadToolkit({ document: doc, localStorage: store });
   const g = T.__sandbox;

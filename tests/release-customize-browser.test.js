@@ -12,12 +12,14 @@ function playwright() {
 function bundle() {
   const source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
-  return source.slice(0, end) + '\nglobalThis.CustomizeTest={mountRoot,renderCustomize,renderAiWorkspace,KTApi,KTDevBase,KTAiClient};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.CustomizeTest={mountRoot,renderCustomize,renderAiWorkspace,KTApi,KTDevBase,KTAiClient,KTScan};\n' + source.slice(end);
 }
 async function mount(page) {
   await page.evaluate(async () => {
     const T = CustomizeTest, C = T.KTAiClient;
     const clone = value => structuredClone(value);
+    window.scanCalls=[];
+    for(const method of ['run','runStale','analyzeFile','buildPayload']){const original=T.KTScan[method];T.KTScan[method]=function(...args){scanCalls.push(method);return original.apply(this,args);};}
     window.operations = []; window.fileReads = []; window.pendingFile = null; window.fileFailure = null; window.holdNextCustomize = false; window.pendingList = null;
     const denied = name => () => { operations.push(name); throw Error('Forbidden in local browser test: ' + name); };
     const file = (name, fileKey) => ({type:'FILE', file:{name,fileKey,size:'40'}});
@@ -47,6 +49,8 @@ async function mount(page) {
       const editor={host,options,disposed:false,model:null,setModel(models){this.model=models;if(models){before.setModel(models.original);after.setModel(models.modified);}},getModel(){return this.model;},getOriginalEditor:()=>before,getModifiedEditor:()=>after,updateOptions(){},layout(){},dispose(){this.disposed=true;before.dispose();after.dispose();}};
       monacoDiffs.push(editor);return editor;
     }}});
+    window.referenceScan={meta:{appId:'310',source:'preview',scannedAt:'2026-10-26T00:00:00Z'},files:[{name:'same.js',target:'desktop',kind:'js',fileKey:'pc',text:sources.pc}],results:[{code:'memo',label:'備考',type:'SINGLE_LINE_TEXT',matches:[{file:'same.js',target:'desktop',kind:'js',access:'READ',line:2,confidence:'HIGH'}]}],fileEvents:{'desktop:js:same.js':[{name:'app.record.edit.show',direct:true}]},unknownRefs:[]};
+    window.matchingReferenceScan=clone(referenceScan);
     const data={appId:'310',appName:'カスタマイズ確認用',fields:{memo:{type:'SINGLE_LINE_TEXT',code:'memo',label:'備考'}},layout:[],status:{enable:false,states:{},actions:[]},views:{views:{}},customize};
     const base={ok:true,env:'preview',appId:'310',loadedAt:'2026-10-26T00:00:00Z',revision:{preview:'7',production:'7'},data,files:[...customize.desktop.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'desktop',text:sources[entry.file.fileKey],sourceAvailable:true})),...customize.mobile.js.map(entry=>({name:entry.file.name,fileKey:entry.file.fileKey,type:'FILE',target:'mobile',text:sources[entry.file.fileKey],sourceAvailable:true}))],errors:[]};
     T.KTDevBase.loadForRelease=async()=>clone(base);
@@ -62,7 +66,7 @@ async function mount(page) {
     const session={client,status:()=>({connected:true,apiBase:'https://gateway.test.invalid'}),disconnect:async()=>{}};
     window.work=T.renderAiWorkspace(shell,data,'310',{getContextInputs:()=>({data,deps:{},scan:{files:[]}}),aiLink:{settings,session,probe:async()=>({ok:true,health})}});
     shell.ktAi=work;
-    window.customize=T.renderCustomize(shell,data,'310',{autoLoad:true,getInputs:()=>({data,deps:{},scan:{files:[]}}),consult:seed=>work.consult(seed)});
+    window.customize=T.renderCustomize(shell,data,'310',{autoLoad:true,getInputs:()=>({data,deps:{},scan:window.referenceScan}),consult:seed=>work.consult(seed)});
     window.customize=await window.customize;shell.ktCustomize=window.customize;
     window.customize.attachAssistant(work);
     window.originalHost=shell.querySelector('#kt-ai-host');
@@ -74,6 +78,12 @@ async function mount(page) {
 const filePicker = page => page.locator('#kt-customize-file');
 const editor = page => page.locator('#kt-customize-editor textarea[data-test-editor]');
 async function selected(page,name,value){await filePicker(page).selectOption({label:name});await assertEventually(()=>editor(page).inputValue(),value);}
+async function dragBy(page,handle,dx,dy){
+  await handle.scrollIntoViewIfNeeded();const box=await handle.boundingBox();assert.ok(box,'サイズ調整の境界線を表示する');
+  const x=box.x+box.width/2,y=box.y+box.height/2;
+  await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+dx,y+dy,{steps:6});await page.mouse.up();
+}
+const editorCssHeight=page=>page.locator('#kt-customize-editor').evaluate(el=>parseFloat(getComputedStyle(el).height));
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
@@ -113,13 +123,57 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         const initialGeometry=await geometry(page);
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0,'Customizeにチャットを複製しない');
         assert.equal(await page.locator('#kt-release-input').isVisible(),false,'Customizeは編集に集中する');
-        assert.ok(initialGeometry.editor.width>initialGeometry.shell.width*.65,'Customizeの左エディターを広く使う');
-        assert.ok(initialGeometry.menu.left>=initialGeometry.editor.right+8,'Menuはエディターの右に置く');
-        assert.ok(initialGeometry.menu.width>=250&&initialGeometry.menu.width<=340,'Menuは操作できる幅に収める: '+JSON.stringify(initialGeometry));
-        assert.ok(initialGeometry.editor.height>=600,'Menuの説明でエディターの高さを減らさない');
+        const initialShare=initialGeometry.editor.width/(initialGeometry.editor.width+initialGeometry.menu.width);
+        assert.ok(initialShare>=.60&&initialShare<=.70,'左は約65%、右は参照情報を読める幅にする');
+        assert.ok(initialGeometry.menu.left>=initialGeometry.editor.right+6,'Menuはエディターの右に置く');
+        assert.ok(initialGeometry.menu.width>=280,'Menuの操作と参照情報に幅を残す');
+        assert.ok(initialGeometry.editor.height>=260&&initialGeometry.editor.height<600,'短いコードの編集領域が画面いっぱいに伸びない');
         await page.screenshot({path:path.join(out,colorScheme+'-customize-menu.png'),fullPage:true});
         assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
         const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
+        const reference=page.locator('#kt-customize-reference-info [data-reference-content]');
+        assert.equal(await reference.isVisible(),true,'Menuの下で登録済みコードの参照情報を読める');
+        assert.match(await reference.innerText(),/動作テスト環境/);assert.match(await reference.innerText(),/備考/);
+        assert.match(await reference.innerText(),/編集画面を開いたとき（PC）/);assert.match(await reference.innerText(),/app\.record\.edit\.show/);
+        assert.match(await reference.innerText(),/登録済みコードの解析結果/);assert.match(await reference.innerText(),/手元の編集は含みません/);
+        const referenceCalls=await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]}));
+        await page.evaluate(()=>{referenceScan={...matchingReferenceScan,meta:{...matchingReferenceScan.meta,source:'production'}};});
+        await selected(page,'same.js','// PC original\nconst memo = 1;\n');
+        assert.match(await reference.innerText(),/未確認/);assert.match(await reference.innerText(),/同じアプリ・環境の解析結果を確認できていません/);
+        assert.doesNotMatch(await reference.innerText(),/備考|app\.record\.edit\.show/,'別環境のときに前の参照結果を残さない');
+        await page.evaluate(()=>{referenceScan=structuredClone(matchingReferenceScan);});
+        await selected(page,'same.js','// PC original\nconst memo = 1;\n');
+        assert.match(await reference.innerText(),/備考/);assert.match(await reference.innerText(),/app\.record\.edit\.show/);
+        assert.deepEqual(await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]})),referenceCalls,'参照情報の切り替えでAI・ダウンロード・新しい解析を呼ばない');
+        const stateBeforeResize=await page.evaluate(()=>JSON.stringify(work.controller.getState()));
+        await page.evaluate(()=>{window.resizeEditor=document.querySelector('#kt-customize-editor textarea[data-test-editor]');});
+        const widthHandle=page.locator('#kt-customize-width-resize'),heightHandle=page.locator('#kt-customize-height-resize');
+        assert.equal(await widthHandle.getAttribute('role'),'separator');assert.equal(await widthHandle.getAttribute('aria-orientation'),'vertical');
+        assert.equal(await heightHandle.getAttribute('role'),'separator');assert.equal(await heightHandle.getAttribute('aria-orientation'),'horizontal');
+        assert.equal(await widthHandle.getAttribute('aria-valuemin'),'45');assert.equal(await widthHandle.getAttribute('aria-valuemax'),'80');
+        assert.equal(await heightHandle.getAttribute('aria-valuemin'),'220');assert.equal(await heightHandle.getAttribute('aria-valuemax'),'1000');
+        assert.ok(Number(await widthHandle.getAttribute('tabindex'))>=0,'幅調整をキーボードでも選べる');
+        assert.ok(Number(await heightHandle.getAttribute('tabindex'))>=0,'高さ調整をキーボードでも選べる');
+        const startWidth=Number(await widthHandle.getAttribute('aria-valuenow'));
+        await widthHandle.press('ArrowRight');assert.equal(Number(await widthHandle.getAttribute('aria-valuenow')),startWidth+2);
+        await widthHandle.press('ArrowLeft');assert.equal(Number(await widthHandle.getAttribute('aria-valuenow')),startWidth);
+        await dragBy(page,widthHandle,70,0);assert.ok((await geometry(page)).editor.width>initialGeometry.editor.width+30,'ドラッグで左の幅が広がる');
+        await widthHandle.press('End');await widthHandle.press('ArrowRight');assert.equal(await widthHandle.getAttribute('aria-valuenow'),'80','右へ動かし続けても幅の上限を越えない');
+        assert.ok((await geometry(page)).menu.width>=270,'幅を広げてもMenuを潰さない');
+        await widthHandle.press('Home');await widthHandle.press('ArrowLeft');assert.equal(await widthHandle.getAttribute('aria-valuenow'),'45','幅の下限を越えない');
+        for(let i=0;i<10;i++)await widthHandle.press('ArrowRight');
+        const widthReset=await geometry(page);assert.ok(Math.abs(widthReset.editor.width-initialGeometry.editor.width)<=3,'65%へ戻せる');
+        const startHeight=await editorCssHeight(page);
+        await heightHandle.press('ArrowUp');assert.ok(Math.abs((await editorCssHeight(page))-(startHeight-20))<=2,'高さはキーで縮められる');
+        await heightHandle.press('ArrowDown');assert.ok(Math.abs((await editorCssHeight(page))-startHeight)<=2);
+        await dragBy(page,heightHandle,0,66);assert.ok((await editorCssHeight(page))>startHeight+40,'文字倍率があってもドラッグで高さが増える');
+        await heightHandle.press('End');await heightHandle.press('ArrowDown');assert.equal(await heightHandle.getAttribute('aria-valuenow'),'1000','高さの上限を越えない');
+        await heightHandle.press('Home');await heightHandle.press('ArrowUp');assert.equal(await heightHandle.getAttribute('aria-valuenow'),'220','高さの下限を越えない');
+        for(let i=0;i<11;i++)await heightHandle.press('ArrowDown');
+        assert.ok(Math.abs((await editorCssHeight(page))-440)<=2);
+        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===resizeEditor),true,'サイズ変更でエディターを作り直さない');
+        assert.equal(await editor(page).inputValue(),'// PC original\nconst memo = 1;\n');
+        assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeResize,'サイズ変更は会話・採用・呼び出しを変えない');
         // The picker keeps the editing area stable even when an app has many registered files.
         await page.evaluate(()=>addRegisteredFiles(50));
         await page.locator('#kt-customize-refresh').click();
@@ -132,7 +186,11 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await selected(page,'extra-49.js','// extra registered file 49\n');
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
         assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'ファイルの選択・再取得ではAIを呼ばない');
+        const beforeReferenceEdit=await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]}));
         await editor(page).fill('// PC unsaved edit\nconst memo = 10;\n');
+        assert.match(await reference.innerText(),/登録済みコードの解析結果/);assert.match(await reference.innerText(),/手元の編集は含みません/);
+        assert.match(await reference.innerText(),/備考/,'編集中でも登録済みコードの参照情報として示す');
+        assert.deepEqual(await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]})),beforeReferenceEdit,'入力したコードを新たに解析しない');
         // A failed download must leave one consistent visible file and preserve its hand edits.
         await page.evaluate(()=>{window.fileFailure='second';});
         await filePicker(page).selectOption({label:'second.js'});
@@ -237,6 +295,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.locator('[data-release-action="code"]').innerText(),'変更案・結果を見る');
         assertHorizontal(await geometry(page),'AI Assistantでコードを開く');
+        assert.equal(await widthHandle.isVisible(),false,'AI Assistantの右コード欄でCustomize用の幅ハンドルを出さない');
         assert.equal(await page.locator('.ktr-current').isVisible(),false,'コードを開いている間は通常案と重ねない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -316,15 +375,31 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('[data-release-action="code"]').click();
         await page.locator('[data-customize-mode="comparison"]').click();
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true);
+        assert.equal(await editor(page).isVisible(),true,'比較を開いても手元のコードを残す');
+        const comparisonTop=await page.locator('#kt-customize-comparison').boundingBox(),editorAbove=await page.locator('#kt-customize-editor').boundingBox();
+        assert.ok(comparisonTop.y>=editorAbove.y+editorAbove.height,'比較はエディターの下に開く');
         assert.equal(await page.locator('#kt-customize-upload').isVisible(),false);
         const comparison=()=>page.evaluate(()=>{const d=monacoDiffs.findLast(x=>!x.disposed);return {before:d.getModel().original.getValue(),after:d.getModel().modified.getValue(),readOnly:d.options.readOnly,originalEditable:d.options.originalEditable};});
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
         await page.locator('[data-comparison-file]').selectOption({index:1});
         assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false});
+        assert.match(await page.locator('#kt-customize-meta').innerText(),/same\.js（PC）/,'上の手元のコードはPCのまま');
+        assert.match(await page.locator('[data-comparison-file]').evaluate(el=>el.selectedOptions[0].textContent),/モバイル.*same\.js/,'下の比較対象のモバイルを明示する');
+        assert.match(await page.locator('[data-comparison-note]').innerText(),/手元の編集/,'上下を現在の手編集との差分と誤解させない');
+        await page.locator('[data-customize-mode="comparison"]').click();
+        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),false,'比較のボタンでも下側を閉じられる');
+        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true);
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        await page.locator('[data-customize-mode="comparison"]').click();
+        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true);
+        assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false});
         const stateBeforeTabs=await page.evaluate(()=>JSON.stringify({adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared,runs:work.controller.getState().runs}));
         await page.locator('#tab-customize').click();
         assert.equal(await page.locator('#view-customize #kt-customize-code-pane').count(),1,'Customizeへ戻るとコードを元の場所へ戻す');
         assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0);
+        assert.equal(await widthHandle.isVisible(),true,'Customizeへ戻すと幅調整を戻す');
+        assert.ok(Math.abs((await editorCssHeight(page))-440)<=2,'表示場所を変えても調整した高さを保つ');
+        await page.screenshot({path:path.join(out,colorScheme+'-customize-comparison-below.png'),fullPage:true});
         await page.locator('#tab-ai').click();
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false,'AIタブへ戻るだけではコードを開かない');
         await page.locator('[data-release-action="code"]').click();
@@ -405,12 +480,23 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('[data-customize-mode="editor"]').click();
         const narrowCustomize=await geometry(page);
         assert.ok(narrowCustomize.editor.top>=narrowCustomize.menu.bottom,'狭い表示ではMenuとエディターを縦に並べる');
+        assert.equal(await widthHandle.isVisible(),false,'狭い表示は幅調整なしで縦に並べる');
+        assert.equal(await heightHandle.isVisible(),true,'狭い表示でも高さを調整できる');
+        await heightHandle.press('ArrowUp');assert.ok(Math.abs((await editorCssHeight(page))-420)<=2);
+        await heightHandle.press('ArrowDown');assert.ok(Math.abs((await editorCssHeight(page))-440)<=2);
         assert.equal(await page.locator('.kt-customize-menu').evaluate(el=>el.scrollHeight<=el.clientHeight+1),true,'Menu内の説明と最後の操作を枠内に収める');
         assert.ok((await page.locator('#kt-customize-manual-actions').boundingBox()).y+(await page.locator('#kt-customize-manual-actions').boundingBox()).height<=narrowCustomize.menu.bottom,'末尾の操作をエディターへ重ねない');
         assert.ok(narrowCustomize.editor.width>=350,'狭い表示でもエディター幅を確保する');
         assert.ok(narrowCustomize.documentWidth<=narrowCustomize.viewport+1,'CustomizeのMenuで横はみ出しを増やさない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         await page.screenshot({path:path.join(out,colorScheme+'-customize-narrow.png'),fullPage:true});
+        const beforeReferenceStale=await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]}));
+        await page.evaluate(()=>customize.markStale());
+        assert.match(await reference.innerText(),/未確認/);assert.match(await reference.innerText(),/設定が変わったため、解析結果を確認できていません/);
+        assert.match(await reference.innerText(),/手元の編集中のコードは解析していません/);
+        assert.doesNotMatch(await reference.innerText(),/備考|app\.record\.edit\.show/,'古い印が付いた解析結果を残さない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n','参照情報が未確認でも下書きを消さない');
+        assert.deepEqual(await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]})),beforeReferenceStale,'古い参照情報を隠すだけで再取得・解析・AIを呼ばない');
         assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'相談への移動とコード開閉だけではAIを呼ばない');
         assert.deepEqual(await page.evaluate(()=>operations),[],'有料機能とkintoneの書き込みは呼ばない');
         assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
