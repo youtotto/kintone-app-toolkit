@@ -14453,6 +14453,8 @@
     }
     function render(state, options = {}) {
       const conn = connectionOf(options), last = (state.runs || []).at(-1), historical = options.selectedRunId ? (state.runs || []).find(r => r.id === options.selectedRunId) : null;
+      const codePanel = typeof options.codePanelState === 'function' ? options.codePanelState() : {};
+      const codeAttention = codePanel.open && !historical ? ({ incomplete: '作成が完了していません。', blocked: '反映前の確認が完了していません。' }[state.phase] || '') : '';
       const notice = options.notice || '', explanation = !historical ? (state.explanations || []).find(item => item.id === state.explanationId) : null;
       let body = '';
       if (historical) body = runHtml(historical, { ...options, operationBusy: busy.has(state.phase) }, true);
@@ -14469,10 +14471,10 @@
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの相談')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div><strong>${esc(options.appName || 'アプリの相談')}</strong><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : phaseText[state.phase] || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         ${conn.connected === false || conn.available === false ? `<aside class="ktr-notice"><p>${esc(conn.message || 'AIサービスへ接続してください。')}</p>${button('connect', '接続する')}</aside>` : ''}
-        ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)) ? `<p class="ktr-error" role="alert" tabindex="0">${esc(state.error.message)}</p>` : ''}
-        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2><div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current" aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
+        ${notice ? `<p class="ktr-notice" role="status">${esc(notice)}</p>` : ''}${state.error?.message && !historical && (codePanel.open || !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message))) ? `<p class="ktr-error" role="alert" tabindex="0">${esc(state.error.message)}</p>` : ''}
+        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
       if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
@@ -14549,6 +14551,11 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
+        if (action === 'code') {
+          const opened = options.onToggleCode?.();
+          if (opened === false) host.querySelector?.('[data-release-action="code"]')?.focus?.({ preventScroll: true });
+          return;
+        }
         if (action === 'clear-consultation-target' && !sending) return controller.setConsultationTarget(null);
         if (action === 'update-suggestions') return send(undefined, undefined, { taskId: Number(target.dataset?.releaseTask), version: Number(target.dataset?.releaseVersion) });
         if (action === 'current') { selectedRunId = null; notice = ''; draw(); return; }
@@ -14634,6 +14641,9 @@
       .ktr-working-heading{display:flex;align-items:center;gap:14px}.ktr-working-heading h2{margin:0}.ktr-progress{padding:18px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-soft);margin-bottom:18px}.ktr-progress>p{margin-top:16px}.ktr-chat-pending{display:flex;align-items:center;gap:12px;padding:18px 12px;color:var(--ktr-muted);font-size:13px}
       .ktr-activity{display:inline-flex;align-items:center;gap:5px;min-height:22px;flex:none}.ktr-activity i{display:block;width:7px;height:7px;border-radius:50%;background:var(--ktr-accent);animation:ktr-pulse 1.4s ease-in-out infinite}.ktr-activity i:nth-child(2){animation-delay:.18s}.ktr-activity i:nth-child(3){animation-delay:.36s}@keyframes ktr-pulse{0%,70%,100%{opacity:.35;transform:translateY(0)}35%{opacity:1;transform:translateY(-4px)}}@media(prefers-reduced-motion:reduce){.ktr-activity i{animation:none;opacity:1}}
       @container ktr-workspace (min-width:960px){.ktr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);gap:24px;overflow:hidden}.ktr-chat-log{min-height:0;max-height:none;overscroll-behavior:contain}.ktr-conversation{overflow:hidden}.ktr-current{border-top:0;border-left:1px solid var(--ktr-line);padding:0 8px 0 24px;margin:0;overflow:auto}}
+      .ktr-code-shell{width:100%;height:100%;min-width:0;min-height:0;container:ktr-code-shell / inline-size}.ktr-code-columns{width:100%;height:100%;min-width:0;min-height:0}.ktr-code-conversation-host{width:100%;min-width:0;min-height:0}.ktr-code-slot{min-width:0;min-height:0;overflow:auto;border-left:1px solid var(--kt-line,#dbe2ec);padding:16px}.ktr-code-slot[hidden]{display:none}.ktr-code-shell.is-code-open>.ktr-code-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);overflow:hidden}.ktr-code-open .ktr-layout{display:flex;flex-direction:column;overflow:hidden}.ktr-code-open .ktr-current{display:none}.ktr-code-open .ktr-conversation{flex:1;overflow:hidden}.ktr-code-open .ktr-chat-log{min-height:0;max-height:none}.ktr-code-progress{display:flex;flex:none;gap:10px;align-items:center;flex-wrap:wrap;max-height:30%;overflow:auto;padding:10px;margin-bottom:8px;background:var(--ktr-soft);border-radius:6px}.ktr-code-progress>span:not(.ktr-activity){flex:1;min-width:120px;font-size:13px}.ktr-code-open .ktr-header{align-items:flex-start;flex-direction:column;gap:8px}.ktr-code-open .ktr-header-tools{justify-content:flex-start;gap:8px}
+      .ktr-code-attention{flex:none;margin-bottom:12px;padding:12px;border-left:3px solid var(--ktr-warning);border-radius:4px;background:color-mix(in srgb,var(--ktr-warning) 9%,var(--ktr-paper))}.ktr-code-attention>p{margin:0 0 8px}
+      @container ktr-code-shell (max-width:959px){.ktr-code-shell.is-code-open>.ktr-code-columns{display:flex;flex-direction:column;overflow:auto}.ktr-code-shell.is-code-open .ktr-code-conversation-host{flex:none;height:auto!important;overflow:visible!important}.ktr-workspace.ktr-code-open{height:auto;overflow:visible}.ktr-code-open .ktr-content{height:auto}.ktr-code-open .ktr-layout{display:block;flex:none;overflow:visible}.ktr-code-open .ktr-conversation{overflow:visible}.ktr-code-open .ktr-chat-log{flex:none;min-height:180px;max-height:42dvh;overflow:auto}.ktr-code-slot{flex:none;border-left:0;border-top:1px solid var(--kt-line,#dbe2ec)}}
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
     return { create, render, escape: esc, explanationMarkdown };
@@ -14732,6 +14742,37 @@
     const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
     host.style.overflow = 'auto';
     host.style.height = '100%';
+    let codePanel = null, codeOpen = false, codeShell = null, codeSlot = null;
+    function setCodeOpen(open) {
+      const next = !!open && !!codePanel;
+      if (next === codeOpen) { if (next) codePanel.onVisible?.(); return next; }
+      codeOpen = next;
+      codeShell?.classList.toggle('is-code-open', next);
+      if (codeSlot) codeSlot.hidden = !next;
+      if (codePanel) (next ? codeSlot : codePanel.home).appendChild(codePanel.element);
+      view?.render();
+      if (next) codePanel.onVisible?.();
+      return next;
+    }
+    function attachCodePanel(panel) {
+      if (!panel?.element || !panel.home || !host.parentElement) return false;
+      if (codePanel && codePanel.element !== panel.element) setCodeOpen(false);
+      if (!codeShell) {
+        const doc = host.ownerDocument || document, columns = doc.createElement('div');
+        codeShell = doc.createElement('div'); codeShell.className = 'ktr-code-shell';
+        columns.className = 'ktr-code-columns';
+        codeSlot = doc.createElement('aside'); codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
+        codeSlot.id = (host.id || 'kt-release') + '-code-panel';
+        codeSlot.setAttribute('aria-label', 'コードと差分');
+        host.parentElement.insertBefore(codeShell, host);
+        codeShell.appendChild(columns); columns.appendChild(host); columns.appendChild(codeSlot);
+        host.classList.add('ktr-code-conversation-host');
+      }
+      codePanel = panel;
+      view?.render();
+      if (codeOpen) codePanel.onVisible?.();
+      return true;
+    }
     function dialog(title, body, { wide = false } = {}) {
       const doc = host.ownerDocument || document, el = doc.createElement('dialog');
       el.className = 'kt-release-dialog' + (wide ? ' ktr-dialog-wide' : '');
@@ -15049,6 +15090,7 @@
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
     view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+      codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
       onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
       onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
       appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
@@ -15058,21 +15100,23 @@
     };
     window.addEventListener('beforeunload', warnBeforeLeave);
     return { controller, view, capability: () => capability, refreshCapability,
-      onVisible() { view.onVisible(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
+      onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
       invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
-      // Move the existing DOM and view, never recreate a session or reset its draft.
-      showIn(destination, { customize = false } = {}) {
-        if (!destination) return false;
-        if (host.parentElement !== destination) destination.appendChild(host);
-        host.classList.toggle('ktr-in-customize', customize);
-        view.onVisible(); return true;
-      },
+      attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
       consult(seed) {
         if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+        setCodeOpen(false);
         view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
         return { ok: true };
       },
-      dispose() { flow?.cancel(); controller.cancel(); window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose(); }
+      dispose() {
+        flow?.cancel(); controller.cancel(); setCodeOpen(false);
+        if (codePanel) codePanel.home.appendChild(codePanel.element);
+        if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }
+        host.classList.remove('ktr-code-conversation-host');
+        codePanel = null; codeShell = null; codeSlot = null;
+        window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose();
+      }
     };
   }
   // END RELEASE WORKSPACE
@@ -19555,7 +19599,7 @@
     // タブを開いたときに対象一覧・ヘッダーを最新の解析結果へ（Scanner / 他アプリ走査は後から入る）
     // Phase 21: タブを開いたとき、1 分より古い作業基準（動作テスト環境）は取り直す（別の画面で変えた設定も拾う）
     //   設定取得の関所: 最小化中のタブの切り替え（プログラムからの switchTab）では取らず、開発支援を表示したまま展開したときにも同じことをする
-    try { root.ktTabs?.onSwitch?.((id) => { if (!panel) return; if (id === 'ai') panel.showIn(view); else if (id === 'customize') root.ktCustomize?.onVisible?.(); if (['ai', 'customize'].includes(id) && aiVisible()) panel.onVisible(); }); } catch (e) { }
+    try { root.ktTabs?.onSwitch?.((id) => { if (!panel) return; if (id === 'customize') root.ktCustomize?.onVisible?.(); if (id === 'ai' && aiVisible()) panel.onVisible(); }); } catch (e) { }
     try { KTFetchGate.of(root).onChange((open) => { if (open && panel && aiVisible()) panel.onVisible(); }); } catch (e) { }
     return panel;
 
@@ -19563,7 +19607,7 @@
     function aiVisible() {
       const p = root && root.ktPanel;
       if (!p || typeof p.visibleTab !== 'function') return true;
-      return KTFetchGate.of(root).isOpen() && ['ai', 'customize'].includes(p.visibleTab());
+      return KTFetchGate.of(root).isOpen() && p.visibleTab() === 'ai';
     }
   }
 
@@ -19603,23 +19647,14 @@
       document.head.appendChild(st);
     }
 
-    // Compact file selection keeps the available height for code and the shared conversation.
+    // Keep one editor and draft store; AI Assistant can temporarily display this same code pane.
     view.innerHTML = `
       <style>
-        #view-customize{container:kt-customize-view / inline-size}
-        #kt-customize-workspace{display:grid;grid-template-columns:minmax(0,1fr);height:100%;min-height:0;gap:20px;overflow:auto}
-        #kt-customize-ai-slot{min-width:0;min-height:0;display:none}
-        #kt-customize-code-pane{display:flex;flex-direction:column;min-width:0;min-height:0;gap:10px}
-        #kt-customize-workspace.has-assistant{grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}
-        #kt-customize-workspace.has-assistant #kt-customize-ai-slot{display:block}
+        #kt-customize-workspace{display:flex;flex-direction:column;height:100%;min-height:0;overflow:auto}
+        #kt-customize-code-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;gap:10px}
         #kt-customize{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:auto}
         .kt-customize-editor-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:360px;gap:8px}
-        #kt-customize-workspace [hidden]{display:none!important}
-        #kt-customize-workspace .ktr-in-customize{padding:0 8px 0 0}
-        #kt-customize-workspace .ktr-in-customize .ktr-layout{display:flex;flex-direction:column;overflow:auto}
-        #kt-customize-workspace .ktr-in-customize .ktr-conversation{flex:0 0 auto;overflow:visible}
-        #kt-customize-workspace .ktr-in-customize .ktr-chat-log{min-height:180px;max-height:42dvh}
-        #kt-customize-workspace .ktr-in-customize .ktr-current{border-left:0;border-top:1px solid var(--kt-line);padding:16px 0 0;margin-top:16px;overflow:visible;flex:none}
+        #kt-customize-code-pane [hidden]{display:none!important}
         #kt-customize-comparison{flex:1;min-height:280px;min-width:0}
         .kt-customize-modes{display:flex;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
         .kt-customize-picker,.kt-customize-editor-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
@@ -19634,10 +19669,8 @@
         #kt-customize-file-details,#kt-customize-manual-actions{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
         #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
         #kt-customize-manual-actions{padding:6px;border:1px solid var(--kt-line);border-radius:6px}#kt-customize-manual-actions p{margin:6px 0}
-        @container kt-customize-view (max-width:900px){#kt-customize-workspace.has-assistant{display:flex;flex-direction:column;overflow:auto}#kt-customize-ai-slot{flex:none;height:620px}#kt-customize-code-pane{flex:none;min-height:600px;height:620px}#kt-customize-workspace .ktr-in-customize{padding-right:0}}
       </style>
       <div id="kt-customize-workspace">
-        <div id="kt-customize-ai-slot"></div>
         <section id="kt-customize-code-pane" aria-label="コードと差分">
           <nav class="kt-customize-modes" aria-label="コードの表示"><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
           <div id="kt-customize-comparison" hidden></div>
@@ -19650,7 +19683,7 @@
                 </select>
                 <select id="kt-customize-file" class="btn" aria-label="登録済みファイル" disabled><option value="">ファイルを選択</option></select>
                 <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button>
-                <button id="kt-customize-consult" class="btn" disabled title="選んだJavaScriptについて、このタブで相談する">AIに相談</button>
+                <button id="kt-customize-consult" class="btn" disabled title="選んだJavaScriptについてAI Assistantで相談する">AIに相談</button>
               </div>
               <p id="kt-customize-file-status" role="status"></p>
               <details id="kt-customize-file-details"><summary>動作テスト環境と運用環境の違い</summary><div id="kt-customize-env" style="display:none"></div></details>
@@ -19669,8 +19702,10 @@
       </div>
     `;
 
-    // === 要素参照（このタブ内にスコープ） ===
-    const $ = (s) => view.querySelector(s);
+    // Cache the pane as the scope: it may be displayed beside the AI Assistant conversation.
+    const codeHome = view.querySelector('#kt-customize-workspace');
+    const codePane = view.querySelector('#kt-customize-code-pane');
+    const $ = (s) => codePane.querySelector(s);
     const $file = $('#kt-customize-file');
     const $fileStatus = $('#kt-customize-file-status');
     const $consult = $('#kt-customize-consult');
@@ -19787,7 +19822,7 @@
       const result = await consult({ name: entry.file.name, target, type: 'FILE', fileKey: entry.file.fileKey,
         environment: 'preview', revision: lastCustomize.data?.revision ?? null });
       if (result?.ok === false) $meta.textContent = result.message || '相談の対象を選べませんでした。';
-      else { await selectFile(entry, { kind: 'js', target }); onVisible(); if (assistant?.controller.getState().prepared) setCodeMode('comparison'); }
+      else { retainEditor(); root.ktTabs?.switchTab?.('ai'); }
       return result;
     }
     /** §32: 動作テスト環境（preview）と運用環境のカスタマイズ設定の差（名前 / URL / 順序。fileKey は環境で異なるので比べない） */
@@ -19855,19 +19890,23 @@
     let assistant = null, comparison = null, codeMode = 'editor';
     function setCodeMode(mode) {
       codeMode = mode; $('#kt-customize').hidden = mode !== 'editor'; $('#kt-customize-comparison').hidden = mode !== 'comparison';
-      view.querySelectorAll('[data-customize-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.customizeMode === mode)));
+      codePane.querySelectorAll('[data-customize-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.customizeMode === mode)));
       if (mode === 'editor') editor.layout?.(); else comparison?.layout();
     }
-    view.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode)));
+    codePane.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode)));
+    function layoutCode() { editor.layout?.(); comparison?.layout(); }
     function onVisible() {
-      if (assistant) assistant.showIn($('#kt-customize-ai-slot'), { customize: true });
-      editor.layout?.(); comparison?.layout();
+      assistant?.setCodeOpen(false);
+      layoutCode();
     }
     function attachAssistant(panel) {
       if (!panel || assistant === panel) return;
       comparison?.dispose(); assistant = panel;
-      $('#kt-customize-workspace').classList.add('has-assistant');
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay });
+      panel.attachCodePanel({ element: codePane, home: codeHome, onVisible() {
+        layoutCode();
+        ensureLoaded().catch(error => { $fileStatus.textContent = 'ファイル一覧を読み込めませんでした。' + (error?.message || ''); });
+      } });
       if (root.ktPanel?.visibleTab?.() === 'customize') onVisible();
     }
     let listedFiles = [], listedConf = null;

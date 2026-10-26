@@ -77,11 +77,11 @@ async function selected(page,name,value){await filePicker(page).selectOption({la
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-customize-ai-slot'),code:rect('#kt-customize-code-pane'),editor:rect('#kt-customize-editor')};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor')};
 });}
 function assertHorizontal(g,label){
   assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
-  assert.ok(Math.abs(g.ai.top-g.code.top)<=2,label+': 相談とコードを同じ高さに並べる');
+  assert.ok(Math.abs(g.ai.top-g.codeSlot.top)<=2,label+': 相談とコードを同じ高さに並べる');
   assert.ok(g.ai.width>=320&&g.code.width>=380,label+': 相談とコードに読み書きできる幅を残す');
   assert.ok(g.ai.left>=g.shell.left-1&&g.code.right<=g.shell.right+1,label+': 枠内に収まる');
 }
@@ -93,7 +93,7 @@ function assertVertical(g,label){
 }
 async function assertEventually(read,expected){for(let i=0;i<100;i++){const value=await read();if(value===expected)return;await new Promise(resolve=>setTimeout(resolve,20));}assert.equal(await read(),expected);}
 
-test('Customize内の共通会話・差分と手編集の保持（外部通信なし）',{timeout:90000},async t=>{
+test('CustomizeからAI Assistantへ相談・必要時のコード表示と手編集の保持（外部通信なし）',{timeout:90000},async t=>{
   fs.mkdirSync(out,{recursive:true});
   const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
   try{
@@ -111,7 +111,10 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
         const initialGeometry=await geometry(page);
-        assertHorizontal(initialGeometry,'全画面');
+        assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0,'Customizeにチャットを複製しない');
+        assert.equal(await page.locator('#kt-release-input').isVisible(),false,'Customizeは編集に集中する');
+        assert.ok(initialGeometry.code.width>initialGeometry.shell.width*.85,'Customizeのコードを広く使う');
+        assert.ok(initialGeometry.code.right<=initialGeometry.shell.right+1,'Customizeのコードは枠内に収まる');
         const callsBeforeSelection=await page.evaluate(()=>proposalCalls.length);
         // The picker keeps the editing area stable even when an app has many registered files.
         await page.evaluate(()=>addRegisteredFiles(50));
@@ -120,7 +123,7 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         assert.equal(await filePicker(page).evaluate(select=>select.tagName),'SELECT');
         assert.equal(await filePicker(page).evaluate(select=>select.multiple||select.size>1),false,'登録済みファイルは1行の選択欄');
         const manyGeometry=await geometry(page);
-        assertHorizontal(manyGeometry,'ファイルが多数ある全画面');
+        assert.ok(manyGeometry.code.width>manyGeometry.shell.width*.85,'ファイルが多数でもCustomizeのコード幅を保つ');
         assert.ok(manyGeometry.editor.height>=initialGeometry.editor.height-2,'ファイルの数でエディターを狭くしない');
         await selected(page,'extra-49.js','// extra registered file 49\n');
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
@@ -153,6 +156,7 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         assert.equal(staleShow.found,false,'古いshowの一覧は別の対象の同名ファイルを開かない');
         assert.equal(await editor(page).inputValue(),'// mobile unsaved edit\n');
         assert.deepEqual(await page.evaluate(()=>({target:work.controller.getState().consultationTarget,calls:proposalCalls.length,reads:[...fileReads],source:document.querySelector('#kt-customize-source').value,selection:document.querySelector('#kt-customize-file').selectedOptions[0].textContent,meta:document.querySelector('#kt-customize-meta').textContent})),mobileBefore,'新しく選んだモバイル本文・相談対象・AI回数を変更しない');
+        await page.locator('#tab-customize').click();
         await page.locator('#kt-customize-source').selectOption('css');
         await selected(page,'style.css','.memo { color: blue; }\n');
         assert.equal(await page.locator('#kt-customize-consult').isEnabled(),false,'CSSをJavaScriptの相談対象にしない');
@@ -187,9 +191,13 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         const before=await page.evaluate(()=>({taskId:work.controller.getState().taskId,messages:work.controller.getState().messages,proposal:work.controller.getState().proposal,calls:proposalCalls.length}));
         await page.locator('#tab-customize').click();
         await page.locator('#kt-customize-consult').click();
-        assert.equal(await page.locator('#view-customize').isVisible(),true,'相談を始めてもCustomizeに残る');
+        assert.equal(await page.locator('#view-ai').isVisible(),true,'AIに相談するとAI Assistantへ移る');
+        assert.equal(await page.locator('#view-customize').isVisible(),false);
+        assert.equal(await page.locator('.ktr-current').isVisible(),true,'相談後は通常案を表示する');
+        assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false,'コードは明示的に開くまで表示しない');
+        assert.equal(await page.locator('[data-release-action="code"]').innerText(),'コード・差分を見る');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談','入力途中の相談を上書きしない');
-        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-ai-slot #kt-ai-host')===originalHost),true,'同じDOMを移動する');
+        assert.equal(await page.evaluate(()=>document.querySelector('#view-ai #kt-ai-host')===originalHost),true,'会話のDOMはAI Assistantに固定する');
         assert.equal(await page.locator('#kt-ai-host').count(),1,'会話の表示を複製しない');
         const after=await page.evaluate(()=>({taskId:work.controller.getState().taskId,messages:work.controller.getState().messages,proposal:work.controller.getState().proposal,calls:proposalCalls.length}));
         assert.deepEqual(after,before,'対象選択はAI・採用・会話の作り直しをしない');
@@ -211,10 +219,84 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         await page.locator('#tab-ai').click();
         assert.equal(await page.evaluate(()=>document.querySelector('#view-ai #kt-ai-host')===originalHost),true);
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
-        assert.equal(await page.locator('#kt-customize-ai-slot #kt-ai-host').count(),0);
+        assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0);
         await page.locator('#tab-customize').click();
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
+        await page.screenshot({path:path.join(out,colorScheme+'-customize.png'),fullPage:true});
+        await page.locator('#tab-ai').click();
+        const normal=await geometry(page);
+        assert.ok(normal.proposal.left>=normal.chat.right-2,'AI Assistantは左相談・右通常案');
+        assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
         await page.screenshot({path:path.join(out,colorScheme+'-conversation.png'),fullPage:true});
+        const stateBeforeCode=await page.evaluate(()=>JSON.stringify(work.controller.getState()));
+        await page.evaluate(()=>{window.originalEditor=document.querySelector('#kt-customize-editor textarea[data-test-editor]');});
+        await page.locator('[data-release-action="code"]').click();
+        assert.equal(await page.locator('[data-release-action="code"]').innerText(),'変更案・結果を見る');
+        assertHorizontal(await geometry(page),'AI Assistantでコードを開く');
+        assert.equal(await page.locator('.ktr-current').isVisible(),false,'コードを開いている間は通常案と重ねない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
+        await page.evaluate(()=>work.view.render());
+        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true,'会話の再描画でエディターDOMを作り直さない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        await page.screenshot({path:path.join(out,colorScheme+'-code-open.png'),fullPage:true});
+        // Keeping code open must not hide progress, cancellation, or an artifact's failure.
+        await page.evaluate(()=>{
+          window.normalGetState=work.controller.getState;
+          const state=normalGetState();
+          window.temporaryDisplay={...state,phase:'building',progress:'モバイルの編集制御を作成しています。'};
+          work.controller.getState=()=>structuredClone(temporaryDisplay);
+          work.view.render();
+        });
+        assert.equal(await page.locator('.ktr-current').isVisible(),false);
+        assert.equal(await page.locator('.ktr-code-progress').isVisible(),true,'コード表示中も進み具合を表示する');
+        assert.match(await page.locator('.ktr-code-progress').innerText(),/モバイルの編集制御を作成しています/);
+        assert.equal(await page.locator('.ktr-code-progress [data-release-action="cancel"]').isVisible(),true,'コード表示中も中断操作を表示する');
+        assert.equal(await page.locator('.ktr-code-progress [data-release-action="cancel"]').isEnabled(),true);
+        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true);
+        await page.screenshot({path:path.join(out,colorScheme+'-code-progress.png'),fullPage:true});
+        await page.evaluate(()=>{
+          const message='モバイルの編集制御を完成できませんでした。';
+          temporaryDisplay={...normalGetState(),phase:'incomplete',progress:'',error:{code:'GENERATION_INCOMPLETE',message},plan:{goal:'備考の編集制御',steps:[],customizations:[{customizationId:'C1',requirement:'モバイルの備考を編集不可にする'}]},artifacts:[{customizationId:'C1',title:'モバイルの編集制御',error:{message},result:{artifactOutcome:{state:'incomplete',message}}}]};
+          work.view.render();
+        });
+        assert.equal(await page.locator('.ktr-current').isVisible(),false);
+        assert.equal(await page.locator('.ktr-content > .ktr-error').isVisible(),true,'通常案と同じ失敗理由がコード表示中も上部に残る');
+        assert.equal(await page.locator('.ktr-content > .ktr-error').innerText(),'モバイルの編集制御を完成できませんでした。');
+        assert.equal(await page.locator('.ktr-code-progress').count(),0,'失敗後は処理中の表示を残さない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
+        await page.screenshot({path:path.join(out,colorScheme+'-code-error.png'),fullPage:true});
+        await page.evaluate(()=>{
+          temporaryDisplay={...temporaryDisplay,error:null,artifacts:[{customizationId:'C1',title:'モバイルの編集制御',result:{artifactOutcome:{state:'failed',message:'モバイルの備考の編集制御を確認できませんでした。'}}}]};
+          work.view.render();
+        });
+        assert.equal(await page.locator('.ktr-content > .ktr-error').count(),0);
+        assert.equal(await page.locator('.ktr-code-attention').isVisible(),true,'最上位のerrorが無くても未完成を伝える');
+        assert.match(await page.locator('.ktr-code-attention').innerText(),/作成が完了していません/);
+        await page.locator('.ktr-code-attention [data-release-action="code"]').click();
+        assert.equal(await page.locator('.ktr-current').isVisible(),true);
+        assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/モバイルの備考の編集制御を確認できませんでした/,'案に戻って生成物の不合格理由を読める');
+        await page.locator('.ktr-tools [data-release-action="code"]').click();
+        await page.evaluate(()=>{
+          temporaryDisplay={...temporaryDisplay,phase:'blocked',artifacts:[],prepared:{ok:false,reasons:[{message:'動作テスト環境の設定が変更されています。'}]}};
+          work.view.render();
+        });
+        assert.equal(await page.locator('.ktr-code-attention').isVisible(),true);
+        assert.match(await page.locator('.ktr-code-attention').innerText(),/反映前の確認が完了していません/);
+        await page.locator('.ktr-code-attention [data-release-action="code"]').click();
+        assert.equal(await page.locator('.ktr-current').isVisible(),true);
+        assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/動作テスト環境の設定が変更されています/,'案に戻って反映前の停止理由を読める');
+        await page.locator('.ktr-tools [data-release-action="code"]').click();
+
+        await page.evaluate(()=>{work.controller.getState=normalGetState;work.view.render();});
+        assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeCode,'表示用の状態を元に戻す');
+        assert.equal(await page.locator('.ktr-content > .ktr-error').count(),0);
+
+        await page.locator('[data-release-action="code"]').click();
+        assert.equal(await page.locator('.ktr-current').isVisible(),true);
+        assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
+        assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeCode,'開閉だけでは会話・採用・AI呼び出しを変更しない');
         // Seed only the prepared display record. Candidate code must stay separate from hand edits.
         const prepared=await page.evaluate(()=>{
           const state=work.controller.getState();
@@ -224,9 +306,10 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
           ];
           window.displayState={...state,phase:'review',adopted:state.proposal,plan:{goal:'備考の編集条件を変更',steps:[],customizations:[]},artifacts:[],prepared:{ok:true,signature:'fixed-signature',changes:changes.map(c=>({kind:'javascript',target:c.target,file:c.name,title:'備考の編集条件',operation:c.kind})),files:{changes},confirmations:[],reasons:[]}};
           work.controller.getState=()=>structuredClone(displayState);
-          work.view.render();customize.attachAssistant({...work});customize.onVisible();
+          work.view.render();customize.attachAssistant({...work});
           return displayState.prepared;
         });
+        await page.locator('[data-release-action="code"]').click();
         await page.locator('[data-customize-mode="comparison"]').click();
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true);
         assert.equal(await page.locator('#kt-customize-upload').isVisible(),false);
@@ -235,8 +318,12 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         await page.locator('[data-comparison-file]').selectOption({index:1});
         assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false});
         const stateBeforeTabs=await page.evaluate(()=>JSON.stringify({adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared,runs:work.controller.getState().runs}));
-        await page.locator('#tab-ai').click();
         await page.locator('#tab-customize').click();
+        assert.equal(await page.locator('#view-customize #kt-customize-code-pane').count(),1,'Customizeへ戻るとコードを元の場所へ戻す');
+        assert.equal(await page.locator('#view-customize #kt-ai-host').count(),0);
+        await page.locator('#tab-ai').click();
+        assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false,'AIタブへ戻るだけではコードを開かない');
+        await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.evaluate(()=>JSON.stringify({adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared,runs:work.controller.getState().runs})),stateBeforeTabs);
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -250,25 +337,35 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
             {id:'run-0',taskId:0,status:'complete',goal:'前の反映内容',prepared:prior,result:{status:'complete',written:1,message:'以前の内容を反映しました。',rows:[]}},
             {id:'run-1',taskId:displayState.taskId,status:'complete',goal:'備考の編集条件',prepared,result:{status:'complete',written:2,message:'動作テスト環境に反映しました。',rows:[]}}
           ]};
-          work.view.render();customize.attachAssistant({...work});customize.onVisible();
+          work.view.render();customize.attachAssistant({...work});
         });
-        assert.match(await page.locator('.ktr-current').innerText(),/動作テスト環境に反映しました/);
         assert.match(await page.locator('[data-comparison-note]').innerText(),/この反映の記録/);
+        await page.locator('[data-release-action="code"]').click();
+        assert.match(await page.locator('.ktr-current').innerText(),/動作テスト環境に反映しました/);
         await page.locator('[data-release-panel="runs"] > summary').click();
         await page.locator('[data-release-action="history"][data-release-id="run-0"]').click();
         assert.match(await page.locator('.ktr-current').innerText(),/以前の内容を反映しました/);
+        await page.locator('[data-release-action="code"]').click();
         assert.deepEqual(await comparison(),{before:'// earlier before\n',after:'// earlier after\n',readOnly:true,originalEditable:false},'過去の反映を選ぶと左右とも同じ記録になる');
         assert.equal(await page.evaluate(()=>work.view.getSelectedRunId()),'run-0');
+        await page.locator('[data-release-action="code"]').click();
+        assert.match(await page.locator('.ktr-current').innerText(),/以前の内容を反映しました/,'閉じると選択していた反映結果へ戻る');
         await page.locator('[data-release-action="history"][data-release-id="run-1"]').click();
         assert.match(await page.locator('.ktr-current').innerText(),/動作テスト環境に反映しました/);
+        await page.locator('[data-release-action="code"]').click();
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
+        await page.locator('[data-release-action="code"]').click();
         await page.locator('[data-release-action="current"]').click();
+        await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.evaluate(()=>work.view.getSelectedRunId()),null);
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
         const runBefore=await page.evaluate(()=>JSON.stringify(work.controller.getState().runs));
-        await page.locator('#tab-ai').click();
+        await page.locator('[data-release-action="code"]').click();
         assert.match(await page.locator('.ktr-current').innerText(),/動作テスト環境に反映しました/);
         await page.locator('#tab-customize').click();
+        await page.locator('#tab-ai').click();
+        assert.match(await page.locator('.ktr-current').innerText(),/動作テスト環境に反映しました/);
+        await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState().runs)),runBefore,'タブ移動は反映結果を作り直さない');
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
         await page.locator('[data-customize-mode="editor"]').click();
@@ -287,6 +384,8 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         const narrowGeometry=await geometry(page);
         assert.ok(narrowGeometry.shell.right<=narrowGeometry.viewport+1,'狭い画面で外枠がはみ出さない');
         assertVertical(narrowGeometry,'430px全画面');
+        assert.ok(await page.locator('.ktr-chat-log').evaluate(el=>el.clientHeight)>=120,'狭い画面で相談履歴の高さを潰さない');
+        await page.locator('.ktr-conversation [data-release-action=send]').click({trial:true});
         await page.screenshot({path:path.join(out,colorScheme+'-narrow.png'),fullPage:true});
         await page.locator('[data-customize-mode="comparison"]').scrollIntoViewIfNeeded();
         await page.locator('[data-customize-mode="comparison"]').click();
@@ -294,6 +393,11 @@ test('Customize内の共通会話・差分と手編集の保持（外部通信�
         assert.equal(await page.locator('[data-comparison-editor] textarea').inputValue(),prepared.files.changes[0].content);
         assert.equal(await page.locator('[data-comparison-editor] textarea').evaluate(el=>el.readOnly),true);
         await page.screenshot({path:path.join(out,colorScheme+'-narrow-code.png'),fullPage:true});
+        await page.locator('[data-release-action="code"]').click();
+        assert.equal(await page.locator('.ktr-current').isVisible(),true);
+        assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
+        await page.screenshot({path:path.join(out,colorScheme+'-narrow-proposal.png'),fullPage:true});
+        assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'相談への移動とコード開閉だけではAIを呼ばない');
         assert.deepEqual(await page.evaluate(()=>operations),[],'有料機能とkintoneの書き込みは呼ばない');
         assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
         await page.evaluate(()=>work.dispose());

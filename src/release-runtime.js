@@ -12,6 +12,37 @@ function mountReleaseWorkspace(host, d) {
   const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
   host.style.overflow = 'auto';
   host.style.height = '100%';
+  let codePanel = null, codeOpen = false, codeShell = null, codeSlot = null;
+  function setCodeOpen(open) {
+    const next = !!open && !!codePanel;
+    if (next === codeOpen) { if (next) codePanel.onVisible?.(); return next; }
+    codeOpen = next;
+    codeShell?.classList.toggle('is-code-open', next);
+    if (codeSlot) codeSlot.hidden = !next;
+    if (codePanel) (next ? codeSlot : codePanel.home).appendChild(codePanel.element);
+    view?.render();
+    if (next) codePanel.onVisible?.();
+    return next;
+  }
+  function attachCodePanel(panel) {
+    if (!panel?.element || !panel.home || !host.parentElement) return false;
+    if (codePanel && codePanel.element !== panel.element) setCodeOpen(false);
+    if (!codeShell) {
+      const doc = host.ownerDocument || document, columns = doc.createElement('div');
+      codeShell = doc.createElement('div'); codeShell.className = 'ktr-code-shell';
+      columns.className = 'ktr-code-columns';
+      codeSlot = doc.createElement('aside'); codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
+      codeSlot.id = (host.id || 'kt-release') + '-code-panel';
+      codeSlot.setAttribute('aria-label', 'コードと差分');
+      host.parentElement.insertBefore(codeShell, host);
+      codeShell.appendChild(columns); columns.appendChild(host); columns.appendChild(codeSlot);
+      host.classList.add('ktr-code-conversation-host');
+    }
+    codePanel = panel;
+    view?.render();
+    if (codeOpen) codePanel.onVisible?.();
+    return true;
+  }
   function dialog(title, body, { wide = false } = {}) {
     const doc = host.ownerDocument || document, el = doc.createElement('dialog');
     el.className = 'kt-release-dialog' + (wide ? ' ktr-dialog-wide' : '');
@@ -329,6 +360,7 @@ function mountReleaseWorkspace(host, d) {
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
   view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+    codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
     onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
     appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
@@ -338,21 +370,23 @@ function mountReleaseWorkspace(host, d) {
   };
   window.addEventListener('beforeunload', warnBeforeLeave);
   return { controller, view, capability: () => capability, refreshCapability,
-    onVisible() { view.onVisible(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
+    onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
-    // Move the existing DOM and view, never recreate a session or reset its draft.
-    showIn(destination, { customize = false } = {}) {
-      if (!destination) return false;
-      if (host.parentElement !== destination) destination.appendChild(host);
-      host.classList.toggle('ktr-in-customize', customize);
-      view.onVisible(); return true;
-    },
+    attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
     consult(seed) {
       if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+      setCodeOpen(false);
       view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
       return { ok: true };
     },
-    dispose() { flow?.cancel(); controller.cancel(); window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose(); }
+    dispose() {
+      flow?.cancel(); controller.cancel(); setCodeOpen(false);
+      if (codePanel) codePanel.home.appendChild(codePanel.element);
+      if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }
+      host.classList.remove('ktr-code-conversation-host');
+      codePanel = null; codeShell = null; codeSlot = null;
+      window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose();
+    }
   };
 }
 if (typeof module !== 'undefined' && module.exports) module.exports = { mountReleaseWorkspace };
