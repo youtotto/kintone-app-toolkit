@@ -46,13 +46,13 @@ test('検証用接続先の切替は未接続・会話前に限定し、保存�
       loadDevBase:()=>options.holdBase?new Promise(resolve=>window.releaseBase=resolve):Promise.resolve({ok:true,current:{},stamp:'empty',revision:{preview:'1'},files:[],inputs:{data:{appId:'310',fields:{}}}}),
       executor:{api:{}},getInputs:()=>({data:{appName:'接続の無料試験'}}),canAutoFetch:()=>false});
    },options);
-   const open=async()=>{await page.locator('[data-release-action="connect"]').first().click();await page.locator('dialog [data-budget-panel] > summary').click();};
+   const open=async()=>{await page.locator('.ktr-tools [data-release-action="connect"]').click();await page.locator('dialog [data-budget-panel] > summary').click();};
    const select=()=>page.locator('dialog [data-staging-select]');
    return {page,context,requests,errors,open,select,completeReady:()=>!!releaseComplete,complete:()=>releaseComplete()};
   }
   await t.test('通常の接続画面には検証上限とstaging切替を出さず接続操作を保つ',async()=>{
    const h=await setup({devMode:false});try{
-    await h.page.locator('[data-release-action="connect"]').first().click();
+    await h.page.locator('.ktr-tools [data-release-action="connect"]').click();
     assert.equal(await h.page.locator('dialog [data-budget-panel]').count(),0);
     assert.equal(await h.page.locator('dialog [data-staging-select]').count(),0);
     assert.doesNotMatch(await h.page.locator('dialog').innerText(),/米ドル|呼び出し上限|開発者向け|staging/);

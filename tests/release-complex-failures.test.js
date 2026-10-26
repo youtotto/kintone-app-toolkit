@@ -18,6 +18,8 @@ for(const at of ['consult','plan','first-generation','second-generation']) test(
   if(at!=='consult')await f.controller.adopt();
   const s=f.controller.getState(),text=shown(f), finished=s.artifacts.filter(a=>a.result?.artifactOutcome?.state==='ready');
   assert.match(text,/利用上限/);assert.doesNotMatch(text,/1\.00|USD/);
+  assert.match(text,/［接続］で利用状況を確認してください/);
+  if(at==='consult')assert.match(text,/案は更新していません。利用可能になってから、相談内容をもう一度送信してください/);
   assert.equal(finished.length,at==='second-generation'?1:0);
   if(!finished.length)assert.doesNotMatch(text,/完成した内容は残っています|できた内容は残っています|できた内容/);
   else assert.match(text,/できた内容/);

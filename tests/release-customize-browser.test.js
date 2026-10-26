@@ -353,8 +353,9 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
           work.view.render();
         });
         assert.equal(await page.locator('.ktr-current').isVisible(),false);
-        assert.equal(await page.locator('.ktr-content > .ktr-error').isVisible(),true,'通常案と同じ失敗理由がコード表示中も上部に残る');
-        assert.equal(await page.locator('.ktr-content > .ktr-error').innerText(),'モバイルの編集制御を完成できませんでした。');
+        assert.equal(await page.locator('.ktr-header-notice > summary').isVisible(),true,'コード表示中も停止の通知が見える');
+        await page.locator('.ktr-header-notice > summary').click();
+        assert.equal(await page.locator('.ktr-header-notice-body .ktr-error').innerText(),'モバイルの編集制御を完成できませんでした。');
         assert.equal(await page.locator('.ktr-code-progress').count(),0,'失敗後は処理中の表示を残さない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -363,7 +364,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
           temporaryDisplay={...temporaryDisplay,error:null,artifacts:[{customizationId:'C1',title:'モバイルの編集制御',result:{artifactOutcome:{state:'failed',message:'モバイルの備考の編集制御を確認できませんでした。'}}}]};
           work.view.render();
         });
-        assert.equal(await page.locator('.ktr-content > .ktr-error').count(),0);
+        assert.equal(await page.locator('.ktr-header-notice .ktr-error').count(),0);
         assert.equal(await page.locator('.ktr-code-attention').isVisible(),true,'最上位のerrorが無くても未完成を伝える');
         assert.match(await page.locator('.ktr-code-attention').innerText(),/作成が完了していません/);
         await page.locator('.ktr-code-attention [data-release-action="code"]').click();
@@ -383,7 +384,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
 
         await page.evaluate(()=>{work.controller.getState=normalGetState;work.view.render();});
         assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeCode,'表示用の状態を元に戻す');
-        assert.equal(await page.locator('.ktr-content > .ktr-error').count(),0);
+        assert.equal(await page.locator('.ktr-header-notice .ktr-error').count(),0);
 
         await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.locator('.ktr-current').isVisible(),true);

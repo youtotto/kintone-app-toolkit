@@ -149,7 +149,9 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   await page.waitForFunction(()=>work.controller.getState().phase!=='consulting'&&!!work.controller.getState().error);
   assert.equal(await docs().count(),0,'送信開始後の失敗は相談側で表示する');
   assert.equal(countPaid(),beforeFailure+1,'失敗時も自動再送しない');
-  assert.match(await page.locator('.ktr-error').innerText(),/資料作成の固定の通信失敗/);
+  await page.locator('.ktr-header-notice > summary').click();
+  assert.match(await page.locator('.ktr-header-notice-body .ktr-error').innerText(),/資料作成の固定の通信失敗/);
+  await page.locator('[data-release-action="close-notice"]').click();
   const failed=await page.evaluate(()=>{const s=work.controller.getState();return{adopted:s.adopted,plan:s.plan,prepared:s.prepared,answers:s.answers,runs:s.runs};});
   assert.deepEqual(failed,adopted,'資料の通信失敗でも既存の採用・準備を失わない');
   assert.equal(await page.locator('#kt-release-input').inputValue(),draft);

@@ -397,3 +397,55 @@ test('追加位置は反映前の通常表示に残し、説明の再解釈や�
   state.prepared.changes[0].placementDescription='<script>配置</script>';
   assert.doesNotMatch(normal(KTReleaseView.render(state)),/<script>/);
 });
+
+
+test('上限停止はタイトル横の短い通知にし、全文と必要な確認を失わない', () => {
+  const state = { phase: 'proposal', proposal: proposal().proposal, proposalPending: true, messages: [], runs: [], artifacts: [],
+    error: { code: 'BUDGET_EXCEEDED', message: 'AIの利用上限に達したため、作成を止めました。案は更新していません。<詳細>' } };
+  const before = JSON.stringify(state), html = KTReleaseView.render(state);
+  const header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
+  assert.match(header, /class="ktr-title-line"><strong>アプリの相談<\/strong><details class="ktr-header-notice"/);
+  assert.match(header, /<summary><span role="alert">AIの利用上限に達しました<\/span><\/summary>/);
+  assert.match(header, /class="ktr-header-notice-body"[\s\S]*案は更新していません。&lt;詳細&gt;/);
+  assert.match(header, /data-release-action="close-notice"/);
+  assert.doesNotMatch(header, /<details[^>]*\sopen(?:\s|>)/);
+  assert.doesNotMatch(header, /<詳細>/);
+  const host = hostOf(); host.innerHTML = html;
+  assert.equal(buttonOf(host, 'adopt').disabled, true, '通知を小さくしても未更新の案を採用できない');
+  assert.equal(JSON.stringify(state), before);
+});
+
+test('接続と通常のお知らせは失敗と区別し、複数の通知の全文と接続操作を残す', () => {
+  const state = { phase: 'idle', messages: [], runs: [], artifacts: [] };
+  const options = { connection: { connected: false, message: '接続の期限が切れました。' }, notice: '説明を保存しました。' };
+  let html = KTReleaseView.render(state, options), header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
+  assert.match(header, /role="status">接続を確認してください/);
+  assert.match(header, /ほか1件/);
+  assert.match(header, /接続の期限が切れました。/);
+  assert.match(header, /説明を保存しました。/);
+  assert.match(header, /data-release-action="connect"[^>]*>接続する/);
+  assert.doesNotMatch(header, /role="alert"/);
+  state.error = { code: 'NETWORK_ERROR', message: '返答を受信できませんでした。' };
+  html = KTReleaseView.render(state, options); header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
+  assert.equal((header.match(/data-release-panel="header-notice"/g) || []).length, 1);
+  assert.match(header, /role="alert">処理を完了できませんでした/);
+  assert.match(header, /ほか2件/);
+  for (const message of [state.error.message, options.connection.message, options.notice]) assert.ok(header.includes(message));
+  delete state.error;
+  html = KTReleaseView.render(state, { notice: options.notice });
+  assert.match(html, /<summary><span role="status">お知らせ<\/span><\/summary>/);
+  assert.doesNotMatch(KTReleaseView.render(state), /<details class="ktr-header-notice"/);
+});
+
+test('確認が必要な変更と制約は、通知を閉じても反映前の通常表示で確認できる', async () => {
+  const f = await mounted(); await finishProposal(f);
+  const state = f.controller.getState();
+  state.error = { code: 'NETWORK_ERROR', message: '接続状態を確認してください。' };
+  state.prepared.confirmations = ['既存ファイルの2行を置き換えます。'];
+  state.artifacts[0].result.warnings = ['PCの画面からの編集だけが対象です。'];
+  const before = JSON.stringify(state), html = KTReleaseView.render(state), shown = normal(html);
+  assert.match(shown, /既存ファイルの2行を置き換えます。/);
+  assert.match(shown, /PCの画面からの編集だけが対象です。/);
+  assert.equal((shown.match(/data-release-action="apply"/g) || []).length, 1);
+  assert.equal(JSON.stringify(state), before);
+});
