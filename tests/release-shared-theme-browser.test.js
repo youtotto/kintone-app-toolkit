@@ -1,0 +1,177 @@
+'use strict';
+// Real mountRoot + Fields + release workspace. Every request is served locally or aborted.
+// KT_SRC and KT_RELEASE_VIEW_SRC allow the same assertions against a previous build.
+const test = require('node:test'), assert = require('node:assert/strict');
+const fs = require('node:fs'), path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const output = path.resolve(process.env.KT_THEME_OUTPUT || path.join(root, 'tests/.build/release-shared-theme'));
+const scenes = [
+  { name: 'full-1440', width: 1440, height: 900, full: true, zoom: 1, split: true },
+  { name: 'full-110', width: 1440, height: 900, full: true, zoom: 1.1, split: true },
+  { name: 'panel-1280', width: 1440, height: 900, full: false, zoom: 1.1, split: true },
+  { name: 'narrow-390', width: 390, height: 844, full: true, zoom: 1.1, split: false },
+];
+const fixture = {
+  phase: 'idle', taskId: 1, version: 0, runs: [], answers: [], artifacts: [],
+  messages: [
+    { id: 1, role: 'user', text: '備考の入力方法と、担当者への引き継ぎ手順を説明してください。' },
+    { id: 2, role: 'assistant', text: 'アプリの説明を作りました。内容を確認してから資料として保存できます。' },
+  ],
+  explanationId: 'theme-explanation',
+  explanations: [{ id: 'theme-explanation', title: '案件管理の使い方', sections: [{
+    heading: '入力と引き継ぎ', paragraphs: ['備考には対応内容を入力します。次の担当者が確認できるように記録してください。'], items: [],
+    table: { columns: ['項目', '説明'], rows: [['備考', '対応内容と引き継ぐ情報を入力します。']] }, evidenceIds: [],
+  }], unknowns: [], facts: [] }],
+};
+function playwright() {
+  try { return require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
+  catch { return require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
+}
+function bundle() {
+  let source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8')
+    .replace('waitReady().then(() => startToolkit());', '');
+  if (process.env.KT_RELEASE_VIEW_SRC) {
+    const start = source.indexOf('const KTReleaseView ='), end = source.indexOf('/* Browser composition.', start);
+    assert.ok(start >= 0 && end > start, 'release view replacement boundaries');
+    source = source.slice(0, start) + fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC, 'utf8') + '\n' + source.slice(end);
+  }
+  const end = source.lastIndexOf('})();'); assert.ok(end >= 0);
+  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+}
+async function inspect(page, selectors) {
+  return page.evaluate(selectors => {
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const rgba = value => { context.clearRect(0, 0, 1, 1); context.fillStyle = value; context.fillRect(0, 0, 1, 1); const n = context.getImageData(0, 0, 1, 1).data; return [n[0], n[1], n[2], n[3] / 255]; };
+    const over = (fg, bg) => { const a = fg[3]; return [0, 1, 2].map(i => fg[i] * a + bg[i] * (1 - a)).concat(1); };
+    const background = el => {
+      if (!el) return [255, 255, 255, 1];
+      const c = rgba(getComputedStyle(el).backgroundColor);
+      return c[3] >= 1 ? c : over(c, background(el.parentElement));
+    };
+    const luminance = rgb => rgb.slice(0, 3).map(n => { n /= 255; return n <= .04045 ? n / 12.92 : ((n + .055) / 1.055) ** 2.4; }).reduce((n, v, i) => n + v * [.2126, .7152, .0722][i], 0);
+    const box = el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth }; };
+    const samples = selectors.flatMap(selector => [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length).map(el => {
+      const s = getComputedStyle(el), bg = background(el), fg = over(rgba(s.color), bg), a = luminance(fg), b = luminance(bg);
+      return { selector, disabled: !!el.disabled, text: (el.textContent || el.value || '').trim().slice(0, 50), color: s.color, background: s.backgroundColor, effectiveBackground: bg.slice(0, 3), font: s.fontFamily, fontSize: parseFloat(s.fontSize), contrast: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), ...box(el) };
+    }));
+    const bounds = Object.fromEntries(['#kt-toolkit', '#kt-toolkit > .bar', '#kt-toolkit > .body', '.ktr-workspace', '.ktr-layout', '.ktr-conversation', '.ktr-current', '#kt-release-input', 'dialog[open]'].map(selector => [selector, document.querySelector(selector)]).filter(([, el]) => el?.getClientRects().length).map(([selector, el]) => [selector, box(el)]));
+    return { samples, bounds, width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyDirectDialog: document.querySelector('dialog[open]')?.parentElement === document.body };
+  }, selectors);
+}
+const normalSelectors = ['#kt-toolkit', '#tab-fields', '#tab-ai', '#fi-copy', '#fi-search', '#fi-type', '#view-fields th', '#view-fields td'];
+const aiSelectors = ['#kt-toolkit', '#tab-ai', '.ktr-workspace', '.ktr-environment', '.ktr-speaker', '.ktr-message p', '.ktr-stage-header', '.ktr-explanation th', '.ktr-explanation td', '.ktr-document-tabs button[aria-pressed="true"]', '.ktr-workspace button:not(:disabled)', '#kt-release-input'];
+const dialogSelectors = ['dialog[open]', 'dialog[open] h2', 'dialog[open] p', 'dialog[open] small', 'dialog[open] summary', 'dialog[open] button:not(:disabled)', 'dialog[open] [data-document-create]', 'dialog[open] textarea'];
+function audit(normal, ai, dialog, scene) {
+  const failures = [], check = (condition, message) => { if (!condition) failures.push(message); };
+  const sample = (set, selector, predicate = () => true) => set.samples.find(s => s.selector === selector && predicate(s));
+  const shell = sample(normal, '#kt-toolkit'), workspace = sample(ai, '.ktr-workspace'), modal = sample(dialog, 'dialog[open]');
+  for (const key of ['color', 'background', 'font']) {
+    check(shell[key] === workspace[key], `通常タブとAI画面の${key}が揃う: ${shell[key]} / ${workspace[key]}`);
+    check(workspace[key] === modal[key], `AI画面とbody直下dialogの${key}が揃う: ${workspace[key]} / ${modal[key]}`);
+  }
+  const normalButton = sample(normal, '#fi-copy'), aiButton = sample(ai, '.ktr-workspace button:not(:disabled)', s => s.text === '資料を作る');
+  const dialogButton = sample(dialog, 'dialog[open] button:not(:disabled)', s => s.text === '閉じる');
+  for (const key of ['color', 'background', 'font']) {
+    check(normalButton[key] === aiButton[key], `通常ボタンとAIボタンの${key}が揃う`);
+    check(aiButton[key] === dialogButton[key], `AIボタンとdialogボタンの${key}が揃う`);
+  }
+  const selected = sample(ai, '#tab-ai'), primary = sample(ai, '.ktr-workspace button:not(:disabled)', s => s.text === '送信');
+  check(!!primary, '送信ボタンが有効');
+  const otherSelected = sample(normal, '#tab-fields'), documentSelected = sample(ai, '.ktr-document-tabs button[aria-pressed="true"]'), dialogPrimary = sample(dialog, 'dialog[open] [data-document-create]');
+  for (const key of ['color', 'background']) {
+    check(selected[key] === otherSelected[key], `通常タブとAI選択タブの${key}が揃う`);
+    if (primary) check(primary[key] === dialogPrimary[key], `AI画面とdialogの主ボタンの${key}が揃う`);
+  }
+  check(selected.color === documentSelected.color, '選択タブと選択資料のアクセント色が揃う');
+  for (const [name, set] of [['Fields', normal], ['AI', ai], ['dialog', dialog]]) {
+    for (const s of set.samples) {
+      check(s.disabled || s.contrast >= 4.5, `${name} ${s.selector}「${s.text}」の文字コントラスト ${s.contrast.toFixed(2)} < 4.5`);
+      check(s.width > 0 && s.height > 0, `${name} ${s.selector}の文字領域が潰れない`);
+    }
+    check(set.documentWidth <= set.width + 1, `${name}: ページに横はみ出しがない`);
+  }
+  for (const selector of ['#kt-toolkit', '#kt-toolkit > .bar', '.ktr-workspace', '.ktr-layout', '.ktr-conversation', '.ktr-current']) {
+    const b = ai.bounds[selector];
+    check(b.x >= -1 && b.right <= ai.width + 1, `${selector}: 画面幅に収まる`);
+    check(b.scrollWidth <= b.clientWidth + 1, `${selector}: 横はみ出しがない (${b.scrollWidth}/${b.clientWidth})`);
+  }
+  const left = ai.bounds['.ktr-conversation'], right = ai.bounds['.ktr-current'], input = ai.bounds['#kt-release-input'];
+  check(scene.split ? right.x >= left.right && Math.abs(right.y - left.y) < 3 : right.y >= left.bottom - 2, '相談と結果の左右pane／縦積みを維持する');
+  check(input.x >= left.x - 1 && input.right <= left.right + 1, '入力欄が相談pane内に収まる');
+  const d = dialog.bounds['dialog[open]'];
+  check(dialog.bodyDirectDialog, '本物のdialogがbody直下に開く');
+  check(d.x >= 14 && d.right <= dialog.width - 14 && d.y >= 14 && d.bottom <= dialog.height - 14, 'dialogが画面内に収まる');
+  check(d.scrollWidth <= d.clientWidth + 1, 'dialogに横はみ出しがない');
+  for (const s of dialog.samples.filter(s => /button|textarea/.test(s.selector))) check(s.x >= d.x && s.right <= d.right + 1, 'dialog内の操作部品が収まる');
+  return failures;
+}
+
+test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマと画面幅', { timeout: 120000 }, async t => {
+  fs.mkdirSync(output, { recursive: true });
+  const browser = await playwright().chromium.launch({ channel: process.env.BROWSER_CHANNEL || 'msedge', headless: true });
+  try {
+    for (const scene of scenes) for (const colorScheme of ['light', 'dark']) await t.test(`${scene.name}-${colorScheme}`, async () => {
+      const label = `${scene.name}-${colorScheme}`, unexpected = [], errors = [];
+      const context = await browser.newContext({ viewport: { width: scene.width, height: scene.height }, colorScheme, serviceWorkers: 'block' });
+      try {
+        await context.route('**/*', route => {
+          const url = route.request().url();
+          if (url === 'https://shared-theme.test.invalid/') return route.fulfill({ contentType: 'text/html', body: '<!doctype html><html lang="ja"><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%}body{font:12px "Times New Roman",serif;background:#e8edf2;color:#202020}button,input,textarea,select{font:11px "Times New Roman",serif}</style><body></body></html>' });
+          if (url.startsWith('https://www.google.com/s2/favicons?')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' });
+          unexpected.push(url); return route.abort();
+        });
+        const page = await context.newPage(); page.setDefaultTimeout(5000); page.on('pageerror', error => errors.push(error.message));
+        await page.goto('https://shared-theme.test.invalid/');
+        await page.evaluate(scene => { localStorage.setItem('ktTemplatesMovedNotice.v1', '1'); localStorage.setItem('ktToolkitFull.v1', scene.full ? '1' : '0'); localStorage.setItem('ktToolkitFullZoom.v1', String(scene.zoom)); }, scene);
+        await page.addScriptTag({ content: bundle() });
+        await page.evaluate(async fixture => {
+          const T = ThemeTest, C = T.KTAiClient;
+          const shell = window.shell = T.mountRoot();
+          await T.renderFields(shell, { appId: '310', fields: { memo: { type: 'MULTI_LINE_TEXT', code: 'memo', label: '備考', required: false } }, layout: [] });
+          const host = document.createElement('div'); host.id = 'kt-ai-host'; host.className = 'kt-flex-column'; host.style.height = '100%'; shell.querySelector('#view-ai').appendChild(host);
+          window.serviceCalls = [];
+          const denied = name => () => { serviceCalls.push(name); throw Error('UI試験では呼び出し禁止: ' + name); };
+          const health = { ok: true, supportedContractVersions: [C.CONTRACT_VERSION], entitlements: [{ product: C.PRODUCT, features: [C.FEATURE, C.FEATURE_PLANNER] }], registry: { [C.PRODUCT]: {
+            [C.FEATURE]: { implemented: true, promptVersions: [C.PROMPT_VERSION], conversation: [...C.CONVERSATION_MARKS, 'releaseWorkspace', 'appExplanation'] },
+            [C.FEATURE_PLANNER]: { implemented: true, promptVersions: [C.PLANNER_PROMPT_VERSION], ...C.PLANNER_MARKS, requirementOps: [...C.PLANNER_MARKS.requirementOps, 'releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'] },
+          } } };
+          const client = { getHealth: async () => health, propose: denied('AI.propose'), plan: denied('AI.plan'), generate: denied('AI.generate') };
+          window.work = T.mountReleaseWorkspace(host, { appId: '310', settings: C.createSettingsStore(), session: { client, status: () => ({ connected: true, apiBase: 'https://gateway.test.invalid' }) },
+            loadDevBase: denied('kintone.loadBase'), executor: { api: new Proxy({}, { get: (_, name) => denied('kintone.' + String(name)) }) },
+            getInputs: () => ({ data: { appId: '310', appName: '案件管理', fields: {} }, deps: {}, scan: { files: [] } }), copyText: denied('clipboard'), downloadText: denied('download') });
+          await work.refreshCapability();
+          // Seed the rendered state only; no service or kintone operation creates this fixture.
+          work.controller.getState = () => structuredClone(fixture); work.view.render();
+          shell.ktTabs.onSwitch(id => { if (id === 'ai') work.onVisible(); });
+          shell.ktTabs.switchTab('fields');
+        }, fixture);
+        const normal = await inspect(page, normalSelectors);
+        await page.screenshot({ path: path.join(output, label + '-fields.png'), fullPage: true });
+        await page.locator('#tab-ai').click();
+        const draft = '入力途中の引き継ぎ相談を残します。';
+        await page.locator('#kt-release-input').fill(draft);
+        await page.locator('#tab-fields').click();
+        assert.equal(await page.locator('#view-ai').isVisible(), false);
+        await page.locator('#tab-ai').click();
+        assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'タブ移動で入力draftを保持');
+        assert.equal(await page.locator('#kt-toolkit .tabs .active').count(), 1, '選択タブは一つ');
+        assert.match(await page.locator('#tab-ai').getAttribute('class'), /active/);
+        const ai = await inspect(page, aiSelectors);
+        await page.screenshot({ path: path.join(output, label + '-ai.png'), fullPage: true });
+        await page.locator('[data-release-action="documents"]').click();
+        const dialog = await inspect(page, dialogSelectors);
+        await page.screenshot({ path: path.join(output, label + '-dialog.png'), fullPage: true });
+        await page.locator('dialog[open] [data-close]').click();
+        assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'dialogを閉じても入力draftを保持');
+        const failures = audit(normal, ai, dialog, scene);
+        if ((await page.locator('#tab-ai').innerText()).trim() !== 'AI Assistant') failures.unshift('タブ表示名は AI Assistant');
+        fs.writeFileSync(path.join(output, label + '-measurements.json'), JSON.stringify({ scene, colorScheme, normal, ai, dialog, failures }, null, 2));
+        assert.deepEqual(await page.evaluate(() => serviceCalls), [], 'AI・kintone・保存への呼び出しはゼロ');
+        assert.deepEqual(unexpected, [], '外部ネットへの要求はゼロ'); assert.deepEqual(errors, []);
+        assert.deepEqual(failures, []);
+        await page.evaluate(() => work.dispose());
+      } finally { await context.close(); }
+    });
+  } finally { await browser.close(); }
+});

@@ -23,10 +23,9 @@ function toolkitSource() {
 const workspaceSource = fs.readFileSync(process.env.KT_RELEASE_WORKSPACE_SRC || path.join(root, 'src/release-workspace.js'), 'utf8');
 const viewSource = fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC || path.join(root, 'src/release-view.js'), 'utf8')
   + '\nglobalThis.TableReleaseView=KTReleaseView;\n';
-const colors = { heading: 'rgb(245, 247, 250)', text: 'rgb(32, 43, 61)', paper: 'rgb(255, 255, 255)', border: 'rgb(217, 225, 235)' };
 
 for (const colorScheme of ['dark', 'light']) {
-  test('説明の表は本物の外枠の' + colorScheme + '配色でも読め、既存タブの表は変えない', { timeout: 45000 }, async () => {
+  test('説明の表は本物の外枠と' + colorScheme + '配色を共有し、見出し固定の役割は維持する', { timeout: 45000 }, async () => {
     const browser = await playwright().chromium.launch({ channel: process.env.BROWSER_CHANNEL || 'msedge', headless: true });
     try {
       const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme });
@@ -58,20 +57,19 @@ for (const colorScheme of ['dark', 'light']) {
           return { color: s.color, background: s.backgroundColor, padding: s.padding,
             border: s.borderBottomColor, position: s.position, top: s.top };
         };
-        return { th: style('.ktr-explanation th'), td: style('.ktr-explanation td'), other: style('#unchanged-table th') };
+        return { th: style('.ktr-explanation th'), td: style('.ktr-explanation td'), other: style('#unchanged-table th'), workspace: style('.ktr-workspace'), button: style('#kt-toolkit .btn') };
       });
-      assert.equal(actual.th.background, colors.heading, '説明の見出し背景');
-      assert.equal(actual.th.color, colors.text, '説明の見出し文字');
-      assert.equal(actual.td.background, colors.paper, '説明の本文背景');
-      assert.equal(actual.td.color, colors.text, '説明の本文文字');
+      assert.equal(actual.th.background, actual.other.background, '説明の見出し背景');
+      assert.equal(actual.th.color, actual.workspace.color, '説明の見出し文字');
+      assert.equal(actual.td.background, actual.workspace.background, '説明の本文背景');
+      assert.equal(actual.td.color, actual.workspace.color, '説明の本文文字');
       for (const cell of [actual.th, actual.td]) {
-        assert.equal(cell.padding, '10px 12px', '説明の表の余白');
-        assert.equal(cell.border, colors.border, '説明の表の罫線');
+        assert.equal(cell.padding, '9px 10px', '説明の表の余白');
+        assert.equal(cell.border, actual.button.border, '説明の表の罫線');
         assert.equal(cell.position, 'static', '旧画面の見出し固定を継承しない');
         assert.equal(cell.top, 'auto');
       }
-      assert.equal(actual.other.background, colorScheme === 'dark' ? 'rgb(17, 17, 17)' : 'rgb(245, 245, 245)');
-      assert.equal(actual.other.padding, '6px');
+      assert.equal(actual.other.padding, '9px 10px');
       assert.equal(actual.other.position, 'sticky');
       assert.deepEqual(errors, []);
       assert.deepEqual(unexpected, []);
