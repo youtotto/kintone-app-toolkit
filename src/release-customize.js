@@ -113,11 +113,12 @@ const KTReleaseCustomize = (() => {
     }
     return snapshot;
   }
-  function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, snapshot, stale = false } = {}) {
+  function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, referenceKind = 'field', eventName, snapshot, stale = false } = {}) {
     const result = { status: 'unavailable', reason: '［依存関係を更新］で登録済みのコードと設定を確認してください。',
       appId: appId == null ? null : String(appId), environment: environment || null,
       loadedAt: snapshot?.loadedAt || null, revision: snapshot?.revision ?? null, basis: 'registered',
-      field: null, fields: [], jsReferences: [], formulaReferences: [], unavailableFiles: [],
+      kind: referenceKind === 'event' ? 'event' : 'field', field: null, fields: [], event: null, events: [],
+      jsReferences: [], formulaReferences: [], unavailableFiles: [],
       missingSettings: [], documentNotice: null, limitations: cloneDependency(snapshot?.limitations || []) };
     if (stale) return { ...result, status: 'stale', reason: '設定が変わったため、依存関係を更新してください。' };
     if (snapshot?.status !== 'ready') return { ...result, reason: snapshot?.reason || result.reason };
@@ -136,11 +137,8 @@ const KTReleaseCustomize = (() => {
     result.fields = cloneDependency(snapshot.fields);
     result.missingSettings = cloneDependency(snapshot.missingSettings);
     result.unavailableFiles = cloneDependency(snapshot.unavailableFiles);
-    if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
-    const fields = snapshot.fields.filter(field => field.code === fieldCode);
-    if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
-    result.field = cloneDependency(fields[0]);
-    const seenFiles = new Set();
+    // Index the existing scan, without parsing the editor or registering new events.
+    const seenFiles = new Set(), verifiedFiles = [], events = new Set();
     for (const file of snapshot.files) {
       const id = JSON.stringify([file.target, file.name]);
       if (seenFiles.has(id)) continue;
@@ -152,11 +150,28 @@ const KTReleaseCustomize = (() => {
         result.unavailableFiles.push({ name: file.name, target: file.target, reason: fileInfo.reason });
         continue;
       }
-      const reference = fileInfo.fields.find(field => field.code === fieldCode);
+      verifiedFiles.push({ file, info: fileInfo });
+      for (const event of fileInfo.events) events.add(event.name);
+    }
+    result.events = [...events].sort().map(name => ({ name }));
+    if (result.kind === 'event') {
+      if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名を選択するか、ここでイベントを選んでください。' };
+      if (!events.has(eventName)) return { ...result, status: 'unresolved', reason: '選択した文字と一致するイベントを、取得した登録済みコードで確認できません。' };
+      result.event = { name: eventName };
+    } else {
+      if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
+      const fields = snapshot.fields.filter(field => field.code === fieldCode);
+      if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
+      result.field = cloneDependency(fields[0]);
+    }
+    for (const { file, info } of verifiedFiles) {
+      const reference = result.kind === 'event' ? info.events.find(event => event.name === eventName) : info.fields.find(field => field.code === fieldCode);
       if (reference) result.jsReferences.push({ name: file.name, target: file.target,
         current: document?.name === file.name && document.target === file.target && document.kind === 'js',
-        access: reference.access, lines: reference.lines, confidence: reference.confidence });
+        ...(result.kind === 'event' ? { direct: reference.direct, lines: [] }
+          : { access: reference.access, lines: reference.lines, confidence: reference.confidence }) });
     }
+    if (result.kind === 'event') return { ...result, status: 'ready', reason: null };
     const formulas = new Map();
     for (const edge of snapshot.deps.edges) {
       if (edge.sourceType !== 'FIELD' || edge.targetType !== 'FIELD' || edge.targetId !== fieldCode
@@ -179,18 +194,21 @@ const KTReleaseCustomize = (() => {
       FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
     const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
       + (ref.current ? '（開いているファイル）' : '') + '<br>'
-      + escape(ref.access.map(access => accessLabels[access] || '参照').join('・'))
+      + escape(info.kind === 'event' ? (ref.direct ? '登録の記述あり' : '登録の候補（既存の解析による推定）')
+        : ref.access.map(access => accessLabels[access] || '参照').join('・'))
       + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
       + '</li>').join('');
     const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
       + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
     const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
       ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
-    return '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>'
-      + '<p class="kt-muted">取得した登録済みコードと計算式の参照です。編集中のコードは解析していません。</p>'
+    return (info.kind === 'event' ? '<p><strong>イベント</strong> <code>' + escape(info.event.name) + '</code></p>'
+      : '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>')
+      + '<p class="kt-muted">' + (info.kind === 'event' ? '取得した登録済みコードのイベントです。' : '取得した登録済みコードと計算式の参照です。') + '編集中のコードは解析していません。</p>'
       + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
-      + '<h4>このフィールドを使うJavaScript</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
-      + '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+      + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+      + (info.kind === 'event' ? '<p class="kt-muted">イベントの行番号は既存の解析結果に含まれていません。候補のイベントはコードで確認してください。</p>'
+        : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
       + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
       + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
   }

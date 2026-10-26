@@ -24,7 +24,7 @@
   - [Access Control](#access-control)
   - [Customize](#customize)
   - [Plugins](#plugins)
-  - [Field Scanner](#field-scanner)
+  - [JS Scanner](#js-scanner)
   - [AI Assistant](#ai-assistant)
 - [導入方法](#-導入方法)
 - [使い方](#-使い方)
@@ -50,7 +50,7 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - ✅ **Deps**: 依存関係グラフ + 横断検索 + 依存関係レポート出力
 - ✅ **Customize**: 登録済み JS / CSS の確認・解析（PC / モバイル・FILE / URL）＋ 「AIに相談」
 - ✅ **Plugins**: プレビュー / 本番差分管理
-- ✅ **Field Scanner**: JS/CSS解析（ファイル起点ビュー / 自動解析）
+- ✅ **JS Scanner**: JS/CSS解析（ファイル起点ビュー / 自動解析）
 - ✅ **AI Assistant**: ［資料を作る］でテンプレートを選び、AIに概要や引継ぎ資料を依頼。AIを使わない設定資料の書き出しも利用できます。Nest Rec AI に接続すると、相談 → 仮案の修正・採用 → 変更内容の作成・確認 → 動作テスト環境への反映と結果の確認まで進められます
 
 > Templates タブ（GitHub のテンプレート / Snippets / CSS / Documents）は廃止し、AI タブは「AI Assistant」に改名しました。テンプレートを人が選んで貼り付ける方式から、
@@ -80,7 +80,7 @@ Toolkit は、設定を「見る」ツールから **「実現したい業務」
 
 | 段階 | 問い | タブ |
 |---|---|---|
-| **Analyze** | 今どうなっているか | Health / Fields / Views / Graphs / Notices / Access Control / Customize / Field Scanner / Plugins |
+| **Analyze** | 今どうなっているか | Health / Fields / Views / Graphs / Notices / Access Control / Customize / JS Scanner / Plugins |
 | **Understand** | 何がどこに依存しているか | Relations / Deps / Fields（変更影響） |
 | **Plan** | 実現したい業務をどう作るか | AI Assistant（相談・仮案の確認と修正） |
 | **Build** | 採用した案を作り、内容を確認する | AI Assistant（変更内容と必要な確認事項・動作テスト環境への反映）/ Customize（登録済みコードの確認） |
@@ -262,7 +262,7 @@ Markdownは仕様書として貼り付けやすい形式で、利用箇所・他
 
 ---
 
-### Field Scanner
+### JS Scanner
 カスタマイズ JS/CSS の解析エンジンです。結果は依存関係データへ自動的に合流します。
 
 🆕 **ファイル起点ビュー**（既定）— ファイルごとに「いつ動き・何を触り・どのアプリを見るか」を表示

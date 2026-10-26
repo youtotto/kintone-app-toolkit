@@ -3353,7 +3353,7 @@
         const name = jf?.file?.name || jf?.url || '(unknown)';
         addNode('CUSTOMIZE', `${jf.target}:${jf.kind}:${name}`, name, {
           target: jf.target, kind: jf.kind,
-          analyzed: false, note: 'NOT_ANALYZED（Field Scanner統合で対応予定）',
+          analyzed: false, note: 'NOT_ANALYZED（JS Scanner統合で対応予定）',
         });
       }
 
@@ -3896,7 +3896,7 @@
         common.push('他アプリからこのアプリへの参照は未走査です。Relationsタブの「他アプリからの参照」で走査すると反映されます。');
       }
       if (!scannerDone) {
-        common.push('JavaScriptカスタマイズは未解析です。Field Scannerで「Scan」を実行すると、JSからの参照が反映されます。');
+        common.push('JavaScriptカスタマイズは未解析です。JS Scannerで「Scan」を実行すると、JSからの参照が反映されます。');
       }
       if (pluginCount) {
         common.push(`このアプリには${pluginCount}個のプラグインが追加されています。プラグイン設定の内容はAPIで取得できないため解析対象外です。各プラグインの設定画面で確認してください。`);
@@ -4303,7 +4303,7 @@
       for (const n of deps.nodes || []) {
         if (n.type !== 'CUSTOMIZE') continue;
         n.analyzed = true;
-        n.note = 'Field Scanner解析済み';
+        n.note = 'JS Scanner解析済み';
         const evs = deps.meta.jsEvents[String(n.id).replace(/^CUSTOMIZE:/, '')];
         if (evs && evs.length) n.events = evs;
       }
@@ -5395,7 +5395,7 @@
       const scanFiles = (scan?.files || []).filter(f => !f?.note);
       const jsSource = !jsAnalyzed ? null : scanFiles.some(f => typeof f.text === 'string') ? 'full' : 'snippets';
       const notes = [];
-      if (!jsAnalyzed) notes.push('JavaScript / CSS の本文はまだ解析していません（Field Scanner タブで解析できます）。JS からの参照は含まれていない');
+      if (!jsAnalyzed) notes.push('JavaScript / CSS の本文はまだ解析していません（JS Scanner タブで解析できます）。JS からの参照は含まれていない');
       if (jsSource === 'snippets') notes.push('JavaScript の本文は前回の解析結果だけを使っているため、一部しか含みません');
       if (jsAnalyzed && urlJs) notes.push(`URL 指定の JavaScript ${urlJs} 件は本文を取得できないため未解析`);
       if (!incomingScanned) notes.push('ほかのアプリからこのアプリへの参照はまだ調べていません');
@@ -12594,7 +12594,7 @@
         };
       }
       const warnings = [];
-      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（JS Scanner の Scan 実行で反映されます）。');
       if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
       if (inputs.scan && !(inputs.scan.files || []).some(f => typeof f.text === 'string')) warnings.push('JavaScript 本文はキャッシュに含まれないため、コード抜粋は Scanner の断片のみです。');
       return {
@@ -12627,7 +12627,7 @@
         return { ok: false, reason: 'error', message: `Context の生成に失敗しました: ${e?.message || e}` };
       }
       const warnings = [];
-      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（JS Scanner の Scan 実行で反映されます）。');
       if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
       if (!ctx.retrieval.fields.length) warnings.push('入力内容に一致する既存フィールドは見つかりませんでした（アプリ全体の既存資産を送ります）。');
       return {
@@ -12781,7 +12781,7 @@
       if (savedPlan && version.acceptedProposal) delete savedPlan.goal;
       const json = version && version.plan ? JSON.stringify({ document: k.id, ...(version.acceptedProposal ? { acceptedProposal: version.acceptedProposal, answerHistory: version.answerHistory || [], requestHistory: version.requestHistory || [] } : {}), plan: savedPlan, planStatus: version.status || null, planVersion: version.version ?? null, spec: version.spec || null, review: version.review ? KTContext.compactReview(version.review) : null, execution: execState?.execution ? { status: execState.execution.status || null, steps: (execState.execution.steps || []).map(x => ({ stepId: x.stepId, status: x.status })), rollback: (execState.rollback || execState.execution.rollback) ? { status: (execState.rollback || execState.execution.rollback).status || null } : null, environment: 'preview' } : null, jsExecution: jsExecState?.execution ? { status: jsExecState.execution.status || null, rollback: (jsExecState.rollback || jsExecState.execution.rollback) ? { status: (jsExecState.rollback || jsExecState.execution.rollback).status || null } : null, environment: 'preview' } : null, production: { deployed: false, note: 'Toolkit は運用環境へ反映しない' }, contextEnvironment: 'production', context: ctx }, null, 2) : KTContext.toJSON(ctx, { pretty: true });
       const warnings = [];
-      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（Field Scanner の Scan 実行で反映されます）。');
+      if (!ctx.coverage.javascript) warnings.push('JavaScript は未解析です（JS Scanner の Scan 実行で反映されます）。');
       if (!ctx.coverage.incoming) warnings.push('他アプリからの参照は未走査です（Relations タブで走査できます）。');
       warnings.push('ドキュメントの本文は生成していません（Prompt を ChatGPT / Claude などへ貼り付けるか、Markdown の骨格に記入してください）。Nest Rec AI は使っていません。');
       const size = KTContext.measureText(prompt);
@@ -14764,11 +14764,12 @@
       }
       return snapshot;
     }
-    function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, snapshot, stale = false } = {}) {
+    function dependencyInfoOf({ appId, document, environment = document?.environment, fieldCode, referenceKind = 'field', eventName, snapshot, stale = false } = {}) {
       const result = { status: 'unavailable', reason: '［依存関係を更新］で登録済みのコードと設定を確認してください。',
         appId: appId == null ? null : String(appId), environment: environment || null,
         loadedAt: snapshot?.loadedAt || null, revision: snapshot?.revision ?? null, basis: 'registered',
-        field: null, fields: [], jsReferences: [], formulaReferences: [], unavailableFiles: [],
+        kind: referenceKind === 'event' ? 'event' : 'field', field: null, fields: [], event: null, events: [],
+        jsReferences: [], formulaReferences: [], unavailableFiles: [],
         missingSettings: [], documentNotice: null, limitations: cloneDependency(snapshot?.limitations || []) };
       if (stale) return { ...result, status: 'stale', reason: '設定が変わったため、依存関係を更新してください。' };
       if (snapshot?.status !== 'ready') return { ...result, reason: snapshot?.reason || result.reason };
@@ -14787,11 +14788,8 @@
       result.fields = cloneDependency(snapshot.fields);
       result.missingSettings = cloneDependency(snapshot.missingSettings);
       result.unavailableFiles = cloneDependency(snapshot.unavailableFiles);
-      if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
-      const fields = snapshot.fields.filter(field => field.code === fieldCode);
-      if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
-      result.field = cloneDependency(fields[0]);
-      const seenFiles = new Set();
+      // Index the existing scan, without parsing the editor or registering new events.
+      const seenFiles = new Set(), verifiedFiles = [], events = new Set();
       for (const file of snapshot.files) {
         const id = JSON.stringify([file.target, file.name]);
         if (seenFiles.has(id)) continue;
@@ -14803,11 +14801,28 @@
           result.unavailableFiles.push({ name: file.name, target: file.target, reason: fileInfo.reason });
           continue;
         }
-        const reference = fileInfo.fields.find(field => field.code === fieldCode);
+        verifiedFiles.push({ file, info: fileInfo });
+        for (const event of fileInfo.events) events.add(event.name);
+      }
+      result.events = [...events].sort().map(name => ({ name }));
+      if (result.kind === 'event') {
+        if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名を選択するか、ここでイベントを選んでください。' };
+        if (!events.has(eventName)) return { ...result, status: 'unresolved', reason: '選択した文字と一致するイベントを、取得した登録済みコードで確認できません。' };
+        result.event = { name: eventName };
+      } else {
+        if (typeof fieldCode !== 'string' || !fieldCode) return { ...result, status: 'select-field', reason: 'コード内のフィールドコードを選択するか、ここでフィールドを選んでください。' };
+        const fields = snapshot.fields.filter(field => field.code === fieldCode);
+        if (fields.length !== 1) return { ...result, status: 'unresolved', reason: '選択した文字と一致するフィールドコードを確認できません。' };
+        result.field = cloneDependency(fields[0]);
+      }
+      for (const { file, info } of verifiedFiles) {
+        const reference = result.kind === 'event' ? info.events.find(event => event.name === eventName) : info.fields.find(field => field.code === fieldCode);
         if (reference) result.jsReferences.push({ name: file.name, target: file.target,
           current: document?.name === file.name && document.target === file.target && document.kind === 'js',
-          access: reference.access, lines: reference.lines, confidence: reference.confidence });
+          ...(result.kind === 'event' ? { direct: reference.direct, lines: [] }
+            : { access: reference.access, lines: reference.lines, confidence: reference.confidence }) });
       }
+      if (result.kind === 'event') return { ...result, status: 'ready', reason: null };
       const formulas = new Map();
       for (const edge of snapshot.deps.edges) {
         if (edge.sourceType !== 'FIELD' || edge.targetType !== 'FIELD' || edge.targetId !== fieldCode
@@ -14830,18 +14845,21 @@
         FIELDS_PARAM: '読み取り項目', QUERY: '条件', ARGUMENT: '引数', LIST: '項目の指定', OTHER: '参照' };
       const references = info.jsReferences.map(ref => '<li><strong>' + escape(platform(ref.target) + ' / ' + ref.name) + '</strong>'
         + (ref.current ? '（開いているファイル）' : '') + '<br>'
-        + escape(ref.access.map(access => accessLabels[access] || '参照').join('・'))
+        + escape(info.kind === 'event' ? (ref.direct ? '登録の記述あり' : '登録の候補（既存の解析による推定）')
+          : ref.access.map(access => accessLabels[access] || '参照').join('・'))
         + (ref.lines.length ? ' / ' + escape(ref.lines.join('・')) + '行目' : '')
         + '</li>').join('');
       const formulas = info.formulaReferences.map(ref => '<li><strong>' + escape(ref.label) + '</strong> <code>' + escape(ref.code)
         + '</code><pre>' + escape(ref.expression) + '</pre></li>').join('');
       const missing = [...info.unavailableFiles.map(file => platform(file.target) + ' / ' + file.name + ': ' + file.reason),
         ...info.missingSettings.map(item => (item.label || item.what || '設定') + 'を取得できていません。')];
-      return '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>'
-        + '<p class="kt-muted">取得した登録済みコードと計算式の参照です。編集中のコードは解析していません。</p>'
+      return (info.kind === 'event' ? '<p><strong>イベント</strong> <code>' + escape(info.event.name) + '</code></p>'
+        : '<p><strong>' + escape(info.field.label) + '</strong> <code>' + escape(info.field.code) + '</code></p>')
+        + '<p class="kt-muted">' + (info.kind === 'event' ? '取得した登録済みコードのイベントです。' : '取得した登録済みコードと計算式の参照です。') + '編集中のコードは解析していません。</p>'
         + (info.documentNotice ? '<p class="kt-muted">' + escape(info.documentNotice) + '</p>' : '')
-        + '<h4>このフィールドを使うJavaScript</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
-        + '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+        + '<h4>' + (info.kind === 'event' ? 'このイベントを使うJavaScript' : 'このフィールドを使うJavaScript') + '</h4>' + (references ? '<ul>' + references + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>')
+        + (info.kind === 'event' ? '<p class="kt-muted">イベントの行番号は既存の解析結果に含まれていません。候補のイベントはコードで確認してください。</p>'
+          : '<h4>このフィールドを使う計算式</h4>' + (formulas ? '<ul>' + formulas + '</ul>' : '<p>取得できた範囲では参照が見つかりませんでした。</p>'))
         + '<p class="kt-muted">参照が見つからなくても、依存関係がないとは限りません。参照元は既存の解析による候補です。</p>'
         + '<details><summary>未確認の範囲</summary><ul>' + [...new Set([...info.limitations, ...missing])].map(text => '<li>' + escape(text) + '</li>').join('') + '</ul></details>';
     }
@@ -15510,7 +15528,7 @@
         }
         /* 全画面のときは、図を画面の高さに合わせて広げる
            （タブが2段になる場合を考慮して余裕を持たせる）
-           ※ Field Scanner の結果領域は flex で親に追従するようになったため、ここでの上書きは不要 */
+           ※ JS Scanner の結果領域は flex で親に追従するようになったため、ここでの上書きは不要 */
         #kt-toolkit.is-full #dp-canvas { max-height: calc(100vh - 360px) !important; }
         /* 全画面のときだけ文字を少し大きく：各タブの文字サイズは px 指定なので zoom でまとめて拡大する
            （文字・余白・行間が同じ比率で広がる。既定 110%。#kt-zoom で 110 → 120 → 130 → 100% に切り替え、最小化中とパネル表示では等倍） */
@@ -15708,7 +15726,7 @@
           <button id="tab-notice" class="tab">Notices</button>
           <button id="tab-acl" class="tab">Access Control</button>
           <button id="tab-customize" class="tab">Customize</button>
-          <button id="tab-field-scanner" class="tab">Field Scanner</button>
+          <button id="tab-field-scanner" class="tab">JS Scanner</button>
           <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-ai" class="tab" title="AI Assistant（アプリの説明・資料作成・変更の相談と動作テスト環境への反映）">AI Assistant</button>
         </div>
@@ -15957,7 +15975,7 @@
     const scannerDone = !!(deps?.meta?.scannerMergedAt);
     const jsNote = scannerDone
       ? ''
-      : '（JavaScriptは未解析です。Field Scannerで「Scan」を実行すると対象になります）';
+      : '（JavaScriptは未解析です。JS Scannerで「Scan」を実行すると対象になります）';
 
     if (!broken.length) {
       host.innerHTML = `
@@ -17294,7 +17312,7 @@
       running: 'JavaScriptを解析しています。',
       done: 'JavaScriptの解析結果を反映済みです。',
       cached: 'キャッシュした解析結果を反映済みです。最新にするには「JS解析」を押してください。',
-      skipped: '自動解析はオフです（Field Scannerタブで切り替えできます）。',
+      skipped: '自動解析はオフです（JS Scannerタブで切り替えできます）。',
       error: 'JavaScriptの解析に失敗しました。詳細はコンソールを確認してください。',
     };
     const paintScanState = (st) => {
@@ -19010,7 +19028,7 @@
           <div>・<b>設定</b>＝アプリ設定APIから取得（ルックアップ／関連レコード／アプリアクション）。確実な情報です。
             各設定の詳細な項目は、下の「設定詳細（Details）」の各カードで確認できます。</div>
           <div>・<b>推定</b>＝JavaScriptの静的解析による検出。実行時にしか決まらない値は特定できません。
-            Field Scannerで「Scan」を実行すると反映されます${deps ? '' : '（現在は依存データが未生成です）'}。</div>
+            JS Scannerで「Scan」を実行すると反映されます${deps ? '' : '（現在は依存データが未生成です）'}。</div>
           <div>・<b>この一覧は「このアプリ → 他アプリ」の向きのみ</b>です。他アプリからこのアプリへの参照は、
             アプリ設定APIでは取得できません（同一ドメインの他アプリを走査すれば取得可能ですが、現時点では未対応です）。</div>
           <div>・関連レコード一覧などが<b>自アプリ自身を参照する設定</b>も、設定単位で1行表示します（接続先に「（このアプリ）」と表示）。</div>
@@ -19024,7 +19042,7 @@
     const alEmpty = `
       <div style="padding:14px;opacity:.8;font-size:12px">
         他アプリへの接続は検出されませんでした。
-        ${deps ? 'JavaScript内のアプリID参照は、Field Scannerで「Scan」を実行すると検出されます。' : ''}
+        ${deps ? 'JavaScript内のアプリID参照は、JS Scannerで「Scan」を実行すると検出されます。' : ''}
       </div>
     `;
 
@@ -19978,6 +19996,7 @@
         #kt-customize-height-resize{height:16px;flex:none;cursor:row-resize}#kt-customize-height-resize:before{height:3px;left:calc(50% - 28px);right:calc(50% - 28px);top:6px}
         #kt-customize-reference-info{font-size:12px;flex:none;overflow-wrap:anywhere;border-top:1px solid var(--kt-line);padding-top:12px}#kt-customize-reference-info summary{font-weight:600;cursor:pointer}#kt-customize-reference-info h4{font-size:12px;margin:12px 0 4px}#kt-customize-reference-info p{margin:6px 0;color:var(--kt-muted)}#kt-customize-reference-info ul{padding-left:20px;margin:4px 0;max-height:230px;overflow:auto}#kt-customize-reference-info li{margin:5px 0}#kt-customize-reference-info code{font-size:11px;color:var(--kt-muted)}
         #kt-customize-dependencies{font-size:12px;overflow-wrap:anywhere}#kt-customize-dependencies header{display:flex;flex-wrap:wrap;align-items:center;gap:8px}#kt-customize-dependencies header h3{flex:1;margin:0}#kt-customize-dependencies :is(input,select){width:100%;min-width:0;box-sizing:border-box;padding:7px;margin:4px 0;font:inherit;color:var(--kt-text);background:var(--kt-paper);border:1px solid var(--kt-line);border-radius:6px}#kt-customize-dependency-status{color:var(--kt-muted);margin:8px 0}#kt-customize-dependency-content h4{margin:10px 0 5px}#kt-customize-dependency-content ul{padding-left:18px;max-height:230px;overflow:auto}#kt-customize-dependency-content li{margin:6px 0}#kt-customize-dependency-content pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+        .kt-customize-dependency-kinds{display:flex;gap:2px}#kt-toolkit .kt-customize-dependency-kinds .btn{font-size:12px;line-height:1.4;padding:4px 6px;min-height:28px}#kt-toolkit .kt-customize-dependency-kinds .btn[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);background:var(--kt-paper)}#kt-toolkit #kt-customize-dependency-refresh{font-size:12px;padding:4px 7px;min-height:28px}
         .kt-customize-modes{display:none;gap:8px;flex-wrap:wrap;flex:none}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
         .kt-customize-picker,.kt-customize-editor-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
         #kt-customize-picker select{min-width:0;max-width:100%;height:34px;padding:4px 6px}
@@ -19986,15 +20005,18 @@
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
         .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
-        #kt-customize-manual-actions{display:grid;gap:8px;margin-top:8px}#kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
+        .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
+        #kt-toolkit .kt-customize-actionbar .btn{font-size:12px;line-height:1.4;min-height:28px;padding:4px 6px;white-space:nowrap}
+        #kt-customize-manual-status{font-size:12px;overflow-wrap:anywhere;margin:8px 0 0}#kt-customize-manual-status:empty{display:none}
         #kt-customize-manual-confirm{margin-top:10px;padding:10px;border:1px solid var(--kt-line);border-radius:6px;background:var(--kt-paper);font-size:12px}#kt-customize-manual-confirm p{white-space:pre-line;overflow-wrap:anywhere;margin:0 0 10px}#kt-customize-manual-confirm>div{display:flex;gap:6px;flex-wrap:wrap}
         .ktr-code-slot #kt-customize-manual-actions,.ktr-code-slot #kt-customize-manual-status,.ktr-code-slot #kt-customize-manual-confirm,.ktr-code-slot #kt-customize-manual-reload{display:none!important}
         #kt-customize-drafts-wrap{display:flex;gap:8px;align-items:center;font-size:12px;flex:none}#kt-customize-drafts{flex:1;max-width:100%;min-width:0}
         #kt-customize-editor-note{font-size:12px;margin:0;flex:none;color:var(--kt-muted)}
-        .kt-customize-menu{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:auto;padding:12px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
-        .kt-customize-menu h3{font-size:13px;margin:0 0 8px}.kt-customize-menu-section{min-width:0}.kt-customize-menu-section+.kt-customize-menu-section{border-top:1px solid var(--kt-line);padding-top:12px}.kt-customize-primary{width:100%;font-weight:600!important;color:var(--kt-accent)!important;border-color:var(--kt-accent)!important}.kt-customize-menu .kt-customize-picker{display:grid;grid-template-columns:minmax(0,1fr) 34px}
-        .kt-customize-menu #kt-customize-source,.kt-customize-menu #kt-customize-consult{grid-column:1/-1;width:100%}.kt-customize-menu #kt-customize-file{width:100%}
-        .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}.kt-customize-menu .kt-customize-editor-tools>*{flex:1}
+        .kt-customize-menu{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0;overflow:auto;padding:10px;border:1px solid var(--kt-line);border-radius:8px;align-self:start;background:var(--kt-soft)}
+        .kt-customize-menu h3{font-size:13px;margin:0 0 8px}.kt-customize-menu-section{min-width:0}.kt-customize-menu-section+.kt-customize-menu-section{border-top:1px solid var(--kt-line);padding-top:12px}.kt-customize-primary{width:100%;font-weight:600!important;color:var(--kt-accent)!important;border-color:var(--kt-accent)!important}.kt-customize-menu .kt-customize-picker{display:flex;gap:6px;flex-wrap:wrap}
+        .kt-customize-menu .kt-customize-files{border-top:0;padding-top:0}.kt-customize-menu #kt-customize-source{flex:1 1 140px;width:140px}.kt-customize-file-picker{display:flex;align-items:center;gap:4px;flex:2 1 150px;min-width:0}.kt-customize-menu #kt-customize-file{flex:1;min-width:0;width:100%}
+        #kt-toolkit .kt-customize-menu #kt-customize-picker .btn{font-size:12px;line-height:1.4;height:30px;padding:4px 6px}.kt-customize-menu #kt-customize-refresh{width:28px;flex:none}
+        .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}
         .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-modes{display:flex}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-menu-section{border:0;padding:0}.ktr-code-slot .kt-customize-primary{width:auto}.ktr-code-slot .kt-customize-editor-pane{order:1}
         .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
         @container kt-customize-home (max-width:899px){#kt-customize{display:flex;flex-direction:column;gap:12px}.kt-customize-menu{order:-1;align-self:stretch;overflow:visible;flex:none}#kt-customize-width-resize{display:none}}
@@ -20016,26 +20038,26 @@
             <div id="kt-customize-width-resize" class="kt-customize-resize" role="separator" tabindex="0" aria-label="エディターの幅" aria-orientation="vertical" aria-controls="kt-customize-editor" aria-valuemin="45" aria-valuemax="80" aria-valuenow="65" title="ドラッグまたは左右キーで幅を調整"></div>
             <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
               <section class="kt-customize-menu-section" aria-label="保存と反映">
-                <div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn">＋ 新規作成</button></div>
-                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn">運用環境へ反映（デプロイ）</button></div>
+                <div class="kt-customize-actionbar"><div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn" title="編集中のコードをローカルに保存" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn" title="新規ファイルを作成">＋ 新規</button></div>
+                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn" title="運用環境へ反映（デプロイ）">運用環境へ反映</button></div></div>
                 <p id="kt-customize-manual-status" role="status" aria-live="polite"></p><button id="kt-customize-manual-reload" class="btn" hidden>登録済みコードを読み直す</button>
                 <section id="kt-customize-manual-confirm" aria-label="手元の編集と反映の確認" hidden><p data-manual-description></p><div><button class="btn" data-manual-cancel>キャンセル</button><button class="btn" data-manual-confirm>確認して実行</button></div></section>
               </section>
-              <section class="kt-customize-menu-section" aria-label="ファイル"><h3>ファイル</h3>
+              <section class="kt-customize-menu-section kt-customize-files" aria-label="ファイル">
               <div id="kt-customize-picker" class="kt-customize-picker">
                 <select id="kt-customize-source" class="btn" aria-label="ファイルの種類と対象">
                   <option value="JavaScript">JavaScript（PC）</option><option value="css">CSS（PC）</option>
                   <option value="JavaScriptMobile">JavaScript（モバイル）</option><option value="cssMobile">CSS（モバイル）</option>
                 </select>
-                <select id="kt-customize-file" class="btn" aria-label="登録済みファイル" disabled><option value="">ファイルを選択</option></select>
-                <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button>
+                <div class="kt-customize-file-picker"><select id="kt-customize-file" class="btn" aria-label="登録済みファイル" disabled><option value="">ファイルを選択</option></select>
+                <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button></div>
               </div>
               <p id="kt-customize-file-status" role="status"></p>
               <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
               </section>
 
-              <section id="kt-customize-dependencies" class="kt-customize-menu-section" aria-label="フィールドの依存関係">
-                <header><h3>フィールドの依存関係</h3><button id="kt-customize-dependency-refresh" class="btn">依存関係を更新</button></header>
+              <section id="kt-customize-dependencies" class="kt-customize-menu-section" aria-label="コードの依存関係">
+                <header><h3>依存関係</h3><div class="kt-customize-dependency-kinds" role="group" aria-label="参照する対象"><button class="btn" data-dependency-kind="field" aria-pressed="true">フィールド</button><button class="btn" data-dependency-kind="event" aria-pressed="false">イベント</button></div><button id="kt-customize-dependency-refresh" class="btn" aria-label="依存関係を更新">依存関係を更新</button></header>
                 <p id="kt-customize-dependency-status" role="status">必要なときに、動作テスト環境の設定と登録済みコードを取得します。</p>
                 <input id="kt-customize-field-search" type="search" placeholder="フィールドを探す" aria-label="フィールドを探す" disabled>
                 <select id="kt-customize-field" aria-label="依存関係を確認するフィールド" disabled><option value="">フィールドを選択</option></select>
@@ -20364,22 +20386,27 @@
     wireResize($('#kt-customize-height-resize'), 'y', 220, 1000, 20, () => parseFloat(getComputedStyle($editorHost).height), value => codePane.style.setProperty('--kt-editor-height', value + 'px'));
     const heightObserver = new ResizeObserver(() => { const height = parseFloat(getComputedStyle($editorHost).height); if (height > 0) $('#kt-customize-height-resize').setAttribute('aria-valuenow', String(Math.round(height))); });
     heightObserver.observe($editorHost);
-    // Inspect dependencies only on explicit refresh. Cursor changes select an existing field code.
+    // Inspect dependencies only on explicit refresh. Cursor selections match existing field/event names exactly.
     const $dependencyRefresh = $('#kt-customize-dependency-refresh'), $fieldSearch = $('#kt-customize-field-search'), $fieldChoice = $('#kt-customize-field');
-    let dependencySnapshot = null, dependencyRequest = 0, dependencyBusy = false, dependencyNote = '', dependencyCode = '';
+    let dependencySnapshot = null, dependencyRequest = 0, dependencyBusy = false, dependencyNote = '', dependencyCode = '', dependencyKind = 'field', dependencyEvent = '';
     function isNewerRevision(current, known) {
       return current != null && known != null && Number.isFinite(Number(current)) && Number.isFinite(Number(known)) && Number(current) > Number(known);
     }
+    function dependencyInfo(referenceKind = dependencyKind) {
+      return KTReleaseCustomize.dependencyInfoOf({ appId, document: activeDocument, environment: activeDocument?.environment || lastCustomize?.source || 'preview', fieldCode: dependencyCode, referenceKind, eventName: dependencyEvent, snapshot: dependencySnapshot });
+    }
     function renderDependencies() {
-      const fields = dependencySnapshot?.fields || [], query = $fieldSearch.value.trim().toLocaleLowerCase();
-      const environment = activeDocument?.environment || lastCustomize?.source || 'preview';
-      const info = KTReleaseCustomize.dependencyInfoOf({ appId, document: activeDocument, environment, fieldCode: dependencyCode, snapshot: dependencySnapshot });
-      const available = !dependencyBusy && ['ready', 'select-field', 'unresolved'].includes(info.status);
+      const query = $fieldSearch.value.trim().toLocaleLowerCase(), info = dependencyInfo();
+      const isEvent = dependencyKind === 'event', selected = isEvent ? dependencyEvent : dependencyCode, label = isEvent ? 'イベント' : 'フィールド';
+      const entries = isEvent ? (info.events || []).map(event => ({ code: event.name, label: event.name, type: KTJsCatalog.eventJa(event.name) || '' })) : dependencySnapshot?.fields || [];
+      const available = !dependencyBusy && ['ready', 'select-field', 'select-event', 'unresolved'].includes(info.status);
       $dependencyRefresh.disabled = dependencyBusy;
       $fieldSearch.disabled = $fieldChoice.disabled = !available;
-      const visible = available ? fields.filter(field => field.code === dependencyCode || !query || [field.code, field.label, field.type].some(value => String(value || '').toLocaleLowerCase().includes(query))) : [];
-      $fieldChoice.innerHTML = '<option value="">フィールドを選択</option>' + visible.map(field => '<option value="' + escapeHtml(field.code) + '">' + escapeHtml(field.label + ' · ' + field.code) + '</option>').join('');
-      $fieldChoice.value = available ? dependencyCode : '';
+      $fieldSearch.placeholder = label + 'を探す'; $fieldSearch.setAttribute('aria-label', label + 'を探す'); $fieldChoice.setAttribute('aria-label', '依存関係を確認する' + label);
+      codePane.querySelectorAll('[data-dependency-kind]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.dependencyKind === dependencyKind)));
+      const visible = available ? entries.filter(entry => entry.code === selected || !query || [entry.code, entry.label, entry.type].some(value => String(value || '').toLocaleLowerCase().includes(query))) : [];
+      $fieldChoice.innerHTML = '<option value="">' + label + 'を選択</option>' + visible.map(entry => '<option value="' + escapeHtml(entry.code) + '">' + escapeHtml(isEvent ? entry.code : entry.label + ' · ' + entry.code) + '</option>').join('');
+      $fieldChoice.value = available ? selected : '';
       const time = new Date(dependencySnapshot?.loadedAt), when = dependencySnapshot?.loadedAt && !Number.isNaN(time.getTime()) ? time.toLocaleString('ja-JP') + '取得' : '';
       $('#kt-customize-dependency-status').textContent = dependencyBusy ? '依存関係を取得しています…' : dependencyNote || (available ? '動作テスト環境' + (when ? '・' + when : '') : '動作テスト環境の依存関係は未確認です。');
       $('#kt-customize-dependency-content').innerHTML = dependencyBusy || dependencyNote ? '' : KTReleaseCustomize.renderDependencyInfo(info);
@@ -20403,12 +20430,18 @@
       const model = editor.getModel(), selection = editor.getSelection?.();
       const selected = selection && !selection.isEmpty?.() ? model?.getValueInRange?.(selection) : '';
       const word = selected || model?.getWordAtPosition?.(editor.getPosition?.())?.word || '';
-      if (!word || !dependencySnapshot.fields.some(field => field.code === word)) return;
-      dependencyCode = word; renderDependencies();
+      if (!word) return;
+      if (dependencySnapshot.fields.some(field => field.code === word)) { dependencyCode = word; setDependencyKind('field'); }
+      else if ((dependencyInfo('event').events || []).some(event => event.name === word)) { dependencyEvent = word; setDependencyKind('event'); }
     }
+    function setDependencyKind(kind) {
+      if (dependencyKind !== kind) $fieldSearch.value = '';
+      dependencyKind = kind; renderDependencies();
+    }
+    codePane.querySelectorAll('[data-dependency-kind]').forEach(button => button.addEventListener('click', () => setDependencyKind(button.dataset.dependencyKind)));
     $dependencyRefresh.addEventListener('click', refreshDependencies);
     $fieldSearch.addEventListener('input', renderDependencies);
-    $fieldChoice.addEventListener('change', () => { dependencyCode = $fieldChoice.value; renderDependencies(); });
+    $fieldChoice.addEventListener('change', () => { if (dependencyKind === 'event') dependencyEvent = $fieldChoice.value; else dependencyCode = $fieldChoice.value; renderDependencies(); });
     const editorFieldListeners = [editor.onDidChangeCursorSelection?.(followEditorField), editor.onDidChangeModelContent?.(followEditorField)].filter(Boolean);
     function renderReferenceInfo() {
       renderDependencies();
@@ -20720,7 +20753,7 @@
               <input type="checkbox" id="dp-list-mode" style="margin:0">
               <span>一覧で表示</span>
             </label>
-            <button id="dp-draw" class="btn" title="最新の依存関係データで描き直します（Field ScannerのScan後などに使用）">再描画</button>
+            <button id="dp-draw" class="btn" title="最新の依存関係データで描き直します（JS ScannerのScan後などに使用）">再描画</button>
             <select id="dp-format" title="出力する形式を選びます"
                     style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text};font-size:12px">
               <option value="mermaid" selected>Mermaid（表示中の図）</option>
@@ -21276,7 +21309,7 @@
 
         <div id="fs-wrap" class="kt-flex-column" style="height:100%; gap:12px;">
           <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-            <strong style="font-size:14px;">🔎 Field Scanner</strong>
+            <strong style="font-size:14px;">🔎 JS Scanner</strong>
 
             <label style="display:inline-flex; align-items:center; gap:6px; border:1px solid var(--fs-bd); padding:4px 8px; border-radius:10px;">
               <span>Target</span>

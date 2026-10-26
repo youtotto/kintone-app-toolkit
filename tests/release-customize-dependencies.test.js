@@ -159,3 +159,81 @@ test('手編集を保持した古いコードでも依存更新後の登録済�
     assert.equal(JSON.stringify(document), before, '編集中のコードを上書きしない');
   }
 });
+
+const eventInfoOf = (snapshot, extra = {}) => C.dependencyInfoOf({ appId: '398', document: documentOf(), referenceKind: 'event', eventName: 'app.record.edit.show', snapshot, ...extra });
+
+test('イベントは既存Scannerの結果を同じ取得単位で使い、PC/mobile名と直接/推定を分ける', () => {
+  const base = baseOf();
+  base.files[1].text = base.files[1].text.replace('app.record.edit.show', 'mobile.app.record.edit.show');
+  base.files[2].text = "const events=['app.record.edit.show']; kintone.events.on(events, function(event){ return event; });";
+  let analyses = 0;
+  const snapshot = C.createDependencySnapshot(base, current => { analyses++; T.KTDevBase.analyze(current); });
+  const before = JSON.stringify(snapshot), document = documentOf(), draft = JSON.stringify(document);
+  const info = eventInfoOf(snapshot, { document });
+  assert.equal(info.status, 'ready'); assert.equal(info.kind, 'event');
+  assert.deepEqual(info.events, [{name:'app.record.edit.show'}, {name:'mobile.app.record.edit.show'}]);
+  assert.deepEqual(info.jsReferences.map(ref => [ref.target,ref.name,ref.current,ref.direct]),
+    [['desktop','lock.js',true,true],['desktop','other.js',false,false]]);
+  assert.ok(info.jsReferences.every(ref => ref.lines.length === 0), '元の解析にないイベント行番号は作らない');
+  assert.deepEqual(info.formulaReferences, []);
+  const mobile = eventInfoOf(snapshot, { eventName: 'mobile.app.record.edit.show' });
+  assert.deepEqual(mobile.jsReferences.map(ref => [ref.target,ref.name,ref.current]), [['mobile','lock.js',false]]);
+  assert.equal(analyses, 1, '選択で解析を追加しない');
+  assert.equal(JSON.stringify(snapshot), before); assert.equal(JSON.stringify(document), draft);
+  info.events[0].name='changed'; info.jsReferences[0].name='changed';
+  assert.equal(JSON.stringify(snapshot), before, '表示結果を書き換えても取得済み結果は変わらない');
+  const html = C.renderDependencyInfo(eventInfoOf(snapshot));
+  assert.match(html, /このイベントを使うJavaScript/); assert.match(html, /登録の記述あり/); assert.match(html, /既存の解析による推定/);
+  assert.match(html, /開いているファイル/); assert.doesNotMatch(html, /このフィールドを使う計算式|[0-9]行目/);
+});
+
+test('イベントもアプリ・環境・鮮度の確認を共用し、未確認の結果を表示しない', () => {
+  const snapshot = snapshotOf();
+  for (const extra of [{appId:'999'}, {environment:'production'}, {stale:true}]) {
+    const info = eventInfoOf(snapshot,extra);
+    assert.notEqual(info.status,'ready'); assert.deepEqual(info.events,[]); assert.deepEqual(info.jsReferences,[]);
+  }
+  for (const mutate of [s=>s.scan.meta.scannedAt='older',s=>s.scan.meta.source='production',s=>s.scan.meta.appId='999',s=>s.deps.meta.appId='999']) {
+    const bad=clone(snapshot); mutate(bad);
+    const info=eventInfoOf(bad); assert.equal(info.status,'unavailable'); assert.deepEqual(info.events,[]);
+  }
+  const failed = C.createDependencySnapshot(baseOf(), () => { throw Error('scan failed'); });
+  assert.equal(eventInfoOf(failed).status,'unavailable');
+});
+
+test('イベントの参照元も本文の取得・登録元・同名の曖昧さを確認する', () => {
+  const base=baseOf();
+  base.files.push({env:'preview',target:'desktop',kind:'js',type:'URL',name:'remote.js',sourceAvailable:false});
+  base.files.push({env:'production',target:'desktop',kind:'js',type:'FILE',name:'wrong.js',sourceAvailable:true,text:source('memo')});
+  const snapshot=snapshotOf(base);
+  snapshot.scan.files.find(file=>file.name==='other.js').text='different source';
+  snapshot.scan.files.push(clone(snapshot.scan.files.find(file=>file.target==='mobile')));
+  const info=eventInfoOf(snapshot);
+  assert.equal(info.status,'ready'); assert.deepEqual(info.jsReferences.map(ref=>ref.target+':'+ref.name),['desktop:lock.js']);
+  assert.equal(info.unavailableFiles.length,4);
+  assert.match(C.renderDependencyInfo(info),/URL指定の本文は未確認|同じ環境の本文か確認できません/);
+  const changed = documentOf({fileKey:'changed',registeredText:'changed',text:'KEEP DRAFT'});
+  const different = eventInfoOf(snapshot,{document:changed});
+  assert.equal(different.status,'ready'); assert.ok(different.documentNotice); assert.equal(changed.text,'KEEP DRAFT');
+});
+
+test('イベント選択は既存の完全一致だけを使い、式・部分一致や未確認のイベントを補わない', () => {
+  const snapshot=snapshotOf();
+  for(const eventName of ['edit.show',' app.record.edit.show ',"'app.record.edit.show'",'mobile.app.record.edit.show','app.record.edit']) {
+    const info=eventInfoOf(snapshot,{eventName}); assert.equal(info.status,'unresolved'); assert.equal(info.event,null); assert.deepEqual(info.jsReferences,[]);
+  }
+  const empty=eventInfoOf(snapshot,{eventName:''});
+  assert.equal(empty.status,'select-event'); assert.deepEqual(empty.events,[{name:'app.record.edit.show'}]);
+  const absent=clone(snapshot); absent.scan.fileEvents={};
+  const noEvent=eventInfoOf(absent); assert.equal(noEvent.status,'unresolved'); assert.deepEqual(noEvent.events,[]);
+});
+
+test('イベント名・ファイル名をエスケープし、実行と行番号は保証しない', () => {
+  const info=eventInfoOf(snapshotOf());
+  info.event.name='<img src=x>';
+  info.jsReferences[0].name='<script>alert(1)</script>';
+  const html=C.renderDependencyInfo(info);
+  assert.doesNotMatch(html,/<img|<script/); assert.match(html,/&lt;img/); assert.match(html,/&lt;script&gt;/);
+  assert.match(html,/イベントの行番号は既存の解析結果に含まれていません/);
+  assert.match(html,/実際の動作は未確認/); assert.match(html,/編集中のコードは解析していません/);
+});
