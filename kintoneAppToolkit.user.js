@@ -13378,15 +13378,33 @@
       return plan;
     }
     const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
+    // A selected file is an explicit UI reference, not an interpretation of the request.
+    function consultationTargetOf(value) {
+      if (value == null) return null;
+      if (value.type !== 'FILE' || value.environment !== 'preview' || !['desktop', 'mobile'].includes(value.target) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+      return { name: value.name, target: value.target, type: 'FILE', environment: 'preview',
+        ...(typeof value.fileKey === 'string' ? { fileKey: value.fileKey } : {}), ...(value.revision != null ? { revision: String(value.revision) } : {}) };
+    }
+    function resolveConsultationTarget(target, base) {
+      if (!target) return null;
+      const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
+      if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談するJavaScriptの動作テスト環境を確認できません。');
+      const matches = (base.files || []).filter(f => f.type === 'FILE' && f.name === target.name && f.target === target.target);
+      if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', `相談する「${target.name}」（${target.target === 'mobile' ? 'モバイル' : 'PC'}）を一つに特定できません。ファイルを選び直してください。`);
+      const file = matches[0];
+      if (file.sourceAvailable === false || typeof file.text !== 'string' || !file.fileKey) fail('CONSULTATION_SOURCE_UNAVAILABLE', `相談する「${target.name}」の現在の本文を取得できません。`);
+      return { name: file.name, target: file.target, type: 'FILE', environment: 'preview', fileKey: String(file.fileKey), revision: String(base.revision?.preview ?? '') };
+    }
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
       const set = values => { Object.assign(state, values); emit(); };
       const available = () => !busyPhases.has(state.phase);
-      const message = (role, text, facts = null) => { state.messages.push({ id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }); };
+      const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
+      const requestTargets = () => state.messages.filter(m => m.role === 'user').map(m => ({ text: m.text, target: clone(m.consultationTarget || null) }));
       const invalidate = () => { state.prepared = null; state.rollback = null; };
       async function getBase(reason) {
         const fresh = await loadBase({ reason });
@@ -13475,16 +13493,18 @@
       async function updateSuggestions(reference) {
         if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
         const request = suggestionRequest(state);
-        return request ? send(request, { requireProposalUpdate: true }) : false;
+        return request ? send(request, { requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
       }
-      async function send(text, { documentOnly = false, requireProposalUpdate = false } = {}) {
+      async function send(text, { documentOnly = false, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
+        const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
+        let resolvedTarget = null, userMessage = null;
         const unresolved = state.proposalPending;
         // Suspend actions before any consultation. Restore only when the service
         // explicitly reports no proposal change; failed revisions stay retired.
         const previousWork = clone({ phase: !documentOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
-          adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
+          adopted: state.adopted, adoptedTarget: state.adoptedTarget, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
         const previousBase = base;
         const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
           explanation: m.explanationId ? explanationBody(state.explanations.find(e => e.id === m.explanationId)) : null }));
@@ -13496,7 +13516,11 @@
           rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
             settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
             files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
-        const requestProposal = (signal, fresh) => services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        const requestProposal = (signal, fresh) => {
+          resolvedTarget = resolveConsultationTarget(selectedTarget, fresh);
+          userMessage.consultationTarget = clone(resolvedTarget);
+          return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        };
         if (documentOnly) {
           // The explicit document action cannot revise a plan, even if its AI request fails.
           // Keep normal chat's failed-revision guard separate from this read-only operation.
@@ -13511,7 +13535,7 @@
           };
           const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
           cancelDocument = stop;
-          message('user', value);
+          userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
           try {
             await activity('consulting', async (signal, live) => {
               try {
@@ -13537,10 +13561,10 @@
           } finally { if (cancelDocument === stop) cancelDocument = null; }
           return completed;
         }
-        invalidate(); message('user', value);
+        invalidate(); userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-        Object.assign(state, { plan: null, adopted: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
+        Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
@@ -13570,7 +13594,7 @@
           }
           const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
           state.answers = state.answers.filter(a => !rejected.has(a.id));
-          if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.version++; }
+          if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; }
           // Retired question identifiers are never reused within the same conversation.
           state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
           base = fresh; pendingPlanQuestions = [];
@@ -13580,7 +13604,7 @@
       }
       async function adopt() {
         if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
-        invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
+        invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
         return activity('building', async (signal, live) => {
@@ -13588,7 +13612,8 @@
           if (!live()) return;
           base = fresh;
           set({ progress: '変更の計画を作成しています。' });
-          const response = await services.plan({ proposal: clone(state.adopted), goal: state.goal, answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal });
+          const adoptedTarget = resolveConsultationTarget(state.adoptedTarget, fresh);
+          const response = await services.plan({ proposal: clone(state.adopted), consultationTarget: adoptedTarget, requestTargets: requestTargets(), goal: state.goal, answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal });
           if (!live()) return;
           const plan = response?.plan;
           if (!plan || !Array.isArray(plan.steps) || !Array.isArray(plan.customizations || [])) throw new Error('変更の計画を受け取れませんでした。');
@@ -13667,11 +13692,12 @@
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
         send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
+        setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
         showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { set({ explanationId: null }); return true; },
         async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -13740,7 +13766,9 @@
         value: summary });
       return { facts, analyzed: summary.status === 'analyzed' };
     }
-    function factsOf(base, dependencies = { facts: [] }) {
+    const selectedFile = target => target ? { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
+    const fileSubject = target => target ? { type: 'javascript', sourceId: target.target + ':js:' + target.name, name: target.name, target: target.target, customizationType: 'FILE', sourceAvailable: true } : null;
+    function factsOf(base, dependencies = { facts: [] }, requestTargets = []) {
       const data = base.data || {}, facts = [];
       const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
       add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
@@ -13768,6 +13796,8 @@
           { confidence: available ? 'CERTAIN' : 'NOT_ANALYZED' });
       }
       for (const fact of dependencies.facts) facts.push({ ...clone(fact), id: 'E' + (facts.length + 1) });
+      if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していたJavaScriptです。各発言の対象を示す履歴であり、変更の採用や現在の本文を示すものではありません。現在の本文は登録済みファイルの情報を参照してください。',
+        requestTargets.map(request => ({ text: request.text, target: selectedFile(request.target) })));
       if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return facts;
     }
@@ -13781,10 +13811,11 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
+    function proposal({ text, consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
       const dependencies = dependencyContext(base, dependencyTools);
+      const focus = consultationTarget ? { resolution: 'resolved', target: { ...selectedFile(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }, candidates: [] } : { resolution: 'none', target: null, candidates: [] };
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-        focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base, dependencies), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+        focus, facts: factsOf(base, dependencies, requestTargets), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
@@ -13797,10 +13828,11 @@
           label: a.label, answer: a.answer, ...(a.question ? { question: a.question } : {}), ...(a.kind === 'delegated' ? { delegated: true } : {}) };
       });
     }
-    function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }, dependencyTools = null) {
+    function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], version, base }, dependencyTools = null) {
       const dependencies = dependencyContext(base, dependencyTools);
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies), dictionary: dictionaryOf(base),
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets), dictionary: dictionaryOf(base),
         coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
+        ...(consultationTarget ? { subject: fileSubject(consultationTarget) } : {}),
         acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
     }
     function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {
@@ -14282,11 +14314,11 @@
 
     function historyHtml(messages) {
       if (!messages?.length) return '<p class="ktr-empty-chat">変更したいことや、アプリについて知りたいことを教えてください。</p>';
-      return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span><p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
+      return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(m.consultationTarget.name)}（${m.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
     }
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label><textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(state.consultationTarget.name)}（${state.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>送信時に取得する登録済みコードを使います。手元の編集は送信しません。</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -14446,7 +14478,7 @@
       if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
       const controller = options.controller;
       let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false;
-      const expanded = new Set();
+      const expanded = new Set(), displayListeners = new Set();
       let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null;
       function draw(state = controller.getState()) {
         if (disposed) return;
@@ -14471,6 +14503,7 @@
         if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
         if (nextCurrent) nextCurrent.scrollTop = currentTop;
         const nextLayout = host.querySelector?.('.ktr-layout'); if (nextLayout) nextLayout.scrollTop = layoutTop;
+        for (const listener of displayListeners) listener();
         previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
       }
       function updateDraftGuard() {
@@ -14516,6 +14549,7 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
+        if (action === 'clear-consultation-target' && !sending) return controller.setConsultationTarget(null);
         if (action === 'update-suggestions') return send(undefined, undefined, { taskId: Number(target.dataset?.releaseTask), version: Number(target.dataset?.releaseVersion) });
         if (action === 'current') { selectedRunId = null; notice = ''; draw(); return; }
         if (action === 'history') { selectedRunId = id; draw(); return; }
@@ -14577,10 +14611,11 @@
       host.addEventListener('toggle', toggled, true);
       const unsubscribe = controller.subscribe(draw);
       draw();
-      return { render: draw, onVisible() { draw(); }, dispose() { disposed = true; unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+      return { render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { draft = text; input.value = draft; updateDraftGuard(); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
     }
     const styles = `
       .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
+      .ktr-consult-target{padding:8px;border:1px solid var(--ktr-line);border-radius:6px;margin:8px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.ktr-consult-target small{flex-basis:100%;color:var(--ktr-muted)}
       .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:clamp(14px,1.5%,20px);overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-content>.ktr-notice,.ktr-content>.ktr-error,.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-current{border-top:1px solid var(--ktr-line);padding-top:24px;margin-top:24px;scrollbar-gutter:stable}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;gap:6px;flex-wrap:wrap}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
       .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:20px;line-height:1.4;margin:0 0 14px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
       .ktr-header{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
@@ -14602,6 +14637,85 @@
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
     return { create, render, escape: esc, explanationMarkdown };
+  })();
+
+  /* Read-only code comparison from the existing approval preparation. */
+  'use strict';
+  const KTReleaseCustomize = (() => {
+    const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const keyOf = file => JSON.stringify([file.target, file.name, file.changeId]);
+    function comparisonOf(state, selectedRunId = null) {
+      const historical = selectedRunId != null;
+      const run = historical || ['result', 'rollback-confirm', 'rolling-back', 'checking-result'].includes(state.phase)
+        ? (state.runs || []).find(item => item.id === (historical ? selectedRunId : state.resultRunId)) : null;
+      const prepared = historical ? run?.prepared || null : run ? run.prepared : state.prepared;
+      return { run, prepared, files: (prepared?.files?.changes || []).filter(file => ['desktop', 'mobile'].includes(file.target) && typeof file.name === 'string') };
+    }
+    function createComparison(host, { controller, monaco, getSelectedRunId = () => null, subscribeDisplay = null } = {}) {
+      if (!host || !controller || !monaco?.editor) throw new Error('コードの比較に必要な情報がありません。');
+      host.innerHTML = `<section class="ktr-code-comparison" aria-label="AIの修正案と差分"><style>
+        .ktr-code-comparison{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:360px;height:100%;color:var(--kt-text,#253247);background:var(--kt-paper,#fff);font:14px/1.6 system-ui,sans-serif}
+        .ktr-code-comparison h3,.ktr-code-comparison p{margin:0}.ktr-code-comparison header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ktr-code-comparison select{min-width:0;max-width:100%;font:inherit;padding:6px;border:1px solid var(--kt-line,#dbe2ec);background:var(--kt-paper,#fff);color:inherit;border-radius:6px}
+        .ktr-code-comparison [data-comparison-modes]{display:flex;gap:6px;flex-wrap:wrap}.ktr-code-comparison button{font:inherit;padding:6px 10px;border:1px solid var(--kt-line,#dbe2ec);border-radius:6px;background:var(--kt-paper,#fff);color:inherit;cursor:pointer}.ktr-code-comparison button[aria-pressed="true"]{background:var(--kt-soft,#f5f7fb);border-color:var(--kt-accent,#285fbd)}.ktr-code-comparison button:disabled{opacity:.5;cursor:default}.ktr-code-comparison :is(button,select):focus-visible{outline:3px solid #83b6fb;outline-offset:2px}
+        .ktr-code-comparison [data-comparison-note],.ktr-code-comparison [data-comparison-empty]{font-size:12px;color:var(--kt-muted,#58677d)}.ktr-code-comparison [data-comparison-editor]{flex:1;min-height:280px;min-width:0;border:1px solid var(--kt-line,#dbe2ec)}.ktr-code-comparison [hidden]{display:none!important}
+        </style><header><h3>AIの修正案と差分</h3><label>対象ファイル <select data-comparison-file aria-label="比較するファイル"></select></label></header>
+        <div data-comparison-modes role="group" aria-label="コードの表示"><button type="button" data-comparison-mode="before">現在のコード</button><button type="button" data-comparison-mode="after">修正案</button><button type="button" data-comparison-mode="diff">差分</button></div>
+        <p data-comparison-note></p><p data-comparison-empty role="status"></p><div data-comparison-editor></div></section>`;
+      const select = host.querySelector('[data-comparison-file]'), note = host.querySelector('[data-comparison-note]'), empty = host.querySelector('[data-comparison-empty]'), surface = host.querySelector('[data-comparison-editor]');
+      const buttons = [...host.querySelectorAll('[data-comparison-mode]')];
+      let selected = null, mode = 'diff', editor = null, models = [], shown = null, disposed = false;
+      function release() {
+        editor?.dispose(); editor = null;
+        for (const model of models) model.dispose();
+        models = []; shown = null;
+      }
+      function render(state = controller.getState()) {
+        if (disposed) return;
+        const { run, prepared, files } = comparisonOf(state, getSelectedRunId());
+        if (!files.some(file => keyOf(file) === selected)) selected = files.length ? keyOf(files[0]) : null;
+        const options = files.map(file => `<option value="${escape(keyOf(file))}">${escape((file.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + file.name)}</option>`).join('');
+        if (select.innerHTML !== options) select.innerHTML = options;
+        select.disabled = !files.length; select.value = selected || '';
+        const file = files.find(item => keyOf(item) === selected);
+        const before = file?.kind === 'ADD_FILE' ? '' : file?.currentSource;
+        const after = file?.content;
+        const complete = typeof before === 'string' && typeof after === 'string';
+        buttons.forEach(button => { button.disabled = !complete; button.setAttribute('aria-pressed', String(button.dataset.comparisonMode === mode)); });
+        buttons.find(button => button.dataset.comparisonMode === 'before').textContent = run ? '反映前のコード' : '現在のコード';
+        buttons.find(button => button.dataset.comparisonMode === 'after').textContent = run ? '反映に使用した案' : '修正案';
+        empty.hidden = complete; surface.hidden = !complete;
+        if (!complete) {
+          note.textContent = '';
+          empty.textContent = file ? '変更前後のコードがそろっていないため、まだ比較できません。反映前の確認結果を確認してください。'
+            : ['consulting', 'building', 'preparing', 'incomplete', 'blocked'].includes(state.phase)
+              ? '修正案の作成・確認が完了していません。変更前後のコードがそろうと、ここに表示します。'
+              : 'AIに相談し、案を作成すると、ここでコードと差分を確認できます。';
+          release(); return;
+        }
+        const stateNote = run ? 'この反映の記録に保存された変更前と修正案です。現在の登録内容を取り直した表示ではありません。'
+          : prepared.ok ? '反映前の確認に使用しているコードです。確認後の登録は、相談欄の「動作テスト環境に反映」から行います。'
+            : '反映前の確認は完了していません。この比較だけでは反映できません。';
+        note.textContent = stateNote + (file.kind === 'ADD_FILE' ? ' 新しいファイルのため、変更前は空欄です。' : file.reason === 'JS_UNCHANGED' ? ' 既存のコードと同じため、このファイルは登録しません。' : '') + ' この表示からコードは編集できません。';
+        if (shown?.key === selected && shown.mode === mode && shown.before === before && shown.after === after) { editor?.layout(); return; }
+        release();
+        const optionsEditor = { readOnly: true, domReadOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, wordWrap: 'on' };
+        if (mode === 'diff') {
+          models = [monaco.editor.createModel(before, 'javascript'), monaco.editor.createModel(after, 'javascript')];
+          editor = monaco.editor.createDiffEditor(surface, { ...optionsEditor, originalEditable: false, renderSideBySide: false, enableSplitViewResizing: false, diffWordWrap: 'on' });
+          editor.setModel({ original: models[0], modified: models[1] });
+        } else {
+          models = [monaco.editor.createModel(mode === 'before' ? before : after, 'javascript')];
+          editor = monaco.editor.create(surface, { ...optionsEditor, model: models[0] });
+        }
+        shown = { key: selected, mode, before, after };
+      }
+      const change = () => { selected = select.value; render(); };
+      const click = event => { const button = event.target?.closest?.('[data-comparison-mode]'); if (!button || !buttons.includes(button) || button.disabled) return; mode = button.dataset.comparisonMode; render(); };
+      select.addEventListener('change', change); host.addEventListener('click', click);
+      const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
+      return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
+    }
+    return { createComparison, comparisonOf };
   })();
 
   /* Browser composition. Authentication, limits and preview executors are reused;
@@ -14946,7 +15060,18 @@
     return { controller, view, capability: () => capability, refreshCapability,
       onVisible() { view.onVisible(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
       invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
-      consult(seed) { if (!controller.newTask()) return { ok: false, message: '処理が終わってから相談してください。' }; const input = host.querySelector('#kt-release-input'); if (input) { input.value = '「' + (seed?.name || seed?.subject?.name || 'このJavaScript') + '」について相談したいです。'; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus(); } return { ok: true }; },
+      // Move the existing DOM and view, never recreate a session or reset its draft.
+      showIn(destination, { customize = false } = {}) {
+        if (!destination) return false;
+        if (host.parentElement !== destination) destination.appendChild(host);
+        host.classList.toggle('ktr-in-customize', customize);
+        view.onVisible(); return true;
+      },
+      consult(seed) {
+        if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+        view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
+        return { ok: true };
+      },
       dispose() { flow?.cancel(); controller.cancel(); window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose(); }
     };
   }
@@ -19430,7 +19555,7 @@
     // タブを開いたときに対象一覧・ヘッダーを最新の解析結果へ（Scanner / 他アプリ走査は後から入る）
     // Phase 21: タブを開いたとき、1 分より古い作業基準（動作テスト環境）は取り直す（別の画面で変えた設定も拾う）
     //   設定取得の関所: 最小化中のタブの切り替え（プログラムからの switchTab）では取らず、開発支援を表示したまま展開したときにも同じことをする
-    try { root.ktTabs?.onSwitch?.((id) => { if (id === 'ai' && panel && aiVisible()) panel.onVisible(); }); } catch (e) { }
+    try { root.ktTabs?.onSwitch?.((id) => { if (!panel) return; if (id === 'ai') panel.showIn(view); else if (id === 'customize') root.ktCustomize?.onVisible?.(); if (['ai', 'customize'].includes(id) && aiVisible()) panel.onVisible(); }); } catch (e) { }
     try { KTFetchGate.of(root).onChange((open) => { if (open && panel && aiVisible()) panel.onVisible(); }); } catch (e) { }
     return panel;
 
@@ -19438,13 +19563,13 @@
     function aiVisible() {
       const p = root && root.ktPanel;
       if (!p || typeof p.visibleTab !== 'function') return true;
-      return KTFetchGate.of(root).isOpen() && p.visibleTab() === 'ai';
+      return KTFetchGate.of(root).isOpen() && ['ai', 'customize'].includes(p.visibleTab());
     }
   }
 
   // ----------------------------
   // [Feature] Customize
-  // 現在登録されている JS / CSS を確認・解析する場所（Phase 18: Fact 側。設計・生成・修正は AI タブへ「AIに相談」で遷移）。
+  // 登録済みコード・手元の編集と、AI Assistantと共有する相談・修正案・差分を表示する。
   // JSEdit 互換の編集・保存＋デプロイは従来どおり（利用者の明示操作だけ）。GitHub の Snippets 一覧は廃止（Pattern Library として AI 側へ）。
   // ----------------------------
   //   設定取得の関所（パネルの表示状態）: autoLoad: false なら組み立てだけ行い、一覧（カスタマイズ設定）はタブを開いたときに ensureLoaded で取る
@@ -19482,19 +19607,47 @@
     // === レイアウト ===
     //   ★高さは vh 固定ではなく、親View（.kt-fill-view）→ .kt-split-layout → 各カラム → flex:1 の連鎖で追従させる。
     view.innerHTML = `
+      <style>
+        #kt-customize-workspace{display:grid;grid-template-columns:minmax(0,1fr);height:100%;min-height:0;gap:16px;overflow:auto;container:kt-customize / inline-size}
+        #kt-customize-ai-slot{min-width:0;min-height:0;display:none}
+        #kt-customize-code-pane{display:flex;flex-direction:column;min-width:0;min-height:0;gap:8px}
+        #kt-customize-workspace.has-assistant{grid-template-columns:minmax(360px,1fr) minmax(440px,1.15fr)}
+        #kt-customize-workspace.has-assistant #kt-customize-ai-slot{display:block}
+        #kt-customize-workspace.has-assistant #kt-customize{flex-direction:column-reverse;gap:12px;flex:1;min-height:0;overflow:auto}
+        #kt-customize-workspace.has-assistant .kt-customize-files-pane{flex:0 0 auto!important;max-height:200px;min-height:90px;min-width:0}
+        #kt-customize-workspace.has-assistant .kt-customize-editor-pane{flex:1!important;min-width:0;min-height:250px}
+        #kt-customize-workspace [hidden]{display:none!important}
+        #kt-customize-workspace .ktr-in-customize .ktr-layout{display:flex;flex-direction:column;overflow:auto}
+        #kt-customize-workspace .ktr-in-customize .ktr-conversation{flex:0 0 auto;overflow:visible}
+        #kt-customize-workspace .ktr-in-customize .ktr-chat-log{min-height:140px;max-height:32dvh}
+        #kt-customize-workspace .ktr-in-customize .ktr-current{border-left:0;border-top:1px solid var(--kt-line);padding:16px 0 0;margin-top:16px;overflow:visible;flex:none}
+        #kt-customize-comparison{flex:1;min-height:280px;min-width:0}
+        .kt-customize-modes{display:flex;gap:8px;flex-wrap:wrap}.kt-customize-modes button[aria-pressed="true"]{color:var(--kt-accent);border-color:var(--kt-accent);font-weight:600}
+        #kt-customize-drafts{max-width:100%;min-width:0;width:100%}
+        #kt-customize-manual-actions{font-size:12px;padding:6px;border:1px solid var(--kt-line);border-radius:6px}
+        #kt-customize-manual-actions p{margin:6px 0}
+        @media(max-width:1000px){#kt-customize-workspace.has-assistant{display:flex;flex-direction:column;overflow:auto}#kt-customize-ai-slot{flex:none;height:650px}#kt-customize-code-pane{flex:none;min-height:600px}}
+      </style>
+      <div id="kt-customize-workspace">
+      <div id="kt-customize-ai-slot"></div>
+      <section id="kt-customize-code-pane" aria-label="コードと差分">
+      <nav class="kt-customize-modes" aria-label="コードの表示"><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
+      <div id="kt-customize-comparison" hidden></div>
       <div id="kt-customize" class="kt-split-layout">
         <!-- 左：エディタ -->
-        <div class="kt-split-col kt-flex-column" style="flex:2; --kt-col-min:380px; gap:10px;">
+        <div class="kt-split-col kt-flex-column kt-customize-editor-pane" style="flex:2; --kt-col-min:380px; gap:10px;">
           <div class="kt-flex-fixed" style="display:flex; align-items:center; gap:10px; justify-content:space-between;">
             <div style="display:flex; align-items:center; gap:8px;">
               <button id="kt-customize-download" class="btn" disabled style="height:32px; padding:0 10px;">⬇ ローカルに保存</button>
-              <button id="kt-customize-upload" class="btn" disabled style="height:32px; padding:0 10px;">⬆ アプリに反映</button>
+
               <button id="kt-customize-new" class="btn" style="height:32px; padding:0 10px;">＋ 新規作成</button>
             </div>
             <span id="kt-customize-meta"
                   style="opacity:.75; max-width:55%; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; text-align:right;"></span>
           </div>
 
+          <label style="font-size:12px">手元に保持しているコード<select id="kt-customize-drafts" class="btn"><option value="">ファイルを選択してください</option></select></label>
+          <p style="font-size:12px;margin:0" id="kt-customize-editor-note">手元の編集はAIに送信しません。相談には送信時に取得する動作テスト環境のコードを使います。</p>
           <div id="kt-customize-editor" class="kt-flex-fill"
             style="
               border:1px solid ${BD};
@@ -19502,18 +19655,19 @@
               background:${isDark ? '#0f0f0f' : '#fafafa'};
             ">
           </div>
+          <details id="kt-customize-manual-actions"><summary>手編集の反映操作</summary><p>ここでは手元で編集したコードを運用環境に反映します。AIの修正案は、相談欄の反映前確認から動作テスト環境に反映してください。</p><button id="kt-customize-upload" class="btn" disabled>手編集のコードを運用環境に反映</button></details>
         </div>
 
         <!-- 右：ファイル一覧（登録済みの JavaScript / CSS。PC / モバイル） -->
-        <div class="kt-split-col kt-flex-column" style="flex:1; --kt-col-min:240px; gap:10px;">
+        <div class="kt-split-col kt-flex-column kt-customize-files-pane" style="flex:1; --kt-col-min:240px; gap:10px;">
           <div class="kt-flex-fixed" style="display:flex; align-items:center; justify-content:space-between;
             padding:6px 0; background:${isDark ? '#1b1b1b' : '#fff'};">
-            <div style="font-weight:600; padding-left:12px; margin:6px 0;">Files</div>
+            <div style="font-weight:600; padding-left:12px; margin:6px 0;">登録済みファイル</div>
             <select id="kt-customize-source" class="btn" style="padding:3px 4px; height:32px;">
-              <option value="JavaScript">JavaScript (desktop)</option>
-              <option value="css">CSS (desktop)</option>
-              <option value="JavaScriptMobile">JavaScript (mobile)</option>
-              <option value="cssMobile">CSS (mobile)</option>
+              <option value="JavaScript">JavaScript（PC）</option>
+              <option value="css">CSS（PC）</option>
+              <option value="JavaScriptMobile">JavaScript（モバイル）</option>
+              <option value="cssMobile">CSS（モバイル）</option>
             </select>
           </div>
 
@@ -19533,6 +19687,7 @@
           <div id="kt-customize-overview" class="kt-flex-fixed"></div>
         </div>
       </div>
+      </section></div>
     `;
 
     // === 要素参照（このタブ内にスコープ） ===
@@ -19571,7 +19726,7 @@
 
     // === ヘルパ ===
     const apiUrl = (p) => kintone.api.url(p, true);
-    const CURRENT = { target: 'desktop', name: null };
+    const CURRENT = { target: 'desktop', name: null, kind: 'js' };
 
     // src値 → kind/js|css, target/desktop|mobile のマッピング
     const SRC = {
@@ -19651,42 +19806,38 @@
         <div style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(title || name)}">${escapeHtml(name)}${note ? `<span style="margin-left:6px; font-size:10px; color:#b26a00; border:1px solid #b26a00; border-radius:8px; padding:0 5px;">${escapeHtml(note)}</span>` : ''}</div>
         <div style="opacity:.6;font-size:11px">${sz ? sz.toLocaleString() + ' Bytes' : ''}</div>
       `;
-      // Phase 17: 「AIに相談」（JavaScript だけ。AI タブへ切り替えて、このファイルを対象にした会話を始める）
+      // JavaScriptの相談対象を選ぶ。AIは送信時だけ呼び、会話は作り直さない。
       if (typeof onConsult === 'function') {
         const b = document.createElement('button');
-        b.type = 'button'; b.className = 'btn kt-customize-consult'; b.textContent = 'AIに相談'; b.title = 'この JavaScript について開発支援タブで相談する（ファイルを選び直す必要はありません）';
+        b.type = 'button'; b.className = 'btn kt-customize-consult'; b.textContent = 'AIに相談'; b.title = 'このタブでコードを見ながらAIと相談する';
         b.style.cssText = 'height:24px; padding:0 8px; font-size:11px; border-color:#6a1b9a; flex:none;';
         b.addEventListener('click', async (ev) => { ev.stopPropagation(); ev.preventDefault(); b.disabled = true; try { await onConsult(); } finally { b.disabled = false; } });
         el.appendChild(b);
       }
       return el;
     }
-    // ---- Phase 17: 相談（JsConsultationSeed を作って AI タブへ）----
-    let lastCustomize = null;   // 直近に取得したカスタマイズ設定（{ source, data }）
-    const sameOrigin = (u) => { try { return new URL(u, location.href).origin === location.origin; } catch (e) { return false; } };
+    // Selecting a file is local. Resolve its registered body from the fresh AI base at send time.
+    let lastCustomize = null;
     async function consultFile(entry, target) {
       if (typeof consult !== 'function') return null;
-      const inputs = typeof getInputs === 'function' ? (getInputs() || {}) : {};
-      const file = entry.type === 'URL'
-        ? { name: String(entry.url || '').split('/').pop() || String(entry.url || ''), target, type: 'URL', url: entry.url }
-        : { name: entry.file?.name, target, type: 'FILE', fileKey: entry.file?.fileKey, size: entry.file?.size };
-      let sourceText = null;
-      try {
-        if (file.type === 'FILE' && file.fileKey) sourceText = await downloadByKey(file.fileKey);
-        else if (file.type === 'URL' && sameOrigin(file.url)) { const res = await fetch(file.url, { credentials: 'include' }); if (res.ok) sourceText = await res.text(); }
-      } catch (e) { sourceText = null; }
-      const seed = KTContext.buildConsultationSeed({ data: inputs.data || DATA, deps: inputs.deps || null, scan: inputs.scan || null, file, sourceText, appName: DATA?.settings?.name ?? null });
-      // 動作テスト環境のカスタマイズ設定の revision（登録時の stale 判定の起点）
-      try { const cz = lastCustomize || await getCustomize(appId); seed.customizeRevision = cz?.data?.revision ?? seed.customizeRevision; seed.customizeSource = cz?.source ?? null; } catch (e) { }
-      return consult(seed);
+      if (entry.type !== 'FILE' || lastCustomize?.source !== 'preview') {
+        $meta.textContent = '相談するには、動作テスト環境に登録されたJavaScriptファイルを選んでください。';
+        return { ok: false };
+      }
+      const result = await consult({ name: entry.file.name, target, type: 'FILE', fileKey: entry.file.fileKey,
+        environment: 'preview', revision: lastCustomize.data?.revision ?? null });
+      if (result?.ok === false) $meta.textContent = result.message || '相談の対象を選べませんでした。';
+      else { await selectFile(entry, { kind: 'js', target }); onVisible(); if (assistant?.controller.getState().prepared) setCodeMode('comparison'); }
+      return result;
     }
     /** §32: 動作テスト環境（preview）と運用環境のカスタマイズ設定の差（名前 / URL / 順序。fileKey は環境で異なるので比べない） */
     //   prodP（省略可）: 一覧の取得で取った運用環境のカスタマイズ設定（同じ設定を 2 回取らない）
-    async function renderEnvDiff(previewData, source, prodP = null) {
+    async function renderEnvDiff(previewData, source, prodP = null, isCurrent = () => true) {
       if (!$env) return;
       if (source !== 'preview' || typeof KTJsExecutor === 'undefined') { $env.style.display = 'none'; return; }
       try {
         const prod = prodP ? await prodP : (await KTApi.getCustomize(appId, { preferPreview: false })).data;
+        if (!isCurrent()) return;
         const diffs = KTJsExecutor.diffSnapshots(KTJsExecutor.snapshotOf(prod), KTJsExecutor.snapshotOf(previewData), { compareFileKey: false });
         const sizeDiff = [];
         for (const t of ['desktop', 'mobile']) for (const k of ['js', 'css']) {
@@ -19696,11 +19847,65 @@
         if (!diffs.length && !sizeDiff.length) { $env.style.display = ''; $env.innerHTML = '動作テスト環境のカスタマイズ設定は運用環境と同じです。'; return; }
         $env.style.display = '';
         $env.innerHTML = `<span style="color:#b26a00;">動作テスト環境に未反映の変更があります（運用環境との差）:</span> ${[...diffs.map(d => `${escapeHtml(d.where)}: ${escapeHtml(String(d.before ?? '（なし）'))} → ${escapeHtml(String(d.after ?? '（なし）'))}`), ...sizeDiff.map(escapeHtml)].slice(0, 6).join('　')}${diffs.length + sizeDiff.length > 6 ? ' …' : ''}`;
-      } catch (e) { $env.style.display = 'none'; }
+      } catch (e) { if (isCurrent()) $env.style.display = 'none'; }
     }
 
     // === リスト描画（登録済みの JS / CSS） ===
-    let currentFileName = null;
+    let currentFileName = null, activeDocument = null, fileReadSeq = 0, listRequestSeq = 0;
+    const drafts = new Map();
+    const draftKey = d => JSON.stringify([d.environment, d.target, d.kind, d.name]);
+    const $drafts = $('#kt-customize-drafts');
+    function retainEditor() {
+      if (!activeDocument) return;
+      drafts.set(draftKey(activeDocument), { ...activeDocument, text: editor.getValue(), viewState: editor.saveViewState?.() });
+    }
+    function renderDrafts() {
+      $drafts.innerHTML = '<option value="">ファイルを選択してください</option>';
+      for (const [key, d] of drafts) {
+        const option = document.createElement('option'); option.value = key;
+        option.textContent = (d.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + d.name + (d.isNew ? '（新規・未登録）' : '（' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境') + '）');
+        $drafts.appendChild(option);
+      }
+      $drafts.value = activeDocument ? draftKey(activeDocument) : '';
+    }
+    function displayDocument(d) {
+      retainEditor(); activeDocument = d; CURRENT.target = d.target; CURRENT.kind = d.kind; CURRENT.name = d.name; currentFileName = d.name;
+      editor.setValue(d.text); setEditorLanguage(d.kind === 'css' ? 'css' : 'javascript');
+      if (d.viewState) editor.restoreViewState?.(d.viewState);
+      drafts.set(draftKey(d), d); renderDrafts();
+      $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）・取得時のコード／手元の編集';
+      $download.disabled = false; $upload.disabled = false;
+    }
+    async function selectFile(entry, conf) {
+      retainEditor(); const ticket = ++fileReadSeq;
+      const d = { name: entry.file.name, target: conf.target, kind: conf.kind, environment: lastCustomize?.source || 'preview', fileKey: entry.file.fileKey };
+      try {
+        const saved = drafts.get(draftKey(d));
+        const text = saved ? saved.text : await downloadByKey(entry.file.fileKey);
+        if (ticket !== fileReadSeq) return;
+        // Retain edits made while another file was loading before replacing the editor.
+        displayDocument(saved || { ...d, text }); setCodeMode('editor');
+      } catch (error) { if (ticket === fileReadSeq) $meta.textContent = 'コードを読み込めませんでした。手元の編集は残しています。'; }
+    }
+    $drafts.addEventListener('change', () => { const next = drafts.get($drafts.value); if (!next) return; ++fileReadSeq; displayDocument(next); });
+    let assistant = null, comparison = null, codeMode = 'editor';
+    function setCodeMode(mode) {
+      codeMode = mode; $('#kt-customize').hidden = mode !== 'editor'; $('#kt-customize-comparison').hidden = mode !== 'comparison';
+      view.querySelectorAll('[data-customize-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.customizeMode === mode)));
+      if (mode === 'editor') editor.layout?.(); else comparison?.layout();
+    }
+    view.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode)));
+    function onVisible() {
+      if (assistant) assistant.showIn($('#kt-customize-ai-slot'), { customize: true });
+      editor.layout?.(); comparison?.layout();
+    }
+    function attachAssistant(panel) {
+      if (!panel || assistant === panel) return;
+      comparison?.dispose(); assistant = panel;
+      $('#kt-customize-workspace').classList.add('has-assistant');
+      comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay });
+      if (root.ktPanel?.visibleTab?.() === 'customize') onVisible();
+    }
     const rowsByName = new Map();   // Phase 18 §30: AI タブから「Customize で確認」→ 該当ファイルの行を示す
     // 設定取得の関所: 取得済みの一覧の世代（markStale で進む）・取得中の Promise・途中で止めた取得の続き（取れた preview の設定）
     let listGen = 0, listLoadedGen = -1, listLoading = null, heldList = null;
@@ -19715,14 +19920,13 @@
       try { return await run; } finally { if (listLoading === run) listLoading = null; }
     }
     async function loadList(live) {
-      const gen = listGen;
+      const gen = listGen, request = ++listRequestSeq; ++fileReadSeq;
       const src = $sourceSel.value;
       const conf = SRC[src] || { kind: 'js', target: 'desktop' };
-      CURRENT.target = conf.target; // ← 重要：選択に合わせて更新
+      // Changing the list never changes the editor's file identity or unsaved text.
       $list.innerHTML = '<div style="padding:12px; opacity:.7">Loading...</div>';
       $overview.style.display = 'none'; $overview.innerHTML = '';
-      $download.disabled = false; $upload.disabled = false;
-      CURRENT.name = null;
+      $download.disabled = !activeDocument; $upload.disabled = !activeDocument;
       rowsByName.clear();
 
       // --- Customize (App) list: desktop/mobile × js/css 共通 ---
@@ -19733,12 +19937,14 @@
         try { got = live ? await KTApi.getCustomize(appId, { shouldContinue: live }) : await getCustomize(appId); }
         catch (e) { if (!KTFetchGate.isPaused(e)) throw e; }
       }
+      if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       if (live && (!got || !live())) {
         // 途中で最小化した: 後続（運用環境の設定）は取らない。取れた設定は残し、次にタブを開いたときに続きから
         if (got) heldList = { got, gen };
         $list.innerHTML = '<div style="padding:12px; opacity:.7">パネルを展開してタブを開くと、一覧の続きを読み込みます。</div>';
         return { paused: true };
       }
+      if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       const { data, source } = got;
       lastCustomize = got;
       listLoadedGen = gen;
@@ -19750,7 +19956,7 @@
       // 運用環境のカスタマイズ設定は 1 回だけ取り、環境差分と「動作テスト環境のみ」の印の両方に使う（以前は同じ設定を 2 回取っていた）
       const prodP = source === 'preview' ? KTApi.getCustomize(appId, { preferPreview: false }).then(r => r.data) : null;
       if (prodP) prodP.catch(() => { });
-      renderEnvDiff(data, source, prodP);
+      renderEnvDiff(data, source, prodP, () => request === listRequestSeq && gen === listGen && src === $sourceSel.value);
 
       $list.innerHTML = '';
       if (!files.length && !urls.length) {
@@ -19758,13 +19964,14 @@
         return;
       }
 
-      setEditorLanguage(conf.kind === 'js' ? 'javascript' : 'css');
+      // The editor retains its own language while the file list changes.
       const badge = conf.target === 'mobile'
         ? (conf.kind === 'js' ? 'mJS' : 'mCSS')
         : (conf.kind === 'js' ? 'JS' : 'CSS');
       // 動作テスト環境だけにあるファイル（運用環境に無い名前）に印を付ける（§32）
       let prodNames = null;
       if (prodP) { try { const prod = await prodP; const pb = conf.target === 'mobile' ? (prod.mobile || {}) : (prod.desktop || {}); prodNames = new Set(((conf.kind === 'js' ? pb.js : pb.css) || []).map(x => (x.type === 'URL' ? x.url : x.file?.name))); } catch (e) { prodNames = null; } }
+      if (request !== listRequestSeq || gen !== listGen || src !== $sourceSel.value) return { stale: true };
       const noteOf = (name) => (prodNames && !prodNames.has(name) ? '動作テスト環境のみ' : '');
 
       // 一覧は登録順（FILE と URL を混ぜて kintone の順序どおり）
@@ -19779,15 +19986,7 @@
         }
         const f = entry;
         const row = fileRow({ name: f.file.name, size: f.file.size, badge, note: noteOf(f.file.name), onConsult: (conf.kind === 'js' && typeof consult === 'function') ? () => consultFile(f, conf.target) : null });
-        row.addEventListener('click', async () => {
-          const code = await downloadByKey(f.file.fileKey);
-          editor.setValue(code);
-          currentFileName = f.file.name;   // 上書き先は常にこれ
-          CURRENT.target = conf.target;    // 念のためクリック時にも保持
-          $meta.textContent = `${i}: ${f.file.name} (${conf.target})`;
-          $download.disabled = false;
-          $upload.disabled = false;        // 保存+デプロイ可
-        }, { passive: true });
+        row.addEventListener('click', () => { selectFile(f, conf); });
         rowsByName.set(f.file.name, row);
         $list.appendChild(row);
       });
@@ -19813,7 +20012,7 @@
       return refreshList(typeof live === 'function' ? { live } : null);
     }
     /** ほかの場所で設定を変えた（開発支援の反映・登録など）: 取得済みの一覧を古いとする（取得はしない。次にタブを開いたときに取り直す） */
-    function markStale() { listGen += 1; heldList = null; }
+    function markStale() { listGen += 1; fileReadSeq += 1; heldList = null; }
 
     // === 保存+デプロイ（ワンボタン） ===
     // === 新規ファイルダイアログ ===
@@ -19900,17 +20099,9 @@
       if (conf.kind === 'js' && !/\.js$/i.test(name)) name += '.js';
       if (conf.kind === 'css' && !/\.css$/i.test(name)) name += '.css';
 
-      CURRENT.target = conf.target;
-      currentFileName = name;
-
-      // エディタを初期化
-      setEditorLanguage(conf.kind === 'js' ? 'javascript' : 'css');
-      editor.setValue('');
-      editor.focus();
-
-      $meta.textContent = `新規: ${name} (${conf.target})`;
-      $upload.disabled = false;   // すぐ保存＆デプロイできる
-      $download.disabled = false; // ローカル保存も可能
+      retainEditor(); ++fileReadSeq;
+      const d = { name, target: conf.target, kind: conf.kind, environment: 'preview', text: '', isNew: true };
+      displayDocument(drafts.get(draftKey(d)) || d); setCodeMode('editor'); editor.focus();
     });
 
     function openUploadDialog(defaultName, fileType) {
@@ -19977,6 +20168,7 @@
       });
     }
     $upload.addEventListener('click', async () => {
+      if (codeMode !== 'editor') return;
       try {
         Spinner.show();
         // ✅ 上書き先は必ず currentFileName を使う
@@ -20032,7 +20224,7 @@
     // 初期（autoLoad: false のときは、タブを開いたときに ensureLoaded で取る）
     if (autoLoad) await refreshList();
     else $list.innerHTML = '<div style="padding:12px; opacity:.7">タブを開くと一覧を読み込みます。</div>';
-    return { show, refresh: refreshList, ensureLoaded, markStale };
+    return { show, refresh: refreshList, ensureLoaded, markStale, attachAssistant, onVisible };
   }
 
 
@@ -21903,16 +22095,15 @@
         'fieldAcl',
       ]));
       if (first) {
-        // Phase 17: Customize タブ「AIに相談」→ AI タブで、そのファイルを対象にした会話を始める（ファイルを選び直させない）
-        // Phase 18: Customize は「登録済みコードを確認・解析する場所」、AI は「次に何をするか考え、作る場所」。Templates タブは廃止
+        // CustomizeとAI Assistantは同じ会話・採用・反映の一組を使い、表示先だけを切り替える。
         //   設定取得の関所: 組み立てだけ行い、一覧（カスタマイズ設定）は Customize タブを開いたときに取る
         root.ktCustomize = null;
         customizeReady = renderCustomize(root, DATA, appId, {
-          consult: (seed) => { let r = null; try { r = root.ktAi?.consult?.(seed) ?? null; } catch (e) { console.error('[Toolkit AI] 相談の開始に失敗しました', e); } try { root.ktTabs?.switchTab?.('ai'); } catch (e) { } return r; },
+          consult: (seed) => root.ktAi?.consult?.(seed) || { ok: false, message: 'AIの相談画面を準備できていません。' },
           getInputs: () => ({ data: DATA, deps: DEPS, scan: KTScan.getLastPayload() }),
           autoLoad: false,
           onSettingsChanged: (info) => settingsChanged({ ...info, source: 'customize' }),
-        }).then((c) => { root.ktCustomize = c || null; return root.ktCustomize; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); return null; });
+        }).then((c) => { root.ktCustomize = c || null; c?.attachAssistant(root.ktAi); return root.ktCustomize; }).catch((e) => { console.error('[Toolkit] Customize タブの初期化に失敗しました', e); return null; });
         // AI タブ（Phase 15: AI 開発ワークスペース。旧 Templates にあった AI 関連機能の移行先）
         root.ktAi = renderAiWorkspace(root, DATA, appId, {
           // Phase 18 §30: AI の結果カードから Customize タブで登録内容を確認する（登録済みの JS を一覧で選ぶ）

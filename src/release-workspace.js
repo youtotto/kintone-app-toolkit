@@ -43,15 +43,33 @@ const KTReleaseWorkspace = (() => {
     return plan;
   }
   const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
+  // A selected file is an explicit UI reference, not an interpretation of the request.
+  function consultationTargetOf(value) {
+    if (value == null) return null;
+    if (value.type !== 'FILE' || value.environment !== 'preview' || !['desktop', 'mobile'].includes(value.target) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+    return { name: value.name, target: value.target, type: 'FILE', environment: 'preview',
+      ...(typeof value.fileKey === 'string' ? { fileKey: value.fileKey } : {}), ...(value.revision != null ? { revision: String(value.revision) } : {}) };
+  }
+  function resolveConsultationTarget(target, base) {
+    if (!target) return null;
+    const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
+    if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談するJavaScriptの動作テスト環境を確認できません。');
+    const matches = (base.files || []).filter(f => f.type === 'FILE' && f.name === target.name && f.target === target.target);
+    if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', `相談する「${target.name}」（${target.target === 'mobile' ? 'モバイル' : 'PC'}）を一つに特定できません。ファイルを選び直してください。`);
+    const file = matches[0];
+    if (file.sourceAvailable === false || typeof file.text !== 'string' || !file.fileKey) fail('CONSULTATION_SOURCE_UNAVAILABLE', `相談する「${target.name}」の現在の本文を取得できません。`);
+    return { name: file.name, target: file.target, type: 'FILE', environment: 'preview', fileKey: String(file.fileKey), revision: String(base.revision?.preview ?? '') };
+  }
   function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
     let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
     const listeners = new Set(onChange ? [onChange] : []);
     const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
     const set = values => { Object.assign(state, values); emit(); };
     const available = () => !busyPhases.has(state.phase);
-    const message = (role, text, facts = null) => { state.messages.push({ id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }); };
+    const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
+    const requestTargets = () => state.messages.filter(m => m.role === 'user').map(m => ({ text: m.text, target: clone(m.consultationTarget || null) }));
     const invalidate = () => { state.prepared = null; state.rollback = null; };
     async function getBase(reason) {
       const fresh = await loadBase({ reason });
@@ -140,16 +158,18 @@ const KTReleaseWorkspace = (() => {
     async function updateSuggestions(reference) {
       if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
       const request = suggestionRequest(state);
-      return request ? send(request, { requireProposalUpdate: true }) : false;
+      return request ? send(request, { requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
-    async function send(text, { documentOnly = false, requireProposalUpdate = false } = {}) {
+    async function send(text, { documentOnly = false, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
+      const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
+      let resolvedTarget = null, userMessage = null;
       const unresolved = state.proposalPending;
       // Suspend actions before any consultation. Restore only when the service
       // explicitly reports no proposal change; failed revisions stay retired.
       const previousWork = clone({ phase: !documentOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
-        adopted: state.adopted, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
+        adopted: state.adopted, adoptedTarget: state.adoptedTarget, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
       const previousBase = base;
       const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
         explanation: m.explanationId ? explanationBody(state.explanations.find(e => e.id === m.explanationId)) : null }));
@@ -161,7 +181,11 @@ const KTReleaseWorkspace = (() => {
         rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
           settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
           files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
-      const requestProposal = (signal, fresh) => services.propose({ text: value, discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+      const requestProposal = (signal, fresh) => {
+        resolvedTarget = resolveConsultationTarget(selectedTarget, fresh);
+        userMessage.consultationTarget = clone(resolvedTarget);
+        return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+      };
       if (documentOnly) {
         // The explicit document action cannot revise a plan, even if its AI request fails.
         // Keep normal chat's failed-revision guard separate from this read-only operation.
@@ -176,7 +200,7 @@ const KTReleaseWorkspace = (() => {
         };
         const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
         cancelDocument = stop;
-        message('user', value);
+        userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
         try {
           await activity('consulting', async (signal, live) => {
             try {
@@ -202,10 +226,10 @@ const KTReleaseWorkspace = (() => {
         } finally { if (cancelDocument === stop) cancelDocument = null; }
         return completed;
       }
-      invalidate(); message('user', value);
+      invalidate(); userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
       // Retire the previous plan before a revision starts, including failed requests.
       pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-      Object.assign(state, { plan: null, adopted: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
+      Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
@@ -235,7 +259,7 @@ const KTReleaseWorkspace = (() => {
         }
         const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
         state.answers = state.answers.filter(a => !rejected.has(a.id));
-        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.version++; }
+        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; }
         // Retired question identifiers are never reused within the same conversation.
         state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
         base = fresh; pendingPlanQuestions = [];
@@ -245,7 +269,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function adopt() {
       if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
-      invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.artifacts = [];
+      invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
       // Optional ideas are not adopted by the general create action.
       state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
       return activity('building', async (signal, live) => {
@@ -253,7 +277,8 @@ const KTReleaseWorkspace = (() => {
         if (!live()) return;
         base = fresh;
         set({ progress: '変更の計画を作成しています。' });
-        const response = await services.plan({ proposal: clone(state.adopted), goal: state.goal, answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal });
+        const adoptedTarget = resolveConsultationTarget(state.adoptedTarget, fresh);
+        const response = await services.plan({ proposal: clone(state.adopted), consultationTarget: adoptedTarget, requestTargets: requestTargets(), goal: state.goal, answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal });
         if (!live()) return;
         const plan = response?.plan;
         if (!plan || !Array.isArray(plan.steps) || !Array.isArray(plan.customizations || [])) throw new Error('変更の計画を受け取れませんでした。');
@@ -332,11 +357,12 @@ const KTReleaseWorkspace = (() => {
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
       send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckRollback,
+      setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
       showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
       showChanges() { set({ explanationId: null }); return true; },
       async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
       cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
       cancel() {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';

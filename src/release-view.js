@@ -84,11 +84,11 @@ const KTReleaseView = (() => {
 
   function historyHtml(messages) {
     if (!messages?.length) return '<p class="ktr-empty-chat">変更したいことや、アプリについて知りたいことを教えてください。</p>';
-    return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span><p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
+    return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(m.consultationTarget.name)}（${m.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
   }
   function composer(state, options = {}) {
     const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-    return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label><textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+    return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(state.consultationTarget.name)}（${state.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>送信時に取得する登録済みコードを使います。手元の編集は送信しません。</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
   }
   function proposalHtml(state, options) {
     const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -248,7 +248,7 @@ const KTReleaseView = (() => {
     if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
     const controller = options.controller;
     let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false;
-    const expanded = new Set();
+    const expanded = new Set(), displayListeners = new Set();
     let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null;
     function draw(state = controller.getState()) {
       if (disposed) return;
@@ -273,6 +273,7 @@ const KTReleaseView = (() => {
       if (nextLog) nextLog.scrollTop = followMessages && (state.messages?.length !== previousMessageCount || previousPhase !== state.phase) ? nextLog.scrollHeight : logTop;
       if (nextCurrent) nextCurrent.scrollTop = currentTop;
       const nextLayout = host.querySelector?.('.ktr-layout'); if (nextLayout) nextLayout.scrollTop = layoutTop;
+      for (const listener of displayListeners) listener();
       previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
     }
     function updateDraftGuard() {
@@ -318,6 +319,7 @@ const KTReleaseView = (() => {
       const state = controller.getState();
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
       if (action === 'send') return send();
+      if (action === 'clear-consultation-target' && !sending) return controller.setConsultationTarget(null);
       if (action === 'update-suggestions') return send(undefined, undefined, { taskId: Number(target.dataset?.releaseTask), version: Number(target.dataset?.releaseVersion) });
       if (action === 'current') { selectedRunId = null; notice = ''; draw(); return; }
       if (action === 'history') { selectedRunId = id; draw(); return; }
@@ -379,10 +381,11 @@ const KTReleaseView = (() => {
     host.addEventListener('toggle', toggled, true);
     const unsubscribe = controller.subscribe(draw);
     draw();
-    return { render: draw, onVisible() { draw(); }, dispose() { disposed = true; unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+    return { render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { draft = text; input.value = draft; updateDraftGuard(); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
   }
   const styles = `
     .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
+    .ktr-consult-target{padding:8px;border:1px solid var(--ktr-line);border-radius:6px;margin:8px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.ktr-consult-target small{flex-basis:100%;color:var(--ktr-muted)}
     .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:clamp(14px,1.5%,20px);overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-content>.ktr-notice,.ktr-content>.ktr-error,.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-current{border-top:1px solid var(--ktr-line);padding-top:24px;margin-top:24px;scrollbar-gutter:stable}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;gap:6px;flex-wrap:wrap}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
     .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:20px;line-height:1.4;margin:0 0 14px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
     .ktr-header{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}

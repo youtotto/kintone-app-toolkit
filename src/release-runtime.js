@@ -340,7 +340,18 @@ function mountReleaseWorkspace(host, d) {
   return { controller, view, capability: () => capability, refreshCapability,
     onVisible() { view.onVisible(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
-    consult(seed) { if (!controller.newTask()) return { ok: false, message: '処理が終わってから相談してください。' }; const input = host.querySelector('#kt-release-input'); if (input) { input.value = '「' + (seed?.name || seed?.subject?.name || 'このJavaScript') + '」について相談したいです。'; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus(); } return { ok: true }; },
+    // Move the existing DOM and view, never recreate a session or reset its draft.
+    showIn(destination, { customize = false } = {}) {
+      if (!destination) return false;
+      if (host.parentElement !== destination) destination.appendChild(host);
+      host.classList.toggle('ktr-in-customize', customize);
+      view.onVisible(); return true;
+    },
+    consult(seed) {
+      if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+      view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
+      return { ok: true };
+    },
     dispose() { flow?.cancel(); controller.cancel(); window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose(); }
   };
 }

@@ -52,7 +52,9 @@ const KTReleaseContext = (() => {
       value: summary });
     return { facts, analyzed: summary.status === 'analyzed' };
   }
-  function factsOf(base, dependencies = { facts: [] }) {
+  const selectedFile = target => target ? { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
+  const fileSubject = target => target ? { type: 'javascript', sourceId: target.target + ':js:' + target.name, name: target.name, target: target.target, customizationType: 'FILE', sourceAvailable: true } : null;
+  function factsOf(base, dependencies = { facts: [] }, requestTargets = []) {
     const data = base.data || {}, facts = [];
     const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
     add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
@@ -80,6 +82,8 @@ const KTReleaseContext = (() => {
         { confidence: available ? 'CERTAIN' : 'NOT_ANALYZED' });
     }
     for (const fact of dependencies.facts) facts.push({ ...clone(fact), id: 'E' + (facts.length + 1) });
+    if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していたJavaScriptです。各発言の対象を示す履歴であり、変更の採用や現在の本文を示すものではありません。現在の本文は登録済みファイルの情報を参照してください。',
+      requestTargets.map(request => ({ text: request.text, target: selectedFile(request.target) })));
     if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
     return facts;
   }
@@ -93,10 +97,11 @@ const KTReleaseContext = (() => {
       reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
-  function proposal({ text, previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
+  function proposal({ text, consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
     const dependencies = dependencyContext(base, dependencyTools);
+    const focus = consultationTarget ? { resolution: 'resolved', target: { ...selectedFile(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }, candidates: [] } : { resolution: 'none', target: null, candidates: [] };
     return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-      focus: { resolution: 'none', target: null, candidates: [] }, facts: factsOf(base, dependencies), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+      focus, facts: factsOf(base, dependencies, requestTargets), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
   }
@@ -109,10 +114,11 @@ const KTReleaseContext = (() => {
         label: a.label, answer: a.answer, ...(a.question ? { question: a.question } : {}), ...(a.kind === 'delegated' ? { delegated: true } : {}) };
     });
   }
-  function plan({ proposal: accepted, answers = [], goal, requests = [], version, base }, dependencyTools = null) {
+  function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], version, base }, dependencyTools = null) {
     const dependencies = dependencyContext(base, dependencyTools);
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies), dictionary: dictionaryOf(base),
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets), dictionary: dictionaryOf(base),
       coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
+      ...(consultationTarget ? { subject: fileSubject(consultationTarget) } : {}),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }
   function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {
