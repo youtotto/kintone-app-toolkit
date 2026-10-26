@@ -14806,7 +14806,7 @@
       }
       result.events = [...events].sort().map(name => ({ name }));
       if (result.kind === 'event') {
-        if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名を選択するか、ここでイベントを選んでください。' };
+        if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名にカーソルを置くか、ここでイベントを選んでください。' };
         if (!events.has(eventName)) return { ...result, status: 'unresolved', reason: '選択した文字と一致するイベントを、取得した登録済みコードで確認できません。' };
         result.event = { name: eventName };
       } else {
@@ -20427,12 +20427,29 @@
     }
     function followEditorField() {
       if (!dependencySnapshot || dependencyBusy || activeDocument?.kind !== 'js') return;
-      const model = editor.getModel(), selection = editor.getSelection?.();
+      const model = editor.getModel(), selection = editor.getSelection?.(), position = editor.getPosition?.();
       const selected = selection && !selection.isEmpty?.() ? model?.getValueInRange?.(selection) : '';
-      const word = selected || model?.getWordAtPosition?.(editor.getPosition?.())?.word || '';
-      if (!word) return;
-      if (dependencySnapshot.fields.some(field => field.code === word)) { dependencyCode = word; setDependencyKind('field'); }
-      else if ((dependencyInfo('event').events || []).some(event => event.name === word)) { dependencyEvent = word; setDependencyKind('event'); }
+      const events = dependencyInfo('event').events || [];
+      let event = selected ? events.find(item => item.name === selected) : null;
+      if (!selected && position) {
+        // Locate an existing name under the caret; this does not analyze draft JavaScript.
+        const line = model?.getLineContent?.(position.lineNumber) || '', offset = position.column - 1;
+        event = events.find(item => ["'", '"', '`'].some(quote => {
+          const text = quote + item.name + quote;
+          for (let start = line.indexOf(text); start !== -1; start = line.indexOf(text, start + text.length)) {
+            if (offset > start && offset <= start + item.name.length + 1) return true;
+          }
+          return false;
+        }));
+      }
+      if (event) {
+        if (dependencyKind !== 'event' || dependencyEvent !== event.name) { dependencyEvent = event.name; setDependencyKind('event'); }
+        return;
+      }
+      const word = selected || model?.getWordAtPosition?.(position)?.word || '';
+      if (word && dependencySnapshot.fields.some(field => field.code === word) && (dependencyKind !== 'field' || dependencyCode !== word)) {
+        dependencyCode = word; setDependencyKind('field');
+      }
     }
     function setDependencyKind(kind) {
       if (dependencyKind !== kind) $fieldSearch.value = '';

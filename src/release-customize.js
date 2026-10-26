@@ -155,7 +155,7 @@ const KTReleaseCustomize = (() => {
     }
     result.events = [...events].sort().map(name => ({ name }));
     if (result.kind === 'event') {
-      if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名を選択するか、ここでイベントを選んでください。' };
+      if (typeof eventName !== 'string' || !eventName) return { ...result, status: 'select-event', reason: 'コード内のイベント名にカーソルを置くか、ここでイベントを選んでください。' };
       if (!events.has(eventName)) return { ...result, status: 'unresolved', reason: '選択した文字と一致するイベントを、取得した登録済みコードで確認できません。' };
       result.event = { name: eventName };
     } else {
