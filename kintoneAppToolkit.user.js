@@ -16190,11 +16190,11 @@
           <button id="tab-graphs" class="tab">Graphs</button>
           <button id="tab-notice" class="tab">Notices</button>
           <button id="tab-acl" class="tab">Access Control</button>
+          <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-relations" class="tab">Relations</button>
           <button id="tab-deps" class="tab" title="依存関係グラフ（フィールド・設定・JS・他アプリ）">Deps</button>
           <button id="tab-field-scanner" class="tab">JS Scanner</button>
           <button id="tab-customize" class="tab">Customize</button>
-          <button id="tab-plugins" class="tab">Plugins</button>
           <button id="tab-ai" class="tab" title="AI Assistant（アプリの説明・資料作成・変更の相談と動作テスト環境への反映）">AI Assistant</button>
         </div>
         <div class="actions" style="display:flex;gap:6px;align-items:center;">
@@ -16303,7 +16303,7 @@
     btnVer && btnVer.addEventListener('click', () => window.open(githubURL, '_blank', 'noopener'), { passive: true });
 
     // Phase 15: 'ai' = AI 開発ワークスペース（AI 関連機能の独立タブ）。Phase 18: 'templates' は廃止（Fact = 解析タブ / Build = AI。docs/contracts/22）
-    const TABS = ['health', 'fields', 'views', 'graphs', 'notice', 'acl', 'relations', 'deps', 'field-scanner', 'customize', 'plugins', 'ai'];
+    const TABS = ['health', 'fields', 'views', 'graphs', 'notice', 'acl', 'plugins', 'relations', 'deps', 'field-scanner', 'customize', 'ai'];
     const tabListeners = new Set();
     let activeTab = 'health';   // 表示中のタブ（最初は Health。選んだタブは保存しない）
 
