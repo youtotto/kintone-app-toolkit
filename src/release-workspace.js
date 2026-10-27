@@ -11,8 +11,39 @@ const KTReleaseWorkspace = (() => {
     const bytes = new TextEncoder().encode(text);
     return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2, '0')).join('');
   }
+  // Counts come only from the service. Missing fields are unknown, never zero.
+  const countOf = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  function usageOf(value) {
+    if (!value || typeof value !== 'object') return null;
+    const common = { plan: typeof value.plan === 'string' ? value.plan : '', yyyymm: typeof value.yyyymm === 'string' ? value.yyyymm : '', resetsAt: typeof value.resetsAt === 'string' && Number.isFinite(Date.parse(value.resetsAt)) ? value.resetsAt : null, timeZone: 'Asia/Tokyo' };
+    if (value.version === 2 && value.buckets && typeof value.buckets === 'object') {
+      const buckets = {};
+      for (const key of ['consultation', 'creation']) {
+        const b = value.buckets[key];
+        buckets[key] = b && typeof b === 'object' ? Object.fromEntries(['limit', 'used', 'reserved', 'remaining'].map(k => [k, countOf(b[k])])) : null;
+      }
+      return { version: 2, ...common, buckets };
+    }
+    if (value.version != null && value.version !== 1) return null;
+    const limit = countOf(value.monthlyLimit), used = countOf(value.usedThisMonth), remaining = countOf(value.remainingThisMonth);
+    if (limit == null && used == null && remaining == null) return null;
+    return { version: 1, ...common, monthlyLimit: limit, usedThisMonth: used, remainingThisMonth: remaining ?? (limit != null && used != null ? Math.max(0, limit - used) : null) };
+  }
+  const usageExpired = (usage, now = Date.now()) => !!usage?.resetsAt && Date.parse(usage.resetsAt) <= now;
+  const usageBlocked = (usage, bucket, now) => !usageExpired(usage, now) && (usage?.version === 2 ? usage.buckets?.[bucket]?.remaining === 0 : usage?.version === 1 && usage.remainingThisMonth === 0);
+  const usageReserved = (usage, bucket) => usage?.version === 2 && usage.buckets?.[bucket]?.remaining === 0 && usage.buckets[bucket].used != null && usage.buckets[bucket].limit != null && usage.buckets[bucket].used < usage.buckets[bucket].limit && usage.buckets[bucket].reserved > 0;
+  const quotaErrorDetail = error => error?.details?.error?.detail || error?.detail?.error?.detail || error?.details || error?.detail || {};
+  const isReservedError = error => { const detail = quotaErrorDetail(error); return detail.reason === 'QUOTA_RESERVED' || usageReserved(usageOf(detail.usage), detail.bucket); };
+  const usageResetText = usage => usage?.resetsAt ? new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(usage.resetsAt)) + '（日本時間）' : '未確認';
+  const usagePlanLabel = usage => ({ 'toolkit-light': 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
+  function monthlyLimitText(error) {
+    const detail = quotaErrorDetail(error);
+    const usage = usageOf(detail.usage), label = { consultation: '相談', creation: '作成' }[detail.bucket] || 'AI利用';
+    if (isReservedError(error)) return `${label}回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+    return `今月の${label}回数の上限に達しました。${usage?.resetsAt ? '回数の更新は' + usageResetText(usage) + 'です。' : '［接続］で回数の更新日を確認してください。'}会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+  }
   const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
-  const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
+  const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
   const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
   const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
   const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
@@ -31,7 +62,8 @@ const KTReleaseWorkspace = (() => {
     const unverified = unfinished.some(a => a.result?.artifactOutcome?.state === 'unverified') ||
       ['SANDBOX_OUTDATED', 'SANDBOX_UNAVAILABLE', 'REQUIRED_EFFECTS_UNRESOLVED', 'CONDITION_SOURCE_UNVERIFIABLE', 'OUTCOME_REQUIRED', 'ARTIFACT_MISMATCH', 'BODY_MISMATCH'].some(code => codes.has(code));
     const declined = codes.has('GENERATION_DECLINED') || unfinished.some(a => a.result?.artifactOutcome?.reasonCodes?.includes('GENERATION_DECLINED'));
-    const kind = unverified ? 'unverified' : declined ? 'declined' : codes.has('BUDGET_EXCEEDED') ? 'limit' :
+    const reserved = [state.error, ...unfinished.map(a => a.error)].some(e => e?.code === 'MONTHLY_LIMIT_EXCEEDED' && isReservedError(e));
+    const kind = unverified ? 'unverified' : declined ? 'declined' : reserved ? 'reserved' : (codes.has('BUDGET_EXCEEDED') || codes.has('MONTHLY_LIMIT_EXCEEDED')) ? 'limit' :
       unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
       unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
     return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
@@ -118,7 +150,7 @@ const KTReleaseWorkspace = (() => {
       try { await work(controller.signal, () => ticket === epoch); return true; }
       catch (e) { if (ticket === epoch) {
         const error = errorOf(e);
-        if (phase === 'consulting') error.message += error.code === 'BUDGET_EXCEEDED' ? ' 案は更新していません。利用可能になってから、相談内容をもう一度送信してください。' : ' 案は更新していません。相談内容をもう一度送信してください。';
+        if (phase === 'consulting') error.message += ['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(error.code) ? ' 案は更新していません。利用可能になってから、相談内容をもう一度送信してください。' : ' 案は更新していません。相談内容をもう一度送信してください。';
         set({ phase: failurePhase, error, progress: '' });
       } return false; }
       finally { if (ticket === epoch) controller = null; }
@@ -441,7 +473,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, usageResetText, usagePlanLabel, monthlyLimitText };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

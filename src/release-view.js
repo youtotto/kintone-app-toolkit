@@ -26,6 +26,16 @@ const KTReleaseView = (() => {
   const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>入力した内容を送信するか、消してから操作してください。</p>`;
   const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
   function connectionOf(options) { try { return (typeof options.connection === 'function' ? options.connection() : options.connection) || {}; } catch (_) { return { connected: false, message: '接続の状態を確認できません。' }; } }
+  function usageHtml(value) {
+    const usage = workspace.usageOf(value), count = n => n == null ? '未確認' : n + '回';
+    if (!usage) return '<p class="ktr-note">利用状況は未確認です。［接続を更新］で確認できます。</p>';
+    const expired = workspace.usageExpired(usage);
+    const rows = usage.version === 2 ? ['consultation', 'creation'].map(key => {
+      const b = usage.buckets[key];
+      return `<p data-usage-bucket="${key}"><strong>${key === 'consultation' ? '相談' : '作成'}</strong> 残り ${expired ? '更新待ち' : count(b?.remaining)} / 月 ${count(b?.limit)}<small>（利用済み ${count(b?.used)}・確保中 ${count(b?.reserved)}）</small></p>`;
+    }).join('') : `<p data-usage-legacy>AI利用 残り ${expired ? '更新待ち' : count(usage.remainingThisMonth)} / 月 ${count(usage.monthlyLimit)}（利用済み ${count(usage.usedThisMonth)}）</p>`;
+    return `<p data-usage-plan>${esc(workspace.usagePlanLabel(usage))}</p><p class="ktr-note">回数は契約全体で共有します。</p>${rows}<p class="ktr-note" data-usage-reset>回数の更新：${esc(workspace.usageResetText(usage))}${expired ? '。［接続を更新］で今月の利用状況を取得してください。' : ''}</p>`;
+  }
   function factsHtml(messages) {
     return (messages || []).filter(m => m.role !== 'user' && Array.isArray(m.facts) && m.facts.length).map(m => `<details data-release-panel="facts-${esc(m.id)}"><summary>この返答の根拠</summary><ul>${m.facts.map((f, index) => `<li>${esc(f.text || f.statement || f.description || f.summary || f.title || '')}${f.value != null ? `<details data-release-panel="fact-value-${esc(m.id)}-${index}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof f.value === 'string' ? f.value : JSON.stringify(f.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul><p class="ktr-note">この返答を作成したときの情報です。</p></details>`).join('');
   }
@@ -93,8 +103,9 @@ const KTReleaseView = (() => {
   function composer(state, options = {}) {
     const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
     const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
+    const quotaBlocked = document ? conn.canCreate === false : conn.canConsult === false;
     const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
-    return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+    return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : quotaBlocked && workspace.usageReserved(conn.usage, document ? 'creation' : 'consultation') ? '処理中の分を確保しています。完了後に［接続を更新］で残数を確認してください。' : quotaBlocked ? '今月の' + (document ? '作成' : '相談') + '回数の上限です。［接続］で更新日を確認できます。' : (document ? '送信ごとに作成1回' : '送信ごとに相談1回') + '・Enterで送信'}</span>${button('send', '送信', { primary: true, disabled: disabled || quotaBlocked })}</div></form>`;
   }
   function proposalHtml(state, options) {
     const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -109,8 +120,8 @@ const KTReleaseView = (() => {
       ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
       ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
       ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
-      ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${state.error?.code === 'BUDGET_EXCEEDED' ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
-      ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+      ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(state.error?.code) ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
+      ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
   }
   function codeHtml(state) {
     const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -195,6 +206,7 @@ const KTReleaseView = (() => {
     failed: { title: '検証で不一致がありました', label: '検証不一致', help: '作成したコードの検証に通りませんでした。理由を確認し、相談で内容を修正するか、未完了の内容を作成し直してください。', action: '未完了の内容を作成し直す' },
     unverified: { title: '検証できない内容があります', label: '検証できません', help: 'コードの誤りとは判定していません。表示された理由を確認してください。内容の修正が必要な場合は相談欄から伝えられます。検証できない原因が残る間は、同じ内容を作成し直しません。' },
     declined: { title: '作成できない内容があります', label: '作成できません', help: 'AIが作成しなかった理由を確認し、変更したい内容を相談欄から伝えてください。' },
+    reserved: { title: '処理中の分の回数を確保しています', label: '回数を確保中', help: '完了後に［接続を更新］で残数を確認してください。', action: '未完了の作成を再開' },
     limit: { title: 'AIの利用上限に達しました', label: '利用上限', help: '接続画面で利用状況を確認してください。利用可能になったら、未完了の内容だけ作成を再開できます。', action: '未完了の作成を再開' }
   };
   function creationMessage(state) {
@@ -204,13 +216,13 @@ const KTReleaseView = (() => {
   }
   function incompleteHtml(state, options) {
     if (workspace.canReprepare(state)) return `<section class="ktr-section"><h2>反映内容の確認が必要です</h2><p>作成した変更案は残っています。現在の設定で反映できるか確認してください。</p>${reprepareHtml(options)}</section>`;
-    if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。相談で内容を修正するか、もう一度作成してください。</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+    if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。${workspace.creationStateOf(state).kind === 'reserved' ? '処理が終わったら［接続を更新］で残数を確認してください。' : state.error?.code === 'MONTHLY_LIMIT_EXCEEDED' ? '作成回数の更新日を［接続］で確認してください。' : '相談で内容を修正するか、もう一度作成してください。'}</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal || connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
     const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
     const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
     const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
     const recovery = workspace.creationStateOf(state), wording = creationMessages[recovery.kind];
     const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-    return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${recovery.kind === 'limit' ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : recovery.kind === 'limit' ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
+    return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${['limit', 'reserved'].includes(recovery.kind) ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, disabled: connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : ['limit', 'reserved'].includes(recovery.kind) ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
   }
   function runHtml(run, options = {}, historical = false) {
     if (!run) return '<p>反映の記録はありません。</p>';
@@ -251,7 +263,7 @@ const KTReleaseView = (() => {
     if (conn.connected === false || conn.available === false) rows.push({ kind: 'connection', message: conn.message || 'AIサービスへ接続してください。' });
     if (options.notice) rows.push({ kind: 'notice', message: options.notice });
     if (!rows.length) return '';
-    const first = rows[0], label = first.kind === 'error' ? first.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達しました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
+    const first = rows[0], label = first.kind === 'error' ? first.code === 'MONTHLY_LIMIT_EXCEEDED' ? 'AIの利用状況を確認してください' : first.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達しました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
     return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
   }
   function render(state, options = {}) {
@@ -327,12 +339,13 @@ const KTReleaseView = (() => {
       host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
     }
     function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
-    function canSend() {
+    function canSend(purpose = controller.getState().requestPurpose) {
       const state = controller.getState(), conn = connectionOf(options);
-      return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false;
+      return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
     }
     async function send(request, onStart, suggestionReference = null) {
-      if (!canSend()) return false;
+      const fromDocument = typeof request === 'string' && !suggestionReference;
+      if (!canSend(fromDocument ? 'document' : controller.getState().requestPurpose)) return false;
       const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
       const value = String(suggestionReference ? workspace.suggestionRequest(controller.getState()) : fromTemplate ? request : input?.value ?? draft).trim();
       if (!value) return false;
@@ -347,7 +360,7 @@ const KTReleaseView = (() => {
       try {
         if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
         const conn = connectionOf(options);
-        if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false) return false;
+        if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (fromTemplate ? conn.canCreate === false : controller.getState().requestPurpose === 'document' ? conn.canCreate === false : conn.canConsult === false)) return false;
         if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
         if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
         if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
@@ -362,6 +375,7 @@ const KTReleaseView = (() => {
       const state = controller.getState();
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
       if (action === 'send') return send();
+      if (['adopt', 'resume'].includes(action) && connectionOf(options).canCreate === false) return;
       if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }
       if (action === 'code') {
         const opened = options.onToggleCode?.();
@@ -407,7 +421,7 @@ const KTReleaseView = (() => {
         else { if (typeof options.onDownload !== 'function') return; await options.onDownload(result.generated?.targetFile || result.targetFile || 'customization.js', body); notice = 'ファイルを保存しました。'; }
         draw(); return;
       }
-      if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: canSend, hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
+      if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: () => canSend('document'), hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
       const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, details: options.onDetails, preview: options.onOpenPreview };
       if (typeof handlers[action] === 'function') { await handlers[action](); draw(); }
     }
@@ -468,7 +482,7 @@ const KTReleaseView = (() => {
     @media(max-height:700px){@container ktr-workspace (max-width:959px){.ktr-content{overflow:auto}.ktr-layout{flex:none;overflow:visible}}}
     @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
   `;
-  return { create, render, escape: esc, explanationMarkdown };
+  return { create, usageHtml, render, escape: esc, explanationMarkdown };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseView };

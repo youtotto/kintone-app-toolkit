@@ -9,6 +9,26 @@ function mountReleaseWorkspace(host, d) {
   let baseQueue = Promise.resolve();
   let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false;
   const esc = KTReleaseView.escape;
+  const usageTools = KTReleaseWorkspace;
+  let usageRevision = 0, usageResetTimer = null;
+  function scheduleUsageReset() {
+    clearTimeout(usageResetTimer); usageResetTimer = null;
+    const delay = Date.parse(capability.usage?.resetsAt) - Date.now();
+    if (!(delay > 0)) return;
+    usageResetTimer = setTimeout(() => {
+      usageResetTimer = null;
+      if (!usageTools.usageExpired(capability.usage)) { scheduleUsageReset(); return; }
+      view?.render(); updateConnections();
+      if (session.status().connected) refreshCapability(true);
+    }, Math.min(delay, 2147483647));
+  }
+  const updateUsage = value => { usageRevision++; capability = { ...capability, usage: usageTools.usageOf(value) }; scheduleUsageReset(); view?.render(); updateConnections(); };
+  async function requestWithUsage(bucket, request) {
+    if (usageTools.usageExpired(capability.usage)) await refreshCapability(true);
+    if (usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket, usage: capability.usage } } } });
+    try { const result = await request(); updateUsage(result?.usage); return result; }
+    catch (error) { const usage = error?.details?.error?.detail?.usage; if (usage) updateUsage(usage); throw error; }
+  }
   const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
   host.style.overflow = 'auto';
   host.style.height = '100%';
@@ -56,7 +76,7 @@ function mountReleaseWorkspace(host, d) {
   const connection = () => {
     const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
     const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
-    return { connected: status.connected, available, canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
+    return { connected: status.connected, available, usage: capability.usage || null, canConsult: !usageTools.usageBlocked(capability.usage, 'consultation'), canCreate: !usageTools.usageBlocked(capability.usage, 'creation'), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
       message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
   };
@@ -66,16 +86,20 @@ function mountReleaseWorkspace(host, d) {
     if (!force && healthAt && Date.now() - healthAt < KTAiClient.HEALTH_TTL_MS) return capability;
     healthPromise = (async () => {
       try {
+        const usageBeforeHealth = usageRevision;
         const savedProbe = initialHealth; initialHealth = null;
         const probe = savedProbe ? await savedProbe() : null;
         // Boot's probe returns its own packet; a direct health refresh remains the same auth path.
         const health = probe?.health || (probe?.ok === true ? probe : await session.client.getHealth());
-        capability = KTAiClient.capabilityFromHealth(health);
+        const next = KTAiClient.capabilityFromHealth(health);
+        // A health request started earlier must not replace a newer completed request's counts.
+        capability = { ...next, usage: usageBeforeHealth === usageRevision ? usageTools.usageOf(next.usage) : capability.usage };
+        scheduleUsageReset();
         healthAt = Date.now(); connectionError = '';
       } catch (e) {
         capability = { available: false, reason: e.code, features: {} };
         connectionError = KTAiClient.errorText(e.code) || '接続を確認できませんでした。作成した内容はこの画面に残っています。';
-      } finally { healthPromise = null; view?.render(); }
+      } finally { healthPromise = null; view?.render(); updateConnections(); }
       return capability;
     })();
     return healthPromise;
@@ -106,18 +130,18 @@ function mountReleaseWorkspace(host, d) {
       await requireFeature(KTAiClient.FEATURE);
       await requireFeature(KTAiClient.FEATURE_PLANNER);
       const ctx = KTReleaseContext.proposal(input, dependencyTools);
-      const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
+      const r = await requestWithUsage(input.requestPurpose === 'document' ? 'creation' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
       return { ...r, facts: ctx.facts };
     },
     async plan(input) {
       await requireFeature(KTAiClient.FEATURE_PLANNER);
-      const r = await client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
+      const r = await requestWithUsage('creation', () => client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] }));
       return { plan: r };
     },
     async generate(input) {
       await requireFeature(KTAiClient.FEATURE_GENERATOR);
       try {
-        const r = await client.generate({ ctx: KTReleaseContext.generator(input), signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] });
+        const r = await requestWithUsage('creation', () => client.generate({ ctx: KTReleaseContext.generator(input), signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] }));
         return { generated: r, verification: r.verification, artifactOutcome: r.artifactOutcome };
       } catch (error) {
         const outcome = error?.details?.artifactOutcome;
@@ -188,7 +212,7 @@ function mountReleaseWorkspace(host, d) {
   function connectionDialog() {
     const staging = 'https://appinsight-ai-api-staging.black-waterfall-157a.workers.dev';
     const verification = KTAiClient.isDevMode() && typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の設定</summary><p data-staging-note></p><button type="button" data-staging-select>検証用の接続先（staging）に切り替える</button><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
-    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
+    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary>回数の数え方</summary><p>通常の相談・変更の提案・アイディアは、送信1回につき相談1回です。資料の作成・修正は、送信1回につき作成1回です。</p><p>［この案で作成］では計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。コードの件数は計画を作った後に決まるため、全体の回数は事前には確定しません。サービス内部の修正・確認で回数は増えません。</p><p>コピー・保存・反映・元に戻す操作では回数を使いません。残数には処理中などの確保分も反映されています。</p></details>' + verification);
     verificationSettings(el);
     const message = t => { el.querySelector('[data-message]').textContent = t; };
     const stagingReason = () => {
@@ -201,6 +225,7 @@ function mountReleaseWorkspace(host, d) {
       return '';
     };
     const render = () => {
+      el.querySelector('[data-usage]').innerHTML = KTReleaseView.usageHtml(capability.usage);
       el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
       el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
       el.querySelector('[data-refresh]').disabled = connectionBusy || connectionSettingsFailed;
@@ -277,11 +302,12 @@ function mountReleaseWorkspace(host, d) {
     let pending = false;
     const update = () => {
       el.querySelector('[data-document-create]').disabled = pending || !canRequest();
-      el.querySelector('[data-document-status]').textContent = !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、AIサービスに依頼します。';
+      el.querySelector('[data-document-status]').textContent = connection().canCreate === false && usageTools.usageReserved(capability.usage, 'creation') ? '作成回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canCreate === false ? '今月の作成回数の上限に達しています。［接続］で回数の更新日を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、作成回数を1回使います。';
     };
     update();
     const unsubscribe = controller.subscribe(update);
-    el.addEventListener('close', unsubscribe, { once: true });
+    connectionDialogs.add(update);
+    el.addEventListener('close', () => { unsubscribe(); connectionDialogs.delete(update); }, { once: true });
     el.querySelector('[data-document-create]').addEventListener('click', async () => {
       if (pending || !canRequest()) { update(); return; }
       const template = templates.find(t => t.id === el.querySelector('input[name="document-template"]:checked').value);
@@ -383,6 +409,7 @@ function mountReleaseWorkspace(host, d) {
       return { ok: true };
     },
     dispose() {
+      clearTimeout(usageResetTimer);
       flow?.cancel(); controller.cancel(); setCodeOpen(false);
       if (codePanel) codePanel.home.appendChild(codePanel.element);
       if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }

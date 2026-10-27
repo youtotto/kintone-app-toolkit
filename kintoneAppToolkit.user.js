@@ -11030,7 +11030,7 @@
       AUTH_TOKEN_EXPIRED: 'Nest Rec AI との接続または契約の有効期限が切れています。もう一度「Nest Rec AIに接続」してください。',
       AUTH_DOMAIN_MISMATCH: 'この kintone 環境では AI サービスを利用できません。契約の対象ドメインを確認してください。',
       RATE_LIMITED: 'アクセスが集中しています。しばらく待ってから再実行してください。',
-      MONTHLY_LIMIT_EXCEEDED: '今月の AI 利用回数の上限に達しています。',
+      MONTHLY_LIMIT_EXCEEDED: '今月のAI利用回数の上限に達しています。［接続］で回数の更新日を確認してください。作成済みの内容は引き続き利用できます。',
       UPSTREAM_ERROR: 'AI が応答しませんでした。時間をおいて再実行してください。',
       // Phase 22: 「契約形式」は利用契約の障害と読まれる → 応答の形式の異常と書く
       MODEL_OUTPUT_INVALID: 'AI の返答を Toolkit が読み取れませんでした（通信や契約の問題ではありません）。もう一度実行してください。続く場合はお問い合わせください。',
@@ -11389,9 +11389,9 @@
       const features = { [FEATURE]: qa, [FEATURE_PLANNER]: planner, [FEATURE_GENERATOR]: generator };
       //   §0f.3 の 3（2026-10-09）: 1 要求の処理全体の期限（health の limits。古い Gateway は返さない = null）
       const limits = limitsFromHealth(health);
-      if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.usage ?? null, ...(limits ? { limits } : {}) };
+      if (!qa.available) return { available: false, reason: qa.reason, features, usage: health.meta?.usage ?? health.usage ?? null, ...(limits ? { limits } : {}) };
       // contractExpiresAt（契約の期限。W5）。tokenExpiresAt は Access Token 認証では Access の期限なので契約の表示には使わない
-      return { available: true, reason: null, features, usage: health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null, ...(limits ? { limits } : {}) };
+      return { available: true, reason: null, features, usage: health.meta?.usage ?? health.usage ?? null, tokenExpiresAt: health.tokenExpiresAt ?? null, contractExpiresAt: health.contractExpiresAt ?? null, ...(limits ? { limits } : {}) };
     }
     /**
      * §0f.3 の 3（2026-10-09）: health の limits（additive・version 1）→ { version, deadlineMs: { feature: ms }, features: { feature: {...} } }。
@@ -13499,8 +13499,39 @@
       const bytes = new TextEncoder().encode(text);
       return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2, '0')).join('');
     }
+    // Counts come only from the service. Missing fields are unknown, never zero.
+    const countOf = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    function usageOf(value) {
+      if (!value || typeof value !== 'object') return null;
+      const common = { plan: typeof value.plan === 'string' ? value.plan : '', yyyymm: typeof value.yyyymm === 'string' ? value.yyyymm : '', resetsAt: typeof value.resetsAt === 'string' && Number.isFinite(Date.parse(value.resetsAt)) ? value.resetsAt : null, timeZone: 'Asia/Tokyo' };
+      if (value.version === 2 && value.buckets && typeof value.buckets === 'object') {
+        const buckets = {};
+        for (const key of ['consultation', 'creation']) {
+          const b = value.buckets[key];
+          buckets[key] = b && typeof b === 'object' ? Object.fromEntries(['limit', 'used', 'reserved', 'remaining'].map(k => [k, countOf(b[k])])) : null;
+        }
+        return { version: 2, ...common, buckets };
+      }
+      if (value.version != null && value.version !== 1) return null;
+      const limit = countOf(value.monthlyLimit), used = countOf(value.usedThisMonth), remaining = countOf(value.remainingThisMonth);
+      if (limit == null && used == null && remaining == null) return null;
+      return { version: 1, ...common, monthlyLimit: limit, usedThisMonth: used, remainingThisMonth: remaining ?? (limit != null && used != null ? Math.max(0, limit - used) : null) };
+    }
+    const usageExpired = (usage, now = Date.now()) => !!usage?.resetsAt && Date.parse(usage.resetsAt) <= now;
+    const usageBlocked = (usage, bucket, now) => !usageExpired(usage, now) && (usage?.version === 2 ? usage.buckets?.[bucket]?.remaining === 0 : usage?.version === 1 && usage.remainingThisMonth === 0);
+    const usageReserved = (usage, bucket) => usage?.version === 2 && usage.buckets?.[bucket]?.remaining === 0 && usage.buckets[bucket].used != null && usage.buckets[bucket].limit != null && usage.buckets[bucket].used < usage.buckets[bucket].limit && usage.buckets[bucket].reserved > 0;
+    const quotaErrorDetail = error => error?.details?.error?.detail || error?.detail?.error?.detail || error?.details || error?.detail || {};
+    const isReservedError = error => { const detail = quotaErrorDetail(error); return detail.reason === 'QUOTA_RESERVED' || usageReserved(usageOf(detail.usage), detail.bucket); };
+    const usageResetText = usage => usage?.resetsAt ? new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(usage.resetsAt)) + '（日本時間）' : '未確認';
+    const usagePlanLabel = usage => ({ 'toolkit-light': 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
+    function monthlyLimitText(error) {
+      const detail = quotaErrorDetail(error);
+      const usage = usageOf(detail.usage), label = { consultation: '相談', creation: '作成' }[detail.bucket] || 'AI利用';
+      if (isReservedError(error)) return `${label}回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+      return `今月の${label}回数の上限に達しました。${usage?.resetsAt ? '回数の更新は' + usageResetText(usage) + 'です。' : '［接続］で回数の更新日を確認してください。'}会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+    }
     const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
-    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
+    const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
     const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
     const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
     const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
@@ -13519,7 +13550,8 @@
       const unverified = unfinished.some(a => a.result?.artifactOutcome?.state === 'unverified') ||
         ['SANDBOX_OUTDATED', 'SANDBOX_UNAVAILABLE', 'REQUIRED_EFFECTS_UNRESOLVED', 'CONDITION_SOURCE_UNVERIFIABLE', 'OUTCOME_REQUIRED', 'ARTIFACT_MISMATCH', 'BODY_MISMATCH'].some(code => codes.has(code));
       const declined = codes.has('GENERATION_DECLINED') || unfinished.some(a => a.result?.artifactOutcome?.reasonCodes?.includes('GENERATION_DECLINED'));
-      const kind = unverified ? 'unverified' : declined ? 'declined' : codes.has('BUDGET_EXCEEDED') ? 'limit' :
+      const reserved = [state.error, ...unfinished.map(a => a.error)].some(e => e?.code === 'MONTHLY_LIMIT_EXCEEDED' && isReservedError(e));
+      const kind = unverified ? 'unverified' : declined ? 'declined' : reserved ? 'reserved' : (codes.has('BUDGET_EXCEEDED') || codes.has('MONTHLY_LIMIT_EXCEEDED')) ? 'limit' :
         unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
         unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
       return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
@@ -13606,7 +13638,7 @@
         try { await work(controller.signal, () => ticket === epoch); return true; }
         catch (e) { if (ticket === epoch) {
           const error = errorOf(e);
-          if (phase === 'consulting') error.message += error.code === 'BUDGET_EXCEEDED' ? ' 案は更新していません。利用可能になってから、相談内容をもう一度送信してください。' : ' 案は更新していません。相談内容をもう一度送信してください。';
+          if (phase === 'consulting') error.message += ['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(error.code) ? ' 案は更新していません。利用可能になってから、相談内容をもう一度送信してください。' : ' 案は更新していません。相談内容をもう一度送信してください。';
           set({ phase: failurePhase, error, progress: '' });
         } return false; }
         finally { if (ticket === epoch) controller = null; }
@@ -13929,7 +13961,7 @@
         },
       };
     }
-    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest };
+    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, usageResetText, usagePlanLabel, monthlyLimitText };
   })();
 
   /* Current application facts, existing Deps results and explicitly accepted input.
@@ -14591,6 +14623,16 @@
     const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>入力した内容を送信するか、消してから操作してください。</p>`;
     const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
     function connectionOf(options) { try { return (typeof options.connection === 'function' ? options.connection() : options.connection) || {}; } catch (_) { return { connected: false, message: '接続の状態を確認できません。' }; } }
+    function usageHtml(value) {
+      const usage = workspace.usageOf(value), count = n => n == null ? '未確認' : n + '回';
+      if (!usage) return '<p class="ktr-note">利用状況は未確認です。［接続を更新］で確認できます。</p>';
+      const expired = workspace.usageExpired(usage);
+      const rows = usage.version === 2 ? ['consultation', 'creation'].map(key => {
+        const b = usage.buckets[key];
+        return `<p data-usage-bucket="${key}"><strong>${key === 'consultation' ? '相談' : '作成'}</strong> 残り ${expired ? '更新待ち' : count(b?.remaining)} / 月 ${count(b?.limit)}<small>（利用済み ${count(b?.used)}・確保中 ${count(b?.reserved)}）</small></p>`;
+      }).join('') : `<p data-usage-legacy>AI利用 残り ${expired ? '更新待ち' : count(usage.remainingThisMonth)} / 月 ${count(usage.monthlyLimit)}（利用済み ${count(usage.usedThisMonth)}）</p>`;
+      return `<p data-usage-plan>${esc(workspace.usagePlanLabel(usage))}</p><p class="ktr-note">回数は契約全体で共有します。</p>${rows}<p class="ktr-note" data-usage-reset>回数の更新：${esc(workspace.usageResetText(usage))}${expired ? '。［接続を更新］で今月の利用状況を取得してください。' : ''}</p>`;
+    }
     function factsHtml(messages) {
       return (messages || []).filter(m => m.role !== 'user' && Array.isArray(m.facts) && m.facts.length).map(m => `<details data-release-panel="facts-${esc(m.id)}"><summary>この返答の根拠</summary><ul>${m.facts.map((f, index) => `<li>${esc(f.text || f.statement || f.description || f.summary || f.title || '')}${f.value != null ? `<details data-release-panel="fact-value-${esc(m.id)}-${index}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof f.value === 'string' ? f.value : JSON.stringify(f.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul><p class="ktr-note">この返答を作成したときの情報です。</p></details>`).join('');
     }
@@ -14658,8 +14700,9 @@
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
       const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
+      const quotaBlocked = document ? conn.canCreate === false : conn.canConsult === false;
       const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
-      return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : quotaBlocked && workspace.usageReserved(conn.usage, document ? 'creation' : 'consultation') ? '処理中の分を確保しています。完了後に［接続を更新］で残数を確認してください。' : quotaBlocked ? '今月の' + (document ? '作成' : '相談') + '回数の上限です。［接続］で更新日を確認できます。' : (document ? '送信ごとに作成1回' : '送信ごとに相談1回') + '・Enterで送信'}</span>${button('send', '送信', { primary: true, disabled: disabled || quotaBlocked })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -14674,8 +14717,8 @@
         ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
         ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
-        ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${state.error?.code === 'BUDGET_EXCEEDED' ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
-        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+        ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(state.error?.code) ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
+        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
     }
     function codeHtml(state) {
       const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -14760,6 +14803,7 @@
       failed: { title: '検証で不一致がありました', label: '検証不一致', help: '作成したコードの検証に通りませんでした。理由を確認し、相談で内容を修正するか、未完了の内容を作成し直してください。', action: '未完了の内容を作成し直す' },
       unverified: { title: '検証できない内容があります', label: '検証できません', help: 'コードの誤りとは判定していません。表示された理由を確認してください。内容の修正が必要な場合は相談欄から伝えられます。検証できない原因が残る間は、同じ内容を作成し直しません。' },
       declined: { title: '作成できない内容があります', label: '作成できません', help: 'AIが作成しなかった理由を確認し、変更したい内容を相談欄から伝えてください。' },
+      reserved: { title: '処理中の分の回数を確保しています', label: '回数を確保中', help: '完了後に［接続を更新］で残数を確認してください。', action: '未完了の作成を再開' },
       limit: { title: 'AIの利用上限に達しました', label: '利用上限', help: '接続画面で利用状況を確認してください。利用可能になったら、未完了の内容だけ作成を再開できます。', action: '未完了の作成を再開' }
     };
     function creationMessage(state) {
@@ -14769,13 +14813,13 @@
     }
     function incompleteHtml(state, options) {
       if (workspace.canReprepare(state)) return `<section class="ktr-section"><h2>反映内容の確認が必要です</h2><p>作成した変更案は残っています。現在の設定で反映できるか確認してください。</p>${reprepareHtml(options)}</section>`;
-      if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。相談で内容を修正するか、もう一度作成してください。</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+      if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。${workspace.creationStateOf(state).kind === 'reserved' ? '処理が終わったら［接続を更新］で残数を確認してください。' : state.error?.code === 'MONTHLY_LIMIT_EXCEEDED' ? '作成回数の更新日を［接続］で確認してください。' : '相談で内容を修正するか、もう一度作成してください。'}</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal || connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
       const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
       const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
       const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
       const recovery = workspace.creationStateOf(state), wording = creationMessages[recovery.kind];
       const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-      return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${recovery.kind === 'limit' ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : recovery.kind === 'limit' ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
+      return `<section class="ktr-section"><h2>${wording.title}</h2><p>${finished.length ? '完成した内容は残っています。' : '現在の案は残っています。'}${wording.help}</p>${finished.length ? `<h3>できた内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${recovery.canResume ? `<div class="ktr-actions">${['limit', 'reserved'].includes(recovery.kind) ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, disabled: connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : ['limit', 'reserved'].includes(recovery.kind) ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '相談欄で内容を修正する', { primary: true })}</div>`}</section>`;
     }
     function runHtml(run, options = {}, historical = false) {
       if (!run) return '<p>反映の記録はありません。</p>';
@@ -14816,7 +14860,7 @@
       if (conn.connected === false || conn.available === false) rows.push({ kind: 'connection', message: conn.message || 'AIサービスへ接続してください。' });
       if (options.notice) rows.push({ kind: 'notice', message: options.notice });
       if (!rows.length) return '';
-      const first = rows[0], label = first.kind === 'error' ? first.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達しました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
+      const first = rows[0], label = first.kind === 'error' ? first.code === 'MONTHLY_LIMIT_EXCEEDED' ? 'AIの利用状況を確認してください' : first.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達しました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
       return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
     }
     function render(state, options = {}) {
@@ -14892,12 +14936,13 @@
         host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
       }
       function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
-      function canSend() {
+      function canSend(purpose = controller.getState().requestPurpose) {
         const state = controller.getState(), conn = connectionOf(options);
-        return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false;
+        return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
       }
       async function send(request, onStart, suggestionReference = null) {
-        if (!canSend()) return false;
+        const fromDocument = typeof request === 'string' && !suggestionReference;
+        if (!canSend(fromDocument ? 'document' : controller.getState().requestPurpose)) return false;
         const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
         const value = String(suggestionReference ? workspace.suggestionRequest(controller.getState()) : fromTemplate ? request : input?.value ?? draft).trim();
         if (!value) return false;
@@ -14912,7 +14957,7 @@
         try {
           if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
           const conn = connectionOf(options);
-          if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false) return false;
+          if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (fromTemplate ? conn.canCreate === false : controller.getState().requestPurpose === 'document' ? conn.canCreate === false : conn.canConsult === false)) return false;
           if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
           if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
           if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
@@ -14927,6 +14972,7 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
+        if (['adopt', 'resume'].includes(action) && connectionOf(options).canCreate === false) return;
         if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }
         if (action === 'code') {
           const opened = options.onToggleCode?.();
@@ -14972,7 +15018,7 @@
           else { if (typeof options.onDownload !== 'function') return; await options.onDownload(result.generated?.targetFile || result.targetFile || 'customization.js', body); notice = 'ファイルを保存しました。'; }
           draw(); return;
         }
-        if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: canSend, hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
+        if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: () => canSend('document'), hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
         const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, details: options.onDetails, preview: options.onOpenPreview };
         if (typeof handlers[action] === 'function') { await handlers[action](); draw(); }
       }
@@ -15033,7 +15079,7 @@
       @media(max-height:700px){@container ktr-workspace (max-width:959px){.ktr-content{overflow:auto}.ktr-layout{flex:none;overflow:visible}}}
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
-    return { create, render, escape: esc, explanationMarkdown };
+    return { create, usageHtml, render, escape: esc, explanationMarkdown };
   })();
 
   /* Customize editor helpers, dependency display, and explicit manual registration. */
@@ -15464,6 +15510,26 @@
     let baseQueue = Promise.resolve();
     let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false;
     const esc = KTReleaseView.escape;
+    const usageTools = KTReleaseWorkspace;
+    let usageRevision = 0, usageResetTimer = null;
+    function scheduleUsageReset() {
+      clearTimeout(usageResetTimer); usageResetTimer = null;
+      const delay = Date.parse(capability.usage?.resetsAt) - Date.now();
+      if (!(delay > 0)) return;
+      usageResetTimer = setTimeout(() => {
+        usageResetTimer = null;
+        if (!usageTools.usageExpired(capability.usage)) { scheduleUsageReset(); return; }
+        view?.render(); updateConnections();
+        if (session.status().connected) refreshCapability(true);
+      }, Math.min(delay, 2147483647));
+    }
+    const updateUsage = value => { usageRevision++; capability = { ...capability, usage: usageTools.usageOf(value) }; scheduleUsageReset(); view?.render(); updateConnections(); };
+    async function requestWithUsage(bucket, request) {
+      if (usageTools.usageExpired(capability.usage)) await refreshCapability(true);
+      if (usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket, usage: capability.usage } } } });
+      try { const result = await request(); updateUsage(result?.usage); return result; }
+      catch (error) { const usage = error?.details?.error?.detail?.usage; if (usage) updateUsage(usage); throw error; }
+    }
     const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
     host.style.overflow = 'auto';
     host.style.height = '100%';
@@ -15511,7 +15577,7 @@
     const connection = () => {
       const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
       const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
-      return { connected: status.connected, available, canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
+      return { connected: status.connected, available, usage: capability.usage || null, canConsult: !usageTools.usageBlocked(capability.usage, 'consultation'), canCreate: !usageTools.usageBlocked(capability.usage, 'creation'), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
         canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
         message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
     };
@@ -15521,16 +15587,20 @@
       if (!force && healthAt && Date.now() - healthAt < KTAiClient.HEALTH_TTL_MS) return capability;
       healthPromise = (async () => {
         try {
+          const usageBeforeHealth = usageRevision;
           const savedProbe = initialHealth; initialHealth = null;
           const probe = savedProbe ? await savedProbe() : null;
           // Boot's probe returns its own packet; a direct health refresh remains the same auth path.
           const health = probe?.health || (probe?.ok === true ? probe : await session.client.getHealth());
-          capability = KTAiClient.capabilityFromHealth(health);
+          const next = KTAiClient.capabilityFromHealth(health);
+          // A health request started earlier must not replace a newer completed request's counts.
+          capability = { ...next, usage: usageBeforeHealth === usageRevision ? usageTools.usageOf(next.usage) : capability.usage };
+          scheduleUsageReset();
           healthAt = Date.now(); connectionError = '';
         } catch (e) {
           capability = { available: false, reason: e.code, features: {} };
           connectionError = KTAiClient.errorText(e.code) || '接続を確認できませんでした。作成した内容はこの画面に残っています。';
-        } finally { healthPromise = null; view?.render(); }
+        } finally { healthPromise = null; view?.render(); updateConnections(); }
         return capability;
       })();
       return healthPromise;
@@ -15561,18 +15631,18 @@
         await requireFeature(KTAiClient.FEATURE);
         await requireFeature(KTAiClient.FEATURE_PLANNER);
         const ctx = KTReleaseContext.proposal(input, dependencyTools);
-        const r = await client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] });
+        const r = await requestWithUsage(input.requestPurpose === 'document' ? 'creation' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
         return { ...r, facts: ctx.facts };
       },
       async plan(input) {
         await requireFeature(KTAiClient.FEATURE_PLANNER);
-        const r = await client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] });
+        const r = await requestWithUsage('creation', () => client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] }));
         return { plan: r };
       },
       async generate(input) {
         await requireFeature(KTAiClient.FEATURE_GENERATOR);
         try {
-          const r = await client.generate({ ctx: KTReleaseContext.generator(input), signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] });
+          const r = await requestWithUsage('creation', () => client.generate({ ctx: KTReleaseContext.generator(input), signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] }));
           return { generated: r, verification: r.verification, artifactOutcome: r.artifactOutcome };
         } catch (error) {
           const outcome = error?.details?.artifactOutcome;
@@ -15643,7 +15713,7 @@
     function connectionDialog() {
       const staging = 'https://appinsight-ai-api-staging.black-waterfall-157a.workers.dev';
       const verification = KTAiClient.isDevMode() && typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の設定</summary><p data-staging-note></p><button type="button" data-staging-select>検証用の接続先（staging）に切り替える</button><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
-      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p>' + verification);
+      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary>回数の数え方</summary><p>通常の相談・変更の提案・アイディアは、送信1回につき相談1回です。資料の作成・修正は、送信1回につき作成1回です。</p><p>［この案で作成］では計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。コードの件数は計画を作った後に決まるため、全体の回数は事前には確定しません。サービス内部の修正・確認で回数は増えません。</p><p>コピー・保存・反映・元に戻す操作では回数を使いません。残数には処理中などの確保分も反映されています。</p></details>' + verification);
       verificationSettings(el);
       const message = t => { el.querySelector('[data-message]').textContent = t; };
       const stagingReason = () => {
@@ -15656,6 +15726,7 @@
         return '';
       };
       const render = () => {
+        el.querySelector('[data-usage]').innerHTML = KTReleaseView.usageHtml(capability.usage);
         el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
         el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
         el.querySelector('[data-refresh]').disabled = connectionBusy || connectionSettingsFailed;
@@ -15732,11 +15803,12 @@
       let pending = false;
       const update = () => {
         el.querySelector('[data-document-create]').disabled = pending || !canRequest();
-        el.querySelector('[data-document-status]').textContent = !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、AIサービスに依頼します。';
+        el.querySelector('[data-document-status]').textContent = connection().canCreate === false && usageTools.usageReserved(capability.usage, 'creation') ? '作成回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canCreate === false ? '今月の作成回数の上限に達しています。［接続］で回数の更新日を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、作成回数を1回使います。';
       };
       update();
       const unsubscribe = controller.subscribe(update);
-      el.addEventListener('close', unsubscribe, { once: true });
+      connectionDialogs.add(update);
+      el.addEventListener('close', () => { unsubscribe(); connectionDialogs.delete(update); }, { once: true });
       el.querySelector('[data-document-create]').addEventListener('click', async () => {
         if (pending || !canRequest()) { update(); return; }
         const template = templates.find(t => t.id === el.querySelector('input[name="document-template"]:checked').value);
@@ -15838,6 +15910,7 @@
         return { ok: true };
       },
       dispose() {
+        clearTimeout(usageResetTimer);
         flow?.cancel(); controller.cancel(); setCodeOpen(false);
         if (codePanel) codePanel.home.appendChild(codePanel.element);
         if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }
