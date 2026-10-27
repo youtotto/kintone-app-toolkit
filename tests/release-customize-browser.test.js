@@ -134,6 +134,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
         await selected(page,'same.js','// PC original\nconst memo = 1;\n');
         assert.equal(await editState(page).innerText(),'取得時と同じ');
+        assert.equal(await page.locator('#kt-customize-origin').innerText(),'動作テスト環境から取得');
+        assert.equal(await page.locator('#kt-customize-file-caption').innerText(),'開いているファイル');
         assert.match(await editState(page).getAttribute('title'),/ローカル保存や運用環境への反映状況ではありません/);
         const initialGeometry=await geometry(page);
         const menuDensity=await page.evaluate(()=>{const menu=document.querySelector('.kt-customize-menu').getBoundingClientRect(),deps=document.querySelector('#kt-customize-dependencies');return {upperHeight:Math.round(deps.getBoundingClientRect().top-menu.top),dependencyFont:getComputedStyle(deps).fontSize,pickerHeight:Math.round(document.querySelector('#kt-customize-picker').getBoundingClientRect().height)};});
@@ -229,15 +231,15 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection,'ファイルの選択・再取得ではAIを呼ばない');
         const beforeReferenceEdit=await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]}));
         await editor(page).fill('// PC unsaved edit\nconst memo = 10;\n');
-        assert.equal(await editState(page).innerText(),'手元の変更あり');
-        assert.match(await page.locator('#kt-customize-drafts option:checked').textContent(),/same\.js.*手元の変更あり/);
+        assert.equal(await editState(page).innerText(),'手元で編集中');
+        assert.match(await page.locator('#kt-customize-drafts option:checked').textContent(),/same\.js.*手元で編集中/);
         await editor(page).fill('// PC original\nconst memo = 1;\n');
         assert.equal(await editState(page).innerText(),'取得時と同じ','編集を元へ戻すと取得時の本文との比較も戻る');
         await editor(page).fill('// PC unsaved edit\nconst memo = 10;\n');
         const downloadPromise=page.waitForEvent('download');await page.locator('#kt-customize-download').click();const localCopy=await downloadPromise;
         assert.equal(localCopy.suggestedFilename(),'same.js');
         assert.equal(fs.readFileSync(await localCopy.path(),'utf8'),'// PC unsaved edit\nconst memo = 10;\n');
-        assert.equal(await editState(page).innerText(),'手元の変更あり','ローカル保存で登録済みの扱いに変えない');
+        assert.equal(await editState(page).innerText(),'手元で編集中','ローカル保存で登録済みの扱いに変えない');
         assert.match(await reference.innerText(),/登録済みコードの解析結果/);assert.match(await reference.innerText(),/手元の編集は含みません/);
         assert.match(await reference.innerText(),/備考/,'編集中でも登録済みコードの参照情報として示す');
         assert.deepEqual(await page.evaluate(()=>({ai:proposalCalls.length,reads:fileReads.length,scan:[...scanCalls]})),beforeReferenceEdit,'入力したコードを新たに解析しない');
@@ -249,7 +251,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await filePicker(page).evaluate(select=>select.selectedOptions[0].textContent),'same.js','読み込めなかったBではなく表示中のAを選択欄に戻す');
         assert.match(await page.locator('#kt-customize-meta').innerText(),/same\.js（PC）/,'表示中のAの名前を残す');
         assert.match(await page.locator('#kt-customize-file-status').innerText(),/second\.js.*読み込めませんでした/,'Bの失敗は別の場所に表示する');
-        assert.equal(await editState(page).innerText(),'手元の変更あり','読み込めなかったファイルで表示中の編集状態を変えない');
+        assert.equal(await editState(page).innerText(),'手元で編集中','読み込めなかったファイルで表示中の編集状態を変えない');
         assert.equal(await page.evaluate(()=>proposalCalls.length),callsBeforeSelection);
         await page.evaluate(()=>{window.fileFailure=null;});
         await selected(page,'second.js','// second original\n');
@@ -260,7 +262,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await selected(page,'same.js','// mobile original\nconst memo = 2;\n');
         assert.equal(await editState(page).innerText(),'取得時と同じ','同名のモバイルファイルへPCの編集状態を引き継がない');
         await editor(page).fill('// mobile unsaved edit\n');
-        assert.equal(await editState(page).innerText(),'手元の変更あり');
+        assert.equal(await editState(page).innerText(),'手元で編集中');
         // An old show(PC) request must not select the mobile file with the same name.
         await page.evaluate(()=>{window.holdNextCustomize=true;window.pendingList=null;window.pendingShow=customize.show({target:'desktop',kind:'js',name:'same.js'});});
         await page.waitForFunction(()=>typeof pendingList==='function');
@@ -292,6 +294,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('#kt-newfile-ok').click();
         await editor(page).fill('// new unsaved file\n');
         assert.equal(await editState(page).innerText(),'新規ファイル');
+        assert.equal(await page.locator('#kt-customize-origin').innerText(),'手元で作成','新規ファイルを環境から取得したと表示しない');
         assert.match(await page.locator('#kt-customize-drafts option:checked').textContent(),/draft\.js.*新規ファイル/);
         const draftKey=await page.locator('#kt-customize-drafts').inputValue();
         await selected(page,'same.js','// PC unsaved edit\nconst memo = 10;\n');
@@ -365,7 +368,9 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         for(const selector of ['.kt-customize-menu','#kt-customize-file','#kt-customize-source','#kt-customize-dependencies','#kt-customize-new','#kt-customize-consult'])assert.equal(await page.locator(selector).isVisible(),false,selector+' はカスタマイズだけに残す');
         assert.equal(await widthHandle.isVisible(),false,'AI Assistantの右コード欄でCustomize用の幅ハンドルを出さない');
         assert.equal(await saveHelp.isVisible(),false,'AI Assistantのコード表示には手編集の保存・反映ガイドを混ぜない');
-        assert.equal(await editState(page).innerText(),'手元の変更あり','同じエディターを移しても編集状態を保つ');
+        assert.equal(await editState(page).innerText(),'手元で編集中','同じエディターを移しても編集状態を保つ');
+        assert.equal(await page.locator('#kt-customize-file-caption').innerText(),'相談中のファイル');
+        assert.equal(await page.locator('#kt-customize-origin').innerText(),'動作テスト環境から取得','相談画面でも取得元と編集中の状態を分けて示す');
         assert.equal(await page.locator('.ktr-current').isVisible(),false,'コードを開いている間は通常案と重ねない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -719,7 +724,7 @@ test('手編集の登録と運用反映は別確認・編集中の保持・外�
     const register=page.locator('#kt-customize-register'),deploy=page.locator('#kt-customize-deploy'),confirm=page.locator('#kt-customize-manual-confirm'),accept=confirm.locator('[data-manual-confirm]'),cancel=confirm.locator('[data-manual-cancel]'),status=page.locator('#kt-customize-manual-status');
     const initialCalls=await page.evaluate(()=>proposalCalls.length);
     await editor(page).fill('// manual v1');await register.click();await assertEventually(()=>confirm.isVisible(),true);
-    assert.equal(await editState(page).innerText(),'手元の変更あり');
+    assert.equal(await editState(page).innerText(),'手元で編集中');
     assert.match(await confirm.innerText(),/same\.js（PC）/);assert.match(await confirm.innerText(),/運用環境は変更しません/);
     await page.screenshot({path:path.join(out,'manual-register-confirm.png'),fullPage:true});
     await cancel.click();assert.deepEqual(await page.evaluate(()=>operations),[],'確認を取り消すとアップロードも書込みもしない');
@@ -729,7 +734,7 @@ test('手編集の登録と運用反映は別確認・編集中の保持・外�
     await register.click();await assertEventually(()=>confirm.isVisible(),true);await page.evaluate(()=>holdUpload=true);await accept.click();await page.waitForFunction(()=>typeof finishUpload==='function');
     await editor(page).fill('// next edit retained');await page.evaluate(()=>finishUpload());await page.waitForFunction(()=>document.querySelector('#kt-customize-manual-status').textContent.includes('読み戻して一致'));await assertEventually(()=>register.isEnabled(),true);
     assert.equal(await editor(page).inputValue(),'// next edit retained','登録中に進んだ手編集を上書きしない');
-    assert.equal(await editState(page).innerText(),'手元の変更あり','登録成功でも登録中の追加編集は未登録のまま示す');
+    assert.equal(await editState(page).innerText(),'手元で編集中','登録成功でも登録中の追加編集は未登録のまま示す');
     assert.deepEqual(await page.evaluate(()=>operations.map(x=>x.type)),['upload','put'],'登録だけでは運用反映しない');
     assert.equal(await page.evaluate(()=>manualFixtures.sources[manualFixtures.customize.desktop.js[0].file.fileKey]),'// manual v2');
     assert.ok((await page.evaluate(()=>manualChanges)).every(change=>change.preview&&!change.production),'登録後に動作テスト環境の基準を失効する');
@@ -738,7 +743,7 @@ test('手編集の登録と運用反映は別確認・編集中の保持・外�
     assert.equal(await editState(page).innerText(),'取得時と同じ','読み戻しが一致した本文を次の比較元にする');
     await page.evaluate(()=>{manualFixtures.customize.desktop.js[0].file.fileKey='external';manualFixtures.sources.external='// external current';manualFixtures.customize.revision=String(Number(manualFixtures.customize.revision)+1);});
     await editor(page).fill('// conflicting edit');await register.click();await assertEventually(()=>register.isEnabled(),true);assert.equal(await confirm.isVisible(),false);assert.match(await status.innerText(),/ファイルが変わ/);
-    assert.equal(await editState(page).innerText(),'手元の変更あり','外部変更で登録が止まっても手元の編集を登録済みとしない');
+    assert.equal(await editState(page).innerText(),'手元で編集中','外部変更で登録が止まっても手元の編集を登録済みとしない');
     const writesBeforeReload=await page.evaluate(()=>operations.length);await page.locator('#kt-customize-manual-reload').click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/手元の編集は置き換わります/);await cancel.click();assert.equal(await editor(page).inputValue(),'// conflicting edit');
     await page.locator('#kt-customize-manual-reload').click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await assertEventually(()=>editor(page).inputValue(),'// external current');assert.equal(await page.evaluate(()=>operations.length),writesBeforeReload,'読み直しはkintoneに書き込まない');
     assert.equal(await editState(page).innerText(),'取得時と同じ','確認して読み直した本文を比較元にする');

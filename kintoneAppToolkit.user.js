@@ -20471,7 +20471,7 @@
         #kt-customize-source{flex:0 1 155px}#kt-customize-file{flex:1 1 180px}
         #kt-customize-refresh{width:34px;padding:4px}#kt-customize-consult{white-space:nowrap}
         #kt-customize-file-status{font-size:12px;color:var(--kt-muted);margin:0}#kt-customize-file-status:empty{display:none}
-        .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1}.kt-customize-editor-identity{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap}#kt-customize-edit-state{flex:none;max-width:100%;padding:3px 7px;border:1px solid var(--kt-line);border-radius:5px;font-size:11px;line-height:1.4;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-edit-state[data-state="edited"],#kt-customize-edit-state[data-state="new"]{color:var(--kt-accent);border-color:var(--kt-accent)}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
+        .kt-customize-editor-heading{display:flex;align-items:center;gap:10px;min-width:0}.kt-customize-editor-heading #kt-customize-meta{flex:1;min-width:100px;max-width:100%}.kt-customize-editor-identity{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;flex:1;min-width:0}.kt-customize-file-title,.kt-customize-file-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%}#kt-customize-file-caption{font-size:12px;color:var(--kt-muted);flex:none}#kt-customize-origin{font-size:11px;color:var(--kt-muted)}#kt-customize-edit-state{flex:none;max-width:100%;padding:3px 7px;border:1px solid var(--kt-line);border-radius:5px;font-size:11px;line-height:1.4;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-edit-state[data-state="edited"],#kt-customize-edit-state[data-state="new"]{color:var(--kt-accent);border-color:var(--kt-accent)}.kt-customize-editor-heading #kt-customize-consult{width:auto;flex:none}
         #kt-customize-meta{flex:none;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--kt-muted)}
         .kt-customize-actionbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.kt-customize-actionbar .kt-customize-editor-tools,#kt-customize-manual-actions{display:contents}
         #kt-customize-save-help{font-size:12px;margin-top:6px;color:var(--kt-muted);overflow-wrap:anywhere}#kt-customize-save-help summary{cursor:pointer}#kt-customize-save-help dt{font-weight:600;margin:8px 0 2px;color:var(--kt-text)}#kt-customize-save-help dd{margin:0}
@@ -20498,7 +20498,7 @@
           <nav class="kt-customize-modes" aria-label="コードの表示" hidden><button class="btn" data-customize-mode="editor" aria-pressed="true">登録済み・手元の編集</button><button class="btn" data-customize-mode="comparison" aria-pressed="false">AIの修正案・差分</button></nav>
           <div id="kt-customize">
             <div class="kt-customize-editor-pane">
-              <header class="kt-customize-editor-heading"><div class="kt-customize-editor-identity"><div id="kt-customize-meta"></div><span id="kt-customize-edit-state" role="status" title="取得した本文、または登録後に一致を確認した本文との比較です。ローカル保存や運用環境への反映状況ではありません。" hidden></span></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
+              <header class="kt-customize-editor-heading"><div class="kt-customize-editor-identity"><div class="kt-customize-file-title"><span id="kt-customize-file-caption">開いているファイル</span><div id="kt-customize-meta"></div></div><div class="kt-customize-file-status"><span id="kt-customize-origin" hidden></span><span id="kt-customize-edit-state" role="status" title="取得した本文、または登録後に一致を確認した本文との比較です。ローカル保存や運用環境への反映状況ではありません。" hidden></span></div></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
               <p id="kt-customize-editor-note">相談には動作テスト環境のコードを使います。手元の編集は送信しません。</p>
               <p id="kt-customize-assistant-empty" role="status" hidden>相談元のJavaScriptをカスタマイズで開き、［AIに相談］から移動してください。手元のコードはそのまま保持しています。</p>
               <div id="kt-customize-editor"></div>
@@ -20523,7 +20523,7 @@
                 <button id="kt-customize-refresh" class="btn" aria-label="一覧を更新" title="一覧を更新">↻</button></div>
               </div>
               <p id="kt-customize-file-status" role="status"></p>
-              <label id="kt-customize-drafts-wrap" hidden>作業中のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
+              <label id="kt-customize-drafts-wrap" hidden>手元のファイル<select id="kt-customize-drafts" class="btn" aria-label="手元に保持しているコード"><option value="">ファイルを選択してください</option></select></label>
               </section>
 
               <section id="kt-customize-dependencies" class="kt-customize-menu-section" aria-label="コードの依存関係">
@@ -20650,14 +20650,20 @@
     function editingState(d, text = d.text) {
       if (d.isNew) return { key: 'new', label: '新規ファイル' };
       if (typeof d.registeredText !== 'string') return { key: 'unknown', label: '比較元を未取得' };
-      return text === d.registeredText ? { key: 'same', label: '取得時と同じ' } : { key: 'edited', label: '手元の変更あり' };
+      return text === d.registeredText ? { key: 'same', label: '取得時と同じ' } : { key: 'edited', label: '手元で編集中' };
+    }
+    function sourceLabel(d) {
+      return d.isNew ? '手元で作成' : d.environment === 'preview' ? '動作テスト環境から取得' : d.environment === 'production' ? '運用環境から取得' : '取得元は未確認';
     }
     function draftLabel(d, text = d.text) {
-      return (d.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + d.name + '（' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境') + '・' + editingState(d, text).label + '）';
+      return (d.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + d.name + '（' + (d.isNew ? '' : sourceLabel(d) + '・') + editingState(d, text).label + '）';
     }
     function updateEditingState() {
       $editState.hidden = !activeDocument;
+      const origin = $('#kt-customize-origin');
+      origin.hidden = !activeDocument;
       if (!activeDocument) return;
+      origin.textContent = sourceLabel(activeDocument);
       const text = editor.getValue(), state = editingState(activeDocument, text);
       if ($editState.textContent !== state.label) $editState.textContent = state.label;
       $editState.dataset.state = state.key;
@@ -20680,7 +20686,7 @@
       if (d.viewState) editor.restoreViewState?.(d.viewState);
       drafts.set(draftKey(d), d); renderDrafts(); syncFileSelection(); $fileStatus.textContent = '';
       $meta.textContent = d.name + '（' + (d.target === 'mobile' ? 'モバイル' : 'PC') + '）';
-      $meta.title = d.name + '・' + (d.environment === 'preview' ? '動作テスト環境' : '運用環境');
+      $meta.title = d.name + '・' + sourceLabel(d);
       $download.disabled = false; invalidateManualConfirmation(); updateManualButtons(); renderReferenceInfo(); comparison?.render(); ensureDependencies();
     }
     async function selectFile(entry, conf) {
@@ -20706,6 +20712,7 @@
     }
     function syncCodeSurface() {
       const inAssistant = !!codePane.closest('.ktr-code-slot');
+      $('#kt-customize-file-caption').textContent = inAssistant ? '相談中のファイル' : '開いているファイル';
       codePane.querySelector('.kt-customize-modes').hidden = !inAssistant;
       const missing = inAssistant && !assistantDocument();
       $('#kt-customize-assistant-empty').hidden = !missing;
