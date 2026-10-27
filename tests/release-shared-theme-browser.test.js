@@ -152,7 +152,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
           window.serviceCalls = [];
           const denied = name => () => { serviceCalls.push(name); throw Error('UI試験では呼び出し禁止: ' + name); };
           const health = { ok: true, supportedContractVersions: [C.CONTRACT_VERSION], entitlements: [{ product: C.PRODUCT, features: [C.FEATURE, C.FEATURE_PLANNER] }], registry: { [C.PRODUCT]: {
-            [C.FEATURE]: { implemented: true, promptVersions: [C.PROMPT_VERSION], conversation: [...C.CONVERSATION_MARKS, 'releaseWorkspace', 'appExplanation'] },
+            [C.FEATURE]: { implemented: true, promptVersions: [C.PROMPT_VERSION], conversation: [...C.CONVERSATION_MARKS, 'releaseWorkspace', 'appExplanation', 'discussionMetadata'] },
             [C.FEATURE_PLANNER]: { implemented: true, promptVersions: [C.PLANNER_PROMPT_VERSION], ...C.PLANNER_MARKS, requirementOps: [...C.PLANNER_MARKS.requirementOps, 'releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'] },
           } } };
           const client = { getHealth: async () => health, propose: denied('AI.propose'), plan: denied('AI.plan'), generate: denied('AI.generate') };

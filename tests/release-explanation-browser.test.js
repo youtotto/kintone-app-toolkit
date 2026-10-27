@@ -15,7 +15,7 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
  const prod={appId:'310',appName:'案件管理',fields:{memo:{type:'MULTI_LINE_TEXT',code:'memo',label:'備考'},ステータス:{type:'STATUS',code:'ステータス',label:'ステータス',enabled:true}},
  layout:[],views:{views:{},revision:'1'},status:{enable:true,states:{作成中:{name:'作成中',index:'0',assignee:{type:'ONE',entities:[]}},承認待ち:{name:'承認待ち',index:'1',assignee:{type:'ONE',entities:[]}},承認済み:{name:'承認済み',index:'2',assignee:{type:'ONE',entities:[]}}},actions:[]},customize:{scope:'ALL',desktop:{js:[],css:[]},mobile:{js:[],css:[]}}};
  const mock=makeKintoneMock(prod),loadBase=devBaseLoaderOf({KTDevBase:{load:T.KTDevBase.loadForRelease}},{appId:'310',production:prod,mockRef:()=>mock});
- const calls=[],unexpected=[],errors=[];let proposalCount=0,oldHealth=false;
+ const calls=[],unexpected=[],errors=[];let proposalCount=0,missingMark='discussionMetadata';
  const browser=await pw.chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
  try{
   const context=await browser.newContext({viewport:{width:1440,height:900}});
@@ -26,7 +26,7 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
   await page.exposeFunction('base',loadBase);await page.exposeFunction('api',async(name,args)=>mock.api[name](...args));
   await page.exposeFunction('service',async(name,ctx)=>{
-   calls.push({name,ctx});if(name==='getHealth'){const result=E.clone(health);if(oldHealth)result.registry.toolkit['assistant-qa'].conversation=result.registry.toolkit['assistant-qa'].conversation.filter(x=>x!=='appExplanation');return result;}
+   calls.push({name,ctx});if(name==='getHealth'){const result=E.clone(health);if(missingMark)result.registry.toolkit['assistant-qa'].conversation=result.registry.toolkit['assistant-qa'].conversation.filter(x=>x!==missingMark);return result;}
    if(name==='propose'||name==='plan'){
     assert.equal(ctx.coverage.dependencies,true);
     const scope=ctx.facts.find(f=>f.kind==='dependency-coverage');
@@ -62,10 +62,22 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
    });
    work.onVisible();
   },{names:Object.keys(mock.api),prod});
-  const action=name=>page.locator('[data-release-action="'+name+'"]').first();
+  const action=name=>page.locator('[data-release-action="'+name+'"]:visible').first();
   const send=async text=>{await page.locator('#kt-release-input').fill(text);await action('send').click();};
   const countPaid=()=>calls.filter(c=>c.name!=='getHealth').length;
   await page.waitForFunction(()=>work.capability().available===true);
+  // A prior Gateway may advertise appExplanation but reject metadata on turn two.
+  // Detect that combination before the first paid call, including direct controller use.
+  assert.equal(await action('send').isDisabled(),true);
+  assert.equal(await page.evaluate(()=>work.controller.send('互換確認前は送らない')),false);
+  assert.equal(await page.evaluate(()=>work.controller.getState().error.code),'CAPABILITY_OUTDATED');
+  assert.equal(countPaid(),0);
+  assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
+  await page.evaluate(()=>work.controller.newTask());
+  missingMark='';await action('connect').click();await page.locator('dialog [data-refresh]').click();
+  await page.waitForFunction(()=>work.capability().features['assistant-qa'].conversation.includes('discussionMetadata'));
+  await page.locator('dialog [data-close]').click();
+  assert.equal(await action('send').isEnabled(),true);assert.equal(countPaid(),0);
   assert.equal(await action('documents').innerText(),'資料を作る');
   await send('このアプリの仕組みを教えてください。');await page.locator('[data-consent]').click();
   await page.waitForFunction(()=>work.controller.getState().explanations.length===1);
@@ -120,12 +132,25 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
   assert.equal(countPaid(),paid);assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
   await action('show-explanation').click();
   const oldDocument=await page.locator('.ktr-explanation h2').innerText(),beforeOldPaid=countPaid();
-  oldHealth=true;await action('connect').click();await page.locator('dialog [data-refresh]').click();
-  await page.waitForFunction(()=>!work.capability().features['assistant-qa'].conversation.includes('appExplanation'));
+  const retained=await page.evaluate(()=>JSON.stringify({messages:work.controller.getState().messages,adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared}));
+  await page.locator('#kt-release-input').fill('採用後の未送信の相談');
+  for (const mark of ['appExplanation','discussionMetadata']) {
+    missingMark=mark;await action('connect').click();await page.locator('dialog [data-refresh]').click();
+    await page.waitForFunction(mark=>!work.capability().features['assistant-qa'].conversation.includes(mark),mark);
+    await page.locator('dialog [data-close]').click();
+    assert.equal(await action('send').isDisabled(),true);
+    assert.equal(await page.locator('.ktr-explanation h2').innerText(),oldDocument);
+    assert.equal(await page.locator('#kt-release-input').inputValue(),'採用後の未送信の相談');
+    assert.equal(await page.evaluate(()=>JSON.stringify({messages:work.controller.getState().messages,adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared})),retained);
+    await action('copy-explanation').click();assert.equal(countPaid(),beforeOldPaid);
+  }
+  missingMark='';await action('connect').click();await page.locator('dialog [data-refresh]').click();
+  await page.waitForFunction(()=>work.capability().features['assistant-qa'].conversation.includes('discussionMetadata'));
   await page.locator('dialog [data-close]').click();
-  assert.equal(await action('send').isDisabled(),true);
-  assert.equal(await page.locator('.ktr-explanation h2').innerText(),oldDocument);
-  await action('copy-explanation').click();assert.equal(countPaid(),beforeOldPaid);
+  assert.equal(await action('send').isEnabled(),true);
+  assert.equal(await page.locator('#kt-release-input').inputValue(),'採用後の未送信の相談');
+  assert.equal(await page.evaluate(()=>JSON.stringify({messages:work.controller.getState().messages,adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared})),retained);
+  assert.equal(countPaid(),beforeOldPaid);
   assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
   await page.evaluate(()=>work.dispose());
