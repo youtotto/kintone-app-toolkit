@@ -12,7 +12,7 @@ function bundle() {
   const source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8')
     .replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();'); assert.ok(end >= 0);
-  return source.slice(0, end) + '\nglobalThis.ScannerTest={mountRoot,renderScanner,KTApi,KTScan};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.ScannerTest={mountRoot,renderScanner,renderDepsGraph,KTApi,KTScan};\n' + source.slice(end);
 }
 async function mount(page) {
   await page.evaluate(async () => {
@@ -205,5 +205,79 @@ test('JS Scanner: 同一画面の同名JSは登録先を断定せず、既存キ
     await page.locator('#fs-event-search').fill('missing.event');
     assert.equal(await cards(page).count(),0);
     assert.match(await page.locator('#fs-event-notes').innerText(),/shared\.js/,'検索結果が0件でも同名ファイルの未確認を残す');
+  });
+});
+
+test('JS Scanner: フィールド・イベントの影響相談は識別子だけを共有し、移動でAIや解析を呼ばない',{timeout:45000},async()=>{
+  await browserCase(async page=>{
+    await page.evaluate(()=>{window.impactSeeds=[];shell.ktAi={consult(seed){impactSeeds.push(structuredClone(seed));return {ok:true};}};scannerData.layout.push({type:'GROUP',code:'group_only',label:'配置だけのグループ',layout:[]},{type:'ROW',fields:[{type:'SPACER',elementId:'space_only',label:'配置だけのスペース'}]});});
+    await scan(page);await page.locator('#fs-view').selectOption('field');
+    assert.match(await page.locator('#fs-table').innerText(),/group_only/,'既存Scannerは配置だけのグループも表示する');
+    assert.match(await page.locator('#fs-table').innerText(),/space_only/,'既存Scannerは配置だけのスペースも表示する');
+    assert.equal(await page.locator('[data-fs-impact-field="group_only"]').count(),0,'配置だけのグループを実フィールドの相談へ渡さない');
+    assert.equal(await page.locator('[data-fs-impact-field="space_only"]').count(),0,'要素IDをフィールドコードへ読み替えない');
+    const before=await page.evaluate(()=>structuredClone(calls));
+    await page.locator('[data-fs-impact-field="memo"]').click();
+    assert.equal(await page.locator('#view-ai').isVisible(),true);
+    assert.deepEqual(await page.evaluate(()=>impactSeeds),[{type:'field',id:'memo',name:'備考',appId:'398',environment:'preview'}]);
+    assert.deepEqual(await page.evaluate(()=>calls),before,'移動だけで取得・解析・AIを呼ばない');
+    await page.locator('#tab-field-scanner').click();await page.locator('#fs-view').selectOption('event');
+    await page.locator('[data-fs-impact-event="app.record.edit.show"]').click();
+    assert.equal(await page.locator('#view-ai').isVisible(),true);
+    assert.deepEqual(await page.evaluate(()=>impactSeeds.at(-1)),{type:'event',id:'app.record.edit.show',name:'app.record.edit.show',appId:'398',environment:'preview'});
+    assert.deepEqual(await page.evaluate(()=>calls),before,'イベントの候補や本文を再解析して送らない');
+    // Selecting an identifier in a production scan does not claim its evidence is preview evidence.
+    await page.locator('#tab-field-scanner').click();
+    await page.evaluate(()=>{ScannerTest.KTApi.getCustomize=async()=>{calls.customize++;return {source:'production',data:structuredClone(customizeFixture)};};});
+    await scan(page);await page.locator('#fs-view').selectOption('event');
+    const productionCalls=await page.evaluate(()=>structuredClone(calls));
+    assert.match(await page.locator('#view-field-scanner').innerText(),/動作テスト環境/,'送信時に動作テスト環境を読み直すことを知らせる');
+    await page.locator('[data-fs-impact-event="mobile.app.record.edit.show"]').click();
+    assert.deepEqual(await page.evaluate(()=>impactSeeds.at(-1)),{type:'event',id:'mobile.app.record.edit.show',name:'mobile.app.record.edit.show',appId:'398',environment:'preview'});
+    assert.deepEqual(await page.evaluate(()=>calls),productionCalls,'運用環境の解析や本文を相談の根拠として転送しない');
+    await page.locator('#tab-field-scanner').click();
+    await page.evaluate(()=>{shell.ktAi.consult=()=>({ok:false,message:'処理中は対象を変更できません。'});});
+    const count=await page.evaluate(()=>impactSeeds.length);
+    await page.locator('[data-fs-impact-event="app.record.edit.show"]').click();
+    assert.equal(await page.locator('#view-field-scanner').isVisible(),true,'相談側が拒否した場合に画面だけ移動しない');
+    assert.equal(await page.evaluate(()=>impactSeeds.length),count);
+    assert.deepEqual(await page.evaluate(()=>calls),productionCalls);
+    await page.evaluate(async()=>{
+      shell.ktAi.consult=seed=>{impactSeeds.push(structuredClone(seed));return {ok:true};};
+      scannerData.fields.memo.label='備考（再描画後）';
+      await ScannerTest.renderScanner(shell,scannerData);
+    });
+    await scan(page);await page.locator('#fs-view').selectOption('field');
+    const rerenderCalls=await page.evaluate(()=>structuredClone(calls)),rerenderSeeds=await page.evaluate(()=>impactSeeds.length);
+    await page.locator('[data-fs-impact-field="memo"]').click();
+    assert.deepEqual(await page.evaluate(start=>impactSeeds.slice(start),rerenderSeeds),[{type:'field',id:'memo',name:'備考（再描画後）',appId:'398',environment:'preview'}],'同じScannerを描き直しても古い相談処理を残さず、新しい対象を1回だけ引き継ぐ');
+    assert.deepEqual(await page.evaluate(()=>calls),rerenderCalls,'再描画後の相談移動も取得・解析を増やさない');
+  });
+});
+test('Deps: 選択したフィールドから影響相談へ移り、図の解析結果は送らない',{timeout:45000},async()=>{
+  await browserCase(async page=>{
+    await page.evaluate(()=>{
+      window.impactSeeds=[];shell.ktAi={consult(seed){impactSeeds.push(structuredClone(seed));return {ok:true};}};
+      const deps={nodes:[{id:'FIELD:memo',type:'FIELD',name:'備考'},{id:'FIELD:group_only',type:'FIELD',name:'配置だけのグループ'},{id:'FIELD:space_only',type:'FIELD',name:'配置だけのスペース'}],edges:[],meta:{appId:'398',source:'production'}};
+      ScannerTest.renderDepsGraph(shell,deps,'398',[{code:'memo',label:'備考',type:'SINGLE_LINE_TEXT'}]);
+      shell.ktTabs.switchTab('deps');
+    });
+    const impact=page.locator('#dp-impact-consult');assert.equal(await impact.isDisabled(),true,'起点なしでは対象を補わない');
+    await page.locator('#dp-list-mode').check();
+    for(const id of ['group_only','space_only']){
+      await page.locator('#dp-focus').selectOption('FIELD:'+id);await page.locator('#dp-draw').click();
+      assert.equal(await impact.isDisabled(),true,'実フィールドに無いグラフノードを相談対象にしない: '+id);
+      await impact.dispatchEvent('click');assert.equal(await page.evaluate(()=>impactSeeds.length),0);
+    }
+    await page.locator('#dp-focus').selectOption('FIELD:memo');
+    await page.waitForFunction(()=>!document.querySelector('#dp-impact-consult').disabled);
+    const before=await page.evaluate(()=>structuredClone(calls));
+    await impact.click();assert.equal(await page.locator('#view-ai').isVisible(),true);
+    assert.deepEqual(await page.evaluate(()=>impactSeeds),[{type:'field',id:'memo',name:'備考',appId:'398',environment:'preview'}]);
+    assert.deepEqual(await page.evaluate(()=>calls),before,'相談への移動で解析・設定取得を足さない');
+    await page.locator('#tab-deps').click();
+    await page.evaluate(()=>{shell.ktAi.consult=()=>({ok:false,message:'処理中は対象を変更できません。'});});
+    await impact.click();assert.equal(await page.locator('#view-deps').isVisible(),true);assert.match(await page.locator('#dp-status').innerText(),/処理中/);
+    assert.equal(await page.evaluate(()=>impactSeeds.length),1);
   });
 });

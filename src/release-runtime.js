@@ -374,9 +374,12 @@ function mountReleaseWorkspace(host, d) {
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
     attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
     consult(seed) {
-      if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+      if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。処理が終わってから対象を選び直してください。' };
       setCodeOpen(false);
-      view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
+      const target = controller.getState().consultationTarget;
+      view.focusConsultation(target.type === 'FILE'
+        ? '「' + target.name + '」（' + (target.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。'
+        : '「' + (target.type === 'event' ? target.id : target.name) + '」（' + (target.type === 'event' ? 'イベント' : 'フィールド') + '）を変更するときの影響を調べたいです。変更範囲・修正順序・未確認事項・修正後の確認項目を整理してください。');
       return { ok: true };
     },
     dispose() {

@@ -57,17 +57,36 @@ const KTReleaseWorkspace = (() => {
     return plan;
   }
   const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
-  // A selected file is an explicit UI reference, not an interpretation of the request.
+  // A selected identifier is an explicit UI reference, not an interpretation of the request.
   function consultationTargetOf(value) {
     if (value == null) return null;
-    if (value.type !== 'FILE' || value.environment !== 'preview' || !['desktop', 'mobile'].includes(value.target) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+    if (value.environment !== 'preview' || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+    if (['field', 'event'].includes(value.type)) {
+      if (typeof value.id !== 'string' || !value.id.trim() || value.id.length > 300 ||
+          !['string', 'number'].includes(typeof value.appId) || !String(value.appId).trim() || String(value.appId).length > 100) return false;
+      return { type: value.type, id: value.id, name: value.name, appId: String(value.appId), environment: 'preview' };
+    }
+    if (value.type !== 'FILE' || !['desktop', 'mobile'].includes(value.target)) return false;
     return { name: value.name, target: value.target, type: 'FILE', environment: 'preview',
       ...(typeof value.fileKey === 'string' ? { fileKey: value.fileKey } : {}), ...(value.revision != null ? { revision: String(value.revision) } : {}) };
   }
   function resolveConsultationTarget(target, base) {
     if (!target) return null;
     const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
-    if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談するJavaScriptの動作テスト環境を確認できません。');
+    if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談する対象の動作テスト環境を確認できません。');
+    if (['field', 'event'].includes(target.type)) {
+      if (String(base.appId) !== target.appId) fail('CONSULTATION_ENVIRONMENT', '選択した対象と現在のアプリが一致しません。対象を選び直してください。');
+      let name = target.id;
+      if (target.type === 'field') {
+        const collect = properties => Object.values(properties || {}).flatMap(field => [field, ...(field.type === 'SUBTABLE' ? collect(field.fields) : [])]);
+        const matches = collect(base.data?.fields).filter(field => field.code === target.id);
+        if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', '相談するフィールドを現在の設定で一つに特定できません。フィールドを選び直してください。');
+        name = matches[0].label || matches[0].code;
+      }
+      // Event references are resolved by the existing scanner in context creation.
+      // Missing evidence remains unverified; it is not proof that an event is unused.
+      return { type: target.type, id: target.id, name, appId: target.appId, environment: 'preview', revision: String(base.revision?.preview ?? '') };
+    }
     const matches = (base.files || []).filter(f => f.type === 'FILE' && f.name === target.name && f.target === target.target);
     if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', `相談する「${target.name}」（${target.target === 'mobile' ? 'モバイル' : 'PC'}）を一つに特定できません。ファイルを選び直してください。`);
     const file = matches[0];
@@ -197,6 +216,10 @@ const KTReleaseWorkspace = (() => {
           files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
       const requestProposal = (signal, fresh) => {
         resolvedTarget = resolveConsultationTarget(selectedTarget, fresh);
+        const currentTarget = state.consultationTarget;
+        if (resolvedTarget?.type === 'field' && currentTarget?.type === 'field'
+            && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
+            && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
         userMessage.consultationTarget = clone(resolvedTarget);
         return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
       };

@@ -13477,17 +13477,36 @@
       return plan;
     }
     const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
-    // A selected file is an explicit UI reference, not an interpretation of the request.
+    // A selected identifier is an explicit UI reference, not an interpretation of the request.
     function consultationTargetOf(value) {
       if (value == null) return null;
-      if (value.type !== 'FILE' || value.environment !== 'preview' || !['desktop', 'mobile'].includes(value.target) || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+      if (value.environment !== 'preview' || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 300) return false;
+      if (['field', 'event'].includes(value.type)) {
+        if (typeof value.id !== 'string' || !value.id.trim() || value.id.length > 300 ||
+            !['string', 'number'].includes(typeof value.appId) || !String(value.appId).trim() || String(value.appId).length > 100) return false;
+        return { type: value.type, id: value.id, name: value.name, appId: String(value.appId), environment: 'preview' };
+      }
+      if (value.type !== 'FILE' || !['desktop', 'mobile'].includes(value.target)) return false;
       return { name: value.name, target: value.target, type: 'FILE', environment: 'preview',
         ...(typeof value.fileKey === 'string' ? { fileKey: value.fileKey } : {}), ...(value.revision != null ? { revision: String(value.revision) } : {}) };
     }
     function resolveConsultationTarget(target, base) {
       if (!target) return null;
       const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
-      if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談するJavaScriptの動作テスト環境を確認できません。');
+      if (base.env !== 'preview') fail('CONSULTATION_ENVIRONMENT', '相談する対象の動作テスト環境を確認できません。');
+      if (['field', 'event'].includes(target.type)) {
+        if (String(base.appId) !== target.appId) fail('CONSULTATION_ENVIRONMENT', '選択した対象と現在のアプリが一致しません。対象を選び直してください。');
+        let name = target.id;
+        if (target.type === 'field') {
+          const collect = properties => Object.values(properties || {}).flatMap(field => [field, ...(field.type === 'SUBTABLE' ? collect(field.fields) : [])]);
+          const matches = collect(base.data?.fields).filter(field => field.code === target.id);
+          if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', '相談するフィールドを現在の設定で一つに特定できません。フィールドを選び直してください。');
+          name = matches[0].label || matches[0].code;
+        }
+        // Event references are resolved by the existing scanner in context creation.
+        // Missing evidence remains unverified; it is not proof that an event is unused.
+        return { type: target.type, id: target.id, name, appId: target.appId, environment: 'preview', revision: String(base.revision?.preview ?? '') };
+      }
       const matches = (base.files || []).filter(f => f.type === 'FILE' && f.name === target.name && f.target === target.target);
       if (matches.length !== 1) fail('CONSULTATION_TARGET_CHANGED', `相談する「${target.name}」（${target.target === 'mobile' ? 'モバイル' : 'PC'}）を一つに特定できません。ファイルを選び直してください。`);
       const file = matches[0];
@@ -13617,6 +13636,10 @@
             files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
         const requestProposal = (signal, fresh) => {
           resolvedTarget = resolveConsultationTarget(selectedTarget, fresh);
+          const currentTarget = state.consultationTarget;
+          if (resolvedTarget?.type === 'field' && currentTarget?.type === 'field'
+              && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
+              && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
           userMessage.consultationTarget = clone(resolvedTarget);
           return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
         };
@@ -13825,6 +13848,7 @@
   const KTReleaseContext = (() => {
     const clone = x => x == null ? x : JSON.parse(JSON.stringify(x));
     const entries = x => Object.values(x || {});
+    const sameFileEnvironment = (file, base) => file.env == null || file.env === base.env;
     function fieldsOf(properties, parent = null) {
       return entries(properties).flatMap(f => [{ code: f.code, label: f.label || f.code, type: f.type,
         ...(parent ? { subtable: parent } : {}), ...(f.lookup ? { lookup: true, lookupMappings: clone(f.lookup.fieldMappings || []) } : {}), ...(typeof f.expression === 'string' ? { expression: f.expression } : {}), ...(f.required != null ? { required: f.required } : {}),
@@ -13837,20 +13861,22 @@
       if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return ctx;
     }
-    function dependencyContext(base, tools) {
+    function dependencyContext(base, tools, consultationTarget = null) {
       const provenance = { environment: base.env || null, appId: String(base.appId ?? ''), revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null };
       const missingSettings = (base.errors || []).filter(e => e.env === 'preview').map(e => ({ key: e.what, label: e.label, code: e.code ?? null }));
-      const unavailableFiles = (base.files || []).filter(f => f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
-        .map(f => ({ name: f.name, target: f.target, reason: f.type === 'URL' ? 'url' : 'unavailable' }));
+      const unavailableFiles = (base.files || []).filter(f => !sameFileEnvironment(f, base) || f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
+        .map(f => ({ name: f.name, target: f.target, reason: !sameFileEnvironment(f, base) ? 'environment-mismatch' : f.type === 'URL' ? 'url' : 'unavailable' }));
       const summary = { ...provenance, status: 'unavailable', analyzedAt: null, missingSettings, unavailableFiles,
         unchecked: ['動的に組み立てるフィールド名など、静的な解析で特定できない参照', 'URL指定のファイルとCSSの本文', 'プラグインの内部処理',
           '他アプリからこのアプリへの参照', '参照先アプリの設定や処理との整合性', 'レコードの内容と実際の画面での動作'] };
+      if (consultationTarget?.type === 'event') summary.event = { name: consultationTarget.id, status: 'unavailable', references: 0,
+        unchecked: ['動的に組み立てるイベント名と登録処理', '実際の呼び出し順、非同期の完了順と同じ値の上書き'] };
       let facts = [];
       if (tools && base.ok && base.env === 'preview') {
         // Never use Deps/scan/incoming caches or production file bodies. In particular,
         // a fingerprint does not cover every setting, so do not cache these results.
         const current = { ok: true, env: 'preview', appId: base.appId, loadedAt: base.loadedAt,
-          data: { ...clone(base.data), relatedApps: {}, plugins: null }, files: clone(base.files || []), incoming: null, deps: null, scan: null };
+          data: { ...clone(base.data), relatedApps: {}, plugins: null }, files: clone((base.files || []).filter(f => sameFileEnvironment(f, base))), incoming: null, deps: null, scan: null };
         try {
           tools.analyze(current);
           if (current.analysisError || !current.deps || !current.scan) throw new Error('DEPENDENCIES_UNAVAILABLE');
@@ -13860,10 +13886,36 @@
           const unresolved = { fields: current.deps.meta?.unknownJsRefs || [], statuses: current.deps.meta?.unknownJsStatuses || [] };
           if (unresolved.fields.length || unresolved.statuses.length) facts.push({ kind: 'js-unresolved-reference', confidence: 'UNCERTAIN', basis: 'code', provenance: clone(provenance),
             statement: 'JavaScript内に、今回のフィールドやステータスの定義と照合できなかった参照の候補があります。実際の動作や変更の必要性は未確認です。', value: clone(unresolved) });
+          if (summary.event) {
+            const scan = current.scan, files = current.files;
+            const coherent = String(scan.meta?.appId) === provenance.appId && scan.meta?.source === 'preview'
+              && scan.meta?.scannedAt === base.loadedAt && scan.fileEvents && typeof scan.fileEvents === 'object';
+            if (coherent) {
+              for (const file of files) {
+                if (file.type !== 'FILE' || file.sourceAvailable === false || typeof file.text !== 'string') continue;
+                const matching = files.filter(f => f.target === file.target && f.name === file.name);
+                const scanned = (scan.files || []).filter(f => f.target === file.target && f.name === file.name && f.kind === 'js');
+                if (matching.length !== 1 || scanned.length !== 1 || scanned[0].note || scanned[0].text !== file.text) {
+                  summary.event.unchecked.push((file.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + file.name + 'の登録内容と解析結果を一つに特定できません');
+                  continue;
+                }
+                const rows = scan.fileEvents[file.target + ':js:' + file.name] || [];
+                const refs = Array.isArray(rows) ? rows.filter(row => (typeof row === 'string' ? row : row?.name) === consultationTarget.id) : [];
+                if (!refs.length) continue;
+                const direct = refs.some(row => typeof row === 'string' || row.direct === true);
+                facts.push({ kind: 'js-event-reference', confidence: direct ? 'LIKELY' : 'UNCERTAIN', basis: 'code', provenance: clone(provenance),
+                  statement: '登録済みファイル「' + file.name + '」にイベント「' + consultationTarget.id + '」の' + (direct ? '登録の記述があります。' : '登録の候補があります。') + '実際の実行や他の処理との影響は未確認です。',
+                  value: { event: consultationTarget.id, direct, file: { name: file.name, target: file.target, id: file.fileKey || file.id } } });
+                summary.event.references++;
+              }
+              summary.event.status = summary.event.references ? 'references-found' : 'not-found';
+            }
+          }
           summary.status = 'analyzed'; summary.analyzedAt = current.deps.meta?.scannerMergedAt || current.deps.meta?.generatedAt || null;
         } catch (_) {
           // Failure is not an empty, successful graph. Raw settings remain available.
           facts = []; summary.unchecked.unshift('依存関係の解析結果を取得できませんでした');
+          if (summary.event) { summary.event.status = 'unavailable'; summary.event.references = 0; }
         }
       } else summary.unchecked.unshift('今回の取得結果から依存関係を解析していません');
       facts.push({ kind: 'dependency-coverage', confidence: 'NOT_ANALYZED',
@@ -13873,9 +13925,11 @@
         value: summary });
       return { facts, analyzed: summary.status === 'analyzed' };
     }
-    const selectedFile = target => target ? { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
+    const selectedTarget = target => target ? ['field', 'event'].includes(target.type)
+      ? { type: target.type, id: target.id, name: target.name, appId: target.appId, environment: target.environment, revision: target.revision }
+      : { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
     const fileSubject = target => target ? { type: 'javascript', sourceId: target.target + ':js:' + target.name, name: target.name, target: target.target, customizationType: 'FILE', sourceAvailable: true } : null;
-    function factsOf(base, dependencies = { facts: [] }, requestTargets = []) {
+    function factsOf(base, dependencies = { facts: [] }, requestTargets = [], consultationTarget = null) {
       const data = base.data || {}, facts = [];
       const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
       add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
@@ -13898,17 +13952,18 @@
         } else if (!['fields', 'appId', 'appName', 'name', 'plugins', 'relatedApps'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
       }
       for (const file of base.files || []) {
-        const available = file.sourceAvailable !== false && typeof file.text === 'string';
+        const available = sameFileEnvironment(file, base) && file.sourceAvailable !== false && typeof file.text === 'string';
         add('js-file', '登録済みファイル「' + file.name + '」', { id: file.fileKey || file.id, name: file.name, target: file.target, type: file.type, source: available ? file.text : null, sourceAvailable: available },
           { confidence: available ? 'CERTAIN' : 'NOT_ANALYZED' });
       }
       for (const fact of dependencies.facts) facts.push({ ...clone(fact), id: 'E' + (facts.length + 1) });
-      if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していたJavaScriptです。各発言の対象を示す履歴であり、変更の採用や現在の本文を示すものではありません。現在の本文は登録済みファイルの情報を参照してください。',
-        requestTargets.map(request => ({ text: request.text, target: selectedFile(request.target) })));
+      if (['field', 'event'].includes(consultationTarget?.type)) add('consultation-target', '今回、利用者が変更の影響を相談するために選択した対象です。選択しただけでは変更の依頼や採用にはなりません。', selectedTarget(consultationTarget));
+      if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していた対象です。各発言の対象を示す履歴であり、変更の採用や現在の設定・本文を示すものではありません。現在の設定と登録済みファイルの情報を参照してください。',
+        requestTargets.map(request => ({ text: request.text, target: selectedTarget(request.target) })));
       if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return facts;
     }
-    const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
+    const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => sameFileEnvironment(f, base) && f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
     function dictionaryOf(base) {
       const fields = fieldsOf(base.data?.fields), data = base.data || {};
       return { fieldCodes: fields.map(f => f.code), fieldLabels: fields.map(f => f.label), fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])),
@@ -13919,10 +13974,12 @@
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
     function proposal({ text, consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
-      const dependencies = dependencyContext(base, dependencyTools);
-      const focus = consultationTarget ? { resolution: 'resolved', target: { ...selectedFile(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }, candidates: [] } : { resolution: 'none', target: null, candidates: [] };
+      const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
+      const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
+        ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
+        : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-        focus, facts: factsOf(base, dependencies, requestTargets), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+        focus, facts: factsOf(base, dependencies, requestTargets, consultationTarget), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
@@ -13936,10 +13993,10 @@
       });
     }
     function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], version, base }, dependencyTools = null) {
-      const dependencies = dependencyContext(base, dependencyTools);
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets), dictionary: dictionaryOf(base),
+      const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
         coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
-        ...(consultationTarget ? { subject: fileSubject(consultationTarget) } : {}),
+        ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
         acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
     }
     function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {
@@ -14500,13 +14557,17 @@
       return `<div class="ktr-document-navigation"><nav class="ktr-document-tabs" aria-label="表示する内容">${button('show-explanation', '説明', { id: explanation?.id || latest.id, disabled, extra: ` aria-pressed="${!!explanation && !historical}"` })}${button('show-changes', '変更案', { disabled, extra: ` aria-pressed="${!explanation && !historical}"` })}</nav>${documents.length > 1 ? `<details data-release-panel="explanation-history"><summary>これまでの説明</summary><ul>${documents.map((document, index) => `<li>${button('show-explanation', `${index + 1}. ${document.title || 'アプリの説明'}`, { id: document.id, disabled, extra: ` aria-current="${document.id === explanation?.id ? 'true' : 'false'}"` })}</li>`).join('')}</ul></details>` : ''}</div>`;
     }
 
+    const consultationLabel = target => target.type === 'field'
+      ? (target.name === target.id ? target.id : target.name + '（' + target.id + '）') + ' / フィールド'
+      : target.type === 'event' ? target.id + ' / イベント'
+      : target.name + '（' + (target.target === 'mobile' ? 'モバイル' : 'PC') + '）';
     function historyHtml(messages) {
       if (!messages?.length) return '<p class="ktr-empty-chat">変更したいことや、アプリについて知りたいことを教えてください。</p>';
-      return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(m.consultationTarget.name)}（${m.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
+      return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(consultationLabel(m.consultationTarget))}</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
     }
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(state.consultationTarget.name)}（${state.consultationTarget.target === 'mobile' ? 'モバイル' : 'PC'}）</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>送信時に取得する登録済みコードを使います。手元の編集は送信しません。</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -15675,9 +15736,12 @@
       invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
       attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
       consult(seed) {
-        if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。動作テスト環境のJavaScriptを選んでください。' };
+        if (!view.canFocusConsultation() || !controller.setConsultationTarget(seed)) return { ok: false, message: '処理中、または相談の対象を確認できません。処理が終わってから対象を選び直してください。' };
         setCodeOpen(false);
-        view.focusConsultation('「' + seed.name + '」（' + (seed.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。');
+        const target = controller.getState().consultationTarget;
+        view.focusConsultation(target.type === 'FILE'
+          ? '「' + target.name + '」（' + (target.target === 'mobile' ? 'モバイル' : 'PC') + '）について相談したいです。'
+          : '「' + (target.type === 'event' ? target.id : target.name) + '」（' + (target.type === 'event' ? 'イベント' : 'フィールド') + '）を変更するときの影響を調べたいです。変更範囲・修正順序・未確認事項・修正後の確認項目を整理してください。');
         return { ok: true };
       },
       dispose() {
@@ -20299,6 +20363,7 @@
                 <p id="kt-customize-dependency-status" role="status">必要なときに、動作テスト環境の設定と登録済みコードを取得します。</p>
                 <input id="kt-customize-field-search" type="search" placeholder="フィールドを探す" aria-label="フィールドを探す" disabled>
                 <select id="kt-customize-field" aria-label="依存関係を確認するフィールド" disabled><option value="">フィールドを選択</option></select>
+                <button id="kt-customize-impact-consult" class="btn" disabled title="動作テスト環境での変更の影響をAI Assistantに相談します。移動だけではAIを呼びません。">変更の影響をAIに相談</button>
                 <div id="kt-customize-dependency-content"></div>
               </section>
               <details id="kt-customize-reference-info"><summary>登録済みコードの参照情報</summary><div data-reference-content></div><button class="btn" data-open-deps>Depsで詳しく見る</button></details>
@@ -20650,6 +20715,7 @@
     }
     function renderDependencies() {
       const query = $fieldSearch.value.trim().toLocaleLowerCase(), info = dependencyInfo();
+      $('#kt-customize-impact-consult').disabled = dependencyBusy || !!dependencyNote || info.status !== 'ready' || manualBusy || typeof consult !== 'function';
       const isEvent = dependencyKind === 'event', selected = isEvent ? dependencyEvent : dependencyCode, label = isEvent ? 'イベント' : 'フィールド';
       const entries = isEvent ? (info.events || []).map(event => ({ code: event.name, label: event.name, type: KTJsCatalog.eventJa(event.name) || '' })) : dependencySnapshot?.fields || [];
       const available = !dependencyBusy && ['ready', 'select-field', 'select-event', 'unresolved'].includes(info.status);
@@ -20664,6 +20730,19 @@
       $('#kt-customize-dependency-status').textContent = dependencyBusy ? '依存関係を取得しています…' : dependencyNote || (available ? '動作テスト環境' + (when ? '・' + when : '') : '動作テスト環境の依存関係は未確認です。');
       $('#kt-customize-dependency-content').innerHTML = dependencyBusy || dependencyNote ? '' : KTReleaseCustomize.renderDependencyInfo(info);
     }
+    $('#kt-customize-impact-consult').addEventListener('click', async () => {
+      const button = $('#kt-customize-impact-consult'), info = dependencyInfo();
+      if (button.disabled || manualBusy || info.status !== 'ready') return;
+      const isEvent = info.kind === 'event';
+      const seed = { type: isEvent ? 'event' : 'field', id: isEvent ? info.event.name : info.field.code,
+        name: isEvent ? info.event.name : info.field.label || info.field.code, appId: String(appId), environment: 'preview' };
+      button.disabled = true;
+      try {
+        const result = await consult(seed);
+        if (result?.ok === false) $('#kt-customize-dependency-status').textContent = result.message || '相談画面を開けませんでした。';
+        else { retainEditor(); root.ktTabs?.switchTab?.('ai'); }
+      } finally { button.disabled = dependencyBusy || !!dependencyNote || dependencyInfo().status !== 'ready' || manualBusy; }
+    });
     function ensureDependencies(live = null) {
       if (activeDocument?.kind !== 'js' || activeDocument.isNew || activeDocument.environment !== 'preview') return;
       const ticket = KTFetchGate.of(root).ticket();
@@ -21061,6 +21140,8 @@
             </select>
           </label>
 
+          <button id="dp-impact-consult" type="button" class="btn" disabled>変更の影響をAIに相談</button>
+          <span style="font-size:11px;opacity:.8">相談の送信時に、動作テスト環境を取得し直して確認します。</span>
           <label style="display:inline-flex;align-items:center;gap:6px">
             <span>範囲</span>
             <select id="dp-depth" style="padding:4px 8px;border-radius:8px;border:1px solid ${BD};background:${C.bgInput};color:${C.text}">
@@ -21148,6 +21229,20 @@
     `;
 
     const $focus = el.querySelector('#dp-focus');
+    const fieldCodes = new Set(fieldsN.map(field => field.code));
+    const canConsultField = node => !!node && fieldCodes.has(String(node.id).slice('FIELD:'.length));
+    const $impact = el.querySelector('#dp-impact-consult');
+    $impact.addEventListener('click', async () => {
+      const node = fieldNodes.find(item => item.id === $focus.value);
+      if (!canConsultField(node) || $impact.disabled) return;
+      $impact.disabled = true;
+      try {
+        const id = String(node.id).slice('FIELD:'.length);
+        const result = await root.ktAi?.consult?.({ type: 'field', id, name: node.name || id, appId: String(appId), environment: 'preview' });
+        if (result?.ok) root.ktTabs?.switchTab?.('ai');
+        else $status.textContent = result?.message || 'AIの相談画面を準備できていません。';
+      } finally { $impact.disabled = !fieldNodes.some(item => item.id === $focus.value && canConsultField(item)); }
+    });
     const $depth = el.querySelector('#dp-depth');
     const $max = el.querySelector('#dp-max');
     const $fieldsOnly = el.querySelector('#dp-fields-only');
@@ -21392,6 +21487,7 @@
     const draw = () => {
       const seq = ++renderSeq;
       const opt = currentOptions();
+      $impact.disabled = !fieldNodes.some(item => item.id === opt.focusId && canConsultField(item));
       const sub = KTDeps.buildSubgraph(deps, opt);
       lastCode = KTDeps.toMermaid(sub, mermaidOptions(opt.focusId));
       // toMermaid は nodes の並び順に N0, N1 ... と採番するため、添字から起点のIDが分かる
@@ -21651,10 +21747,10 @@
               </select>
             </div>
             <div id="fs-event-notes" style="font-size:12px;line-height:1.7;margin-bottom:12px;"></div>
-            <div id="fs-event-results"><div style="padding:14px;opacity:.8;">解析結果を待っています。</div></div>
+            <p style="font-size:12px">AIへの相談は、送信時に動作テスト環境を取得し直して確認します。</p><div id="fs-event-results"><div style="padding:14px;opacity:.8;">解析結果を待っています。</div></div>
           </div>
 
-          <div id="fs-table-wrap" class="kt-scroll-area" style="display:none;">
+          <div id="fs-table-wrap" class="kt-scroll-area" style="display:none;"><p style="font-size:12px">AIへの相談は、送信時に動作テスト環境を取得し直して確認します。</p>
             <table id="fs-table" style="width:100%; border-collapse:collapse;">
               <thead>
                 <tr>
@@ -21764,7 +21860,27 @@
       const $tableWrap = el.querySelector('#fs-table-wrap');
       const $view = el.querySelector('#fs-view');
 
+      // Layout-only element IDs are not fields. Use the existing field definitions.
+      const consultableFieldCodes = new Set(KTDeps.normalizeFields(DATA.fields).map(field => field.code));
       let FS_last = null;
+      const consultImpact = async event => {
+        const button = event.target.closest?.('[data-fs-impact-field],[data-fs-impact-event]');
+        if (!button || button.disabled || String(FS_last?.meta?.appId) !== String(DATA.appId)) return;
+        const isEvent = button.hasAttribute('data-fs-impact-event');
+        const id = isEvent ? button.dataset.fsImpactEvent : button.dataset.fsImpactField;
+        const field = !isEvent && FS_last.results?.find(row => row.code === id);
+        if (!isEvent && (!field || !consultableFieldCodes.has(id))) return;
+        button.disabled = true;
+        try {
+          const result = await root.ktAi?.consult?.({ type: isEvent ? 'event' : 'field', id,
+            name: isEvent ? id : field.label || id, appId: String(DATA.appId), environment: 'preview' });
+          if (result?.ok) root.ktTabs?.switchTab?.('ai');
+          else $meta.textContent = result?.message || 'AIの相談画面を準備できていません。';
+        } finally { if (button.isConnected) button.disabled = false; }
+      };
+      // Bind to this render's children; discarded scan results must not handle a later click.
+      $tbody.addEventListener('click', consultImpact);
+      $eventResults.addEventListener('click', consultImpact);
 
       const resolveInclude = (v) =>
         v === 'desktop' ? { desktop: true, mobile: false } :
@@ -21931,7 +22047,7 @@
           return `
             <tr>
               <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${r.used ? '✅' : '—'}</td>
-              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${escapeHtml(r.code)}</code></td>
+              <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};"><code>${escapeHtml(r.code)}</code>${consultableFieldCodes.has(r.code) ? '<div><button type="button" class="btn" data-fs-impact-field="' + escapeHtml(r.code) + '" title="送信時に動作テスト環境を取得し直して確認します。移動だけではAIを呼びません。">変更の影響をAIに相談</button></div>' : ''}</td>
               <td style="padding:8px; border-bottom:1px solid ${BD};">${escapeHtml(r.label ?? '')}</td>
               <td style="white-space:nowrap; padding:8px; border-bottom:1px solid ${BD};">${escapeHtml(r.type ?? '')}</td>
               <td style="text-align:right; padding:8px; border-bottom:1px solid ${BD};">${r.count}</td>
@@ -22139,6 +22255,7 @@
         $eventResults.innerHTML = visible.length ? visible.map(name => `
           <article data-fs-event="${escapeHtml(name)}" style="border:1px solid ${BD};border-radius:10px;padding:12px;margin-bottom:10px;">
             <h3 style="font-size:14px;margin:0 0 8px;overflow-wrap:anywhere;"><code>${escapeHtml(name)}</code></h3>
+            <button type="button" class="btn" data-fs-impact-event="${escapeHtml(name)}" title="送信時に動作テスト環境を取得し直して確認します。移動だけではAIを呼びません。">変更の影響をAIに相談</button>
             <ul style="list-style:none;padding:0;margin:0;">${[...groups.get(name).values()].map(use => `
               <li style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid ${BD};">
                 <span style="flex:1;min-width:180px;overflow-wrap:anywhere;"><b>${escapeHtml(use.file.name)}</b>（${escapeHtml(targetLabel(use.file))}${use.count > 1 ? `・同名 ${use.count} 本` : ''}）</span>

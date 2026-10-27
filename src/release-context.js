@@ -4,6 +4,7 @@
 const KTReleaseContext = (() => {
   const clone = x => x == null ? x : JSON.parse(JSON.stringify(x));
   const entries = x => Object.values(x || {});
+  const sameFileEnvironment = (file, base) => file.env == null || file.env === base.env;
   function fieldsOf(properties, parent = null) {
     return entries(properties).flatMap(f => [{ code: f.code, label: f.label || f.code, type: f.type,
       ...(parent ? { subtable: parent } : {}), ...(f.lookup ? { lookup: true, lookupMappings: clone(f.lookup.fieldMappings || []) } : {}), ...(typeof f.expression === 'string' ? { expression: f.expression } : {}), ...(f.required != null ? { required: f.required } : {}),
@@ -16,20 +17,22 @@ const KTReleaseContext = (() => {
     if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
     return ctx;
   }
-  function dependencyContext(base, tools) {
+  function dependencyContext(base, tools, consultationTarget = null) {
     const provenance = { environment: base.env || null, appId: String(base.appId ?? ''), revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null };
     const missingSettings = (base.errors || []).filter(e => e.env === 'preview').map(e => ({ key: e.what, label: e.label, code: e.code ?? null }));
-    const unavailableFiles = (base.files || []).filter(f => f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
-      .map(f => ({ name: f.name, target: f.target, reason: f.type === 'URL' ? 'url' : 'unavailable' }));
+    const unavailableFiles = (base.files || []).filter(f => !sameFileEnvironment(f, base) || f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
+      .map(f => ({ name: f.name, target: f.target, reason: !sameFileEnvironment(f, base) ? 'environment-mismatch' : f.type === 'URL' ? 'url' : 'unavailable' }));
     const summary = { ...provenance, status: 'unavailable', analyzedAt: null, missingSettings, unavailableFiles,
       unchecked: ['動的に組み立てるフィールド名など、静的な解析で特定できない参照', 'URL指定のファイルとCSSの本文', 'プラグインの内部処理',
         '他アプリからこのアプリへの参照', '参照先アプリの設定や処理との整合性', 'レコードの内容と実際の画面での動作'] };
+    if (consultationTarget?.type === 'event') summary.event = { name: consultationTarget.id, status: 'unavailable', references: 0,
+      unchecked: ['動的に組み立てるイベント名と登録処理', '実際の呼び出し順、非同期の完了順と同じ値の上書き'] };
     let facts = [];
     if (tools && base.ok && base.env === 'preview') {
       // Never use Deps/scan/incoming caches or production file bodies. In particular,
       // a fingerprint does not cover every setting, so do not cache these results.
       const current = { ok: true, env: 'preview', appId: base.appId, loadedAt: base.loadedAt,
-        data: { ...clone(base.data), relatedApps: {}, plugins: null }, files: clone(base.files || []), incoming: null, deps: null, scan: null };
+        data: { ...clone(base.data), relatedApps: {}, plugins: null }, files: clone((base.files || []).filter(f => sameFileEnvironment(f, base))), incoming: null, deps: null, scan: null };
       try {
         tools.analyze(current);
         if (current.analysisError || !current.deps || !current.scan) throw new Error('DEPENDENCIES_UNAVAILABLE');
@@ -39,10 +42,36 @@ const KTReleaseContext = (() => {
         const unresolved = { fields: current.deps.meta?.unknownJsRefs || [], statuses: current.deps.meta?.unknownJsStatuses || [] };
         if (unresolved.fields.length || unresolved.statuses.length) facts.push({ kind: 'js-unresolved-reference', confidence: 'UNCERTAIN', basis: 'code', provenance: clone(provenance),
           statement: 'JavaScript内に、今回のフィールドやステータスの定義と照合できなかった参照の候補があります。実際の動作や変更の必要性は未確認です。', value: clone(unresolved) });
+        if (summary.event) {
+          const scan = current.scan, files = current.files;
+          const coherent = String(scan.meta?.appId) === provenance.appId && scan.meta?.source === 'preview'
+            && scan.meta?.scannedAt === base.loadedAt && scan.fileEvents && typeof scan.fileEvents === 'object';
+          if (coherent) {
+            for (const file of files) {
+              if (file.type !== 'FILE' || file.sourceAvailable === false || typeof file.text !== 'string') continue;
+              const matching = files.filter(f => f.target === file.target && f.name === file.name);
+              const scanned = (scan.files || []).filter(f => f.target === file.target && f.name === file.name && f.kind === 'js');
+              if (matching.length !== 1 || scanned.length !== 1 || scanned[0].note || scanned[0].text !== file.text) {
+                summary.event.unchecked.push((file.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + file.name + 'の登録内容と解析結果を一つに特定できません');
+                continue;
+              }
+              const rows = scan.fileEvents[file.target + ':js:' + file.name] || [];
+              const refs = Array.isArray(rows) ? rows.filter(row => (typeof row === 'string' ? row : row?.name) === consultationTarget.id) : [];
+              if (!refs.length) continue;
+              const direct = refs.some(row => typeof row === 'string' || row.direct === true);
+              facts.push({ kind: 'js-event-reference', confidence: direct ? 'LIKELY' : 'UNCERTAIN', basis: 'code', provenance: clone(provenance),
+                statement: '登録済みファイル「' + file.name + '」にイベント「' + consultationTarget.id + '」の' + (direct ? '登録の記述があります。' : '登録の候補があります。') + '実際の実行や他の処理との影響は未確認です。',
+                value: { event: consultationTarget.id, direct, file: { name: file.name, target: file.target, id: file.fileKey || file.id } } });
+              summary.event.references++;
+            }
+            summary.event.status = summary.event.references ? 'references-found' : 'not-found';
+          }
+        }
         summary.status = 'analyzed'; summary.analyzedAt = current.deps.meta?.scannerMergedAt || current.deps.meta?.generatedAt || null;
       } catch (_) {
         // Failure is not an empty, successful graph. Raw settings remain available.
         facts = []; summary.unchecked.unshift('依存関係の解析結果を取得できませんでした');
+        if (summary.event) { summary.event.status = 'unavailable'; summary.event.references = 0; }
       }
     } else summary.unchecked.unshift('今回の取得結果から依存関係を解析していません');
     facts.push({ kind: 'dependency-coverage', confidence: 'NOT_ANALYZED',
@@ -52,9 +81,11 @@ const KTReleaseContext = (() => {
       value: summary });
     return { facts, analyzed: summary.status === 'analyzed' };
   }
-  const selectedFile = target => target ? { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
+  const selectedTarget = target => target ? ['field', 'event'].includes(target.type)
+    ? { type: target.type, id: target.id, name: target.name, appId: target.appId, environment: target.environment, revision: target.revision }
+    : { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
   const fileSubject = target => target ? { type: 'javascript', sourceId: target.target + ':js:' + target.name, name: target.name, target: target.target, customizationType: 'FILE', sourceAvailable: true } : null;
-  function factsOf(base, dependencies = { facts: [] }, requestTargets = []) {
+  function factsOf(base, dependencies = { facts: [] }, requestTargets = [], consultationTarget = null) {
     const data = base.data || {}, facts = [];
     const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
     add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
@@ -77,17 +108,18 @@ const KTReleaseContext = (() => {
       } else if (!['fields', 'appId', 'appName', 'name', 'plugins', 'relatedApps'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
     }
     for (const file of base.files || []) {
-      const available = file.sourceAvailable !== false && typeof file.text === 'string';
+      const available = sameFileEnvironment(file, base) && file.sourceAvailable !== false && typeof file.text === 'string';
       add('js-file', '登録済みファイル「' + file.name + '」', { id: file.fileKey || file.id, name: file.name, target: file.target, type: file.type, source: available ? file.text : null, sourceAvailable: available },
         { confidence: available ? 'CERTAIN' : 'NOT_ANALYZED' });
     }
     for (const fact of dependencies.facts) facts.push({ ...clone(fact), id: 'E' + (facts.length + 1) });
-    if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していたJavaScriptです。各発言の対象を示す履歴であり、変更の採用や現在の本文を示すものではありません。現在の本文は登録済みファイルの情報を参照してください。',
-      requestTargets.map(request => ({ text: request.text, target: selectedFile(request.target) })));
+    if (['field', 'event'].includes(consultationTarget?.type)) add('consultation-target', '今回、利用者が変更の影響を相談するために選択した対象です。選択しただけでは変更の依頼や採用にはなりません。', selectedTarget(consultationTarget));
+    if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していた対象です。各発言の対象を示す履歴であり、変更の採用や現在の設定・本文を示すものではありません。現在の設定と登録済みファイルの情報を参照してください。',
+      requestTargets.map(request => ({ text: request.text, target: selectedTarget(request.target) })));
     if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
     return facts;
   }
-  const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
+  const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => sameFileEnvironment(f, base) && f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
   function dictionaryOf(base) {
     const fields = fieldsOf(base.data?.fields), data = base.data || {};
     return { fieldCodes: fields.map(f => f.code), fieldLabels: fields.map(f => f.label), fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])),
@@ -98,10 +130,12 @@ const KTReleaseContext = (() => {
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
   function proposal({ text, consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
-    const dependencies = dependencyContext(base, dependencyTools);
-    const focus = consultationTarget ? { resolution: 'resolved', target: { ...selectedFile(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }, candidates: [] } : { resolution: 'none', target: null, candidates: [] };
+    const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
+    const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
+      ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
+      : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
     return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-      focus, facts: factsOf(base, dependencies, requestTargets), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+      focus, facts: factsOf(base, dependencies, requestTargets, consultationTarget), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
   }
@@ -115,10 +149,10 @@ const KTReleaseContext = (() => {
     });
   }
   function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], version, base }, dependencyTools = null) {
-    const dependencies = dependencyContext(base, dependencyTools);
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets), dictionary: dictionaryOf(base),
+    const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
       coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
-      ...(consultationTarget ? { subject: fileSubject(consultationTarget) } : {}),
+      ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }
   function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {

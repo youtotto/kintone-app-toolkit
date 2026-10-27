@@ -769,3 +769,55 @@ test('依存関係の自動取得は失敗を繰り返さず、再表示と新�
     assert.equal(await editor(page).inputValue(),'// kept draft\nconst memo = 42;');assert.equal(await page.evaluate(()=>proposalCalls.length),initial.ai);assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);await page.evaluate(()=>work.dispose());
   }finally{await context.close();await browser.close();}
 });
+
+test('依存関係からの影響相談は共有会話と下書きを保持し、送信時に最新の設定・コードを使う',{timeout:60000},async()=>{
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'}),unexpected=[],errors=[];
+  try{
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%}</style><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
+    await page.evaluate(()=>{
+      dependencyBase.data.fields.summary={code:'summary',label:'備考の確認',type:'SINGLE_LINE_TEXT',expression:'IF(memo="","未入力","入力済み")'};
+      dependencyBase.files.find(f=>f.name==='same.js'&&f.target==='desktop').text="kintone.events.on('app.record.edit.show', event => { event.record.memo.value = 'registered'; return event; });";
+      fixtureClient.propose=async({ctx})=>{proposalCalls.push(structuredClone(ctx));return {reply:'影響を整理しました。',intent:'question',proposalUnchanged:true,explanation:{title:'変更の影響',sections:[{heading:'変更範囲',paragraphs:['備考と計算式を確認します。'],items:[],table:null,evidenceIds:[]},{heading:'修正順序',paragraphs:[],items:['参照する処理を確認してからフィールドを変更します。'],table:null,evidenceIds:[]},{heading:'修正後の確認項目',paragraphs:[],items:['新規作成と編集を確認します。'],table:null,evidenceIds:[]}],unknowns:['他アプリからの参照は未確認です。']},turn:{ops:[],answers:[],requirementOps:[]}};};
+    });
+    const field=page.locator('#kt-customize-field'),impact=page.locator('#kt-customize-impact-consult');
+    assert.equal(await impact.isDisabled(),true,'選択も取得も済んでいない状態では対象を作らない');
+    await selected(page,'same.js','// PC original\nconst memo = 1;\n');await assertEventually(()=>field.isDisabled(),false);
+    await field.selectOption('memo');assert.equal(await impact.isEnabled(),true);
+    await editor(page).fill('// LOCAL_UNSAVED_ONLY\nconst memo = 42;');
+    await page.locator('#tab-ai').click();await page.locator('#kt-release-input').fill('備考を変更するとき、他の処理への影響を知りたいです。');
+    await page.locator('#tab-customize').click();
+    const before=await page.evaluate(()=>({task:work.controller.getState().taskId,messages:work.controller.getState().messages,proposal:work.controller.getState().proposal,adopted:work.controller.getState().adopted,reads:baseReads,files:[...fileReads],scan:[...scanCalls],ai:proposalCalls.length}));
+    await impact.click();assert.equal(await page.locator('#view-ai').isVisible(),true);
+    assert.equal(await page.locator('#kt-release-input').inputValue(),'備考を変更するとき、他の処理への影響を知りたいです。','未送信文を上書きしない');
+    assert.deepEqual(await page.evaluate(()=>work.controller.getState().consultationTarget),{type:'field',id:'memo',name:'備考',appId:'310',environment:'preview'});
+    assert.match(await page.locator('.ktr-consult-target').innerText(),/備考/);assert.doesNotMatch(await page.locator('.ktr-consult-target').innerText(),/（PC）/,'フィールドに誤ったPC限定の注を付けない');
+    assert.deepEqual(await page.evaluate(()=>({task:work.controller.getState().taskId,messages:work.controller.getState().messages,proposal:work.controller.getState().proposal,adopted:work.controller.getState().adopted,reads:baseReads,files:[...fileReads],scan:[...scanCalls],ai:proposalCalls.length})),before,'移動で会話・採用・取得・解析・AIを変えない');
+    await page.evaluate(()=>{dependencyBase.revision.preview='8';dependencyBase.data.fields.memo.label='備考（新しい名前）';dependencyBase.files.find(f=>f.name==='same.js'&&f.target==='desktop').text="kintone.events.on('app.record.edit.show', event => { event.record.memo.value = 'FRESH_REGISTERED'; return event; });";});
+    await page.locator('[data-release-action="send"]').click();await page.waitForFunction(()=>work.controller.getState().phase!=='consulting'&&proposalCalls.length===2);
+    const sent=await page.evaluate(()=>proposalCalls.at(-1));
+    assert.equal(sent.focus.target.type,'field');assert.equal(sent.focus.target.id,'memo');assert.equal(sent.focus.target.name,'備考（新しい名前）');assert.equal(String(sent.focus.target.revision),'8');
+    assert.match(await page.locator('.ktr-consult-target').innerText(),/備考（新しい名前）/,'送信時に確認したフィールド名を相談欄にも反映する');
+    assert.match(JSON.stringify(sent.facts),/FRESH_REGISTERED/);assert.doesNotMatch(JSON.stringify(sent),/LOCAL_UNSAVED_ONLY/,'手編集と古い解析本文をAIへ差し込まない');
+    assert.match(JSON.stringify(sent.facts),/備考の確認/,'既存の計算式の依存を渡す');
+    assert.equal(await page.evaluate(()=>baseReads),before.reads+1,'送信時の最新取得を既存の経路で一度だけ行う');
+    assert.deepEqual(await page.evaluate(()=>work.controller.getState().proposal),before.proposal,'影響の説明で既存案を置き換えない');
+    assert.equal(await page.locator('.ktr-current').innerText().then(text=>text.includes('変更の影響')),true);
+    fs.mkdirSync(out,{recursive:true});await page.screenshot({path:path.join(out,'impact-consultation-field.png'),fullPage:true});
+    await page.locator('#tab-customize').click();assert.equal(await editor(page).inputValue(),'// LOCAL_UNSAVED_ONLY\nconst memo = 42;');
+    await page.locator('[data-dependency-kind="event"]').click();await field.selectOption('app.record.edit.show');
+    const eventBefore=await page.evaluate(()=>({reads:baseReads,ai:proposalCalls.length,scan:[...scanCalls]}));
+    await impact.click();assert.equal(await page.locator('#view-ai').isVisible(),true);
+    assert.deepEqual(await page.evaluate(()=>work.controller.getState().consultationTarget),{type:'event',id:'app.record.edit.show',name:'app.record.edit.show',appId:'310',environment:'preview'});
+    assert.match(await page.locator('#kt-release-input').inputValue(),/app\.record\.edit\.show/,'空の相談欄に対象イベントを入れる');
+    assert.deepEqual(await page.evaluate(()=>({reads:baseReads,ai:proposalCalls.length,scan:[...scanCalls]})),eventBefore,'イベント起点でも移動だけではAIを呼ばない');
+    await page.locator('[data-release-action="send"]').click();await page.waitForFunction(()=>work.controller.getState().phase!=='consulting'&&proposalCalls.length===3);
+    const eventSent=await page.evaluate(()=>proposalCalls.at(-1));assert.equal(eventSent.focus.target.type,'event');assert.equal(eventSent.focus.target.id,'app.record.edit.show');assert.ok(eventSent.facts.some(f=>f.kind==='js-event-reference'),'送信時のScannerイベント情報を根拠として渡す');
+    await page.locator('#tab-customize').click();await page.evaluate(()=>customize.markStale());
+    assert.equal(await impact.isDisabled(),true,'設定変更で失効した選択から古い解析を相談へ持ち込まない');
+    assert.equal(await editor(page).inputValue(),'// LOCAL_UNSAVED_ONLY\nconst memo = 42;');
+    assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await page.evaluate(()=>work.dispose());
+  }finally{await context.close();await browser.close();}
+});
