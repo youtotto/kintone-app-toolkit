@@ -14907,7 +14907,13 @@
         const previousNotice = host.querySelector?.('[data-release-panel="header-notice"]');
         const noticeFocus = Array.from(previousNotice?.querySelectorAll('summary,[tabindex],button') || []).indexOf(host.ownerDocument?.activeElement);
         const noticeTop = previousNotice?.querySelector('.ktr-header-notice-body')?.scrollTop || 0;
+        // Preserve the borrowed editor, its model and focus across conversation redraws.
+        const codePanel = options.codePanelElement?.();
+        const codeFocus = codePanel?.contains(host.ownerDocument?.activeElement) ? host.ownerDocument.activeElement : null;
+        codePanel?.remove();
         host.innerHTML = render(state, { ...options, draft, sending, selectedRunId, notice });
+        if (codePanel) host.querySelector('.ktr-layout').appendChild(codePanel);
+        codeFocus?.focus?.({ preventScroll: true });
         const nextNotice = host.querySelector?.('[data-release-panel="header-notice"]'), sameNotice = nextNotice?.dataset.releaseNotice === previousNotice?.dataset.releaseNotice;
         if (!sameNotice) expanded.delete('header-notice');
         host.querySelectorAll?.('details[data-release-panel]').forEach(el => { if (expanded.has(el.dataset.releasePanel)) el.open = true; });
@@ -15073,9 +15079,9 @@
       .ktr-working-heading{display:flex;align-items:center;gap:14px}.ktr-working-heading h2{margin:0}.ktr-progress{padding:18px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-soft);margin-bottom:18px}.ktr-progress>p{margin-top:16px}.ktr-chat-pending{display:flex;align-items:center;gap:12px;padding:18px 12px;color:var(--ktr-muted);font-size:13px}
       .ktr-activity{display:inline-flex;align-items:center;gap:5px;min-height:22px;flex:none}.ktr-activity i{display:block;width:7px;height:7px;border-radius:50%;background:var(--ktr-accent);animation:ktr-pulse 1.4s ease-in-out infinite}.ktr-activity i:nth-child(2){animation-delay:.18s}.ktr-activity i:nth-child(3){animation-delay:.36s}@keyframes ktr-pulse{0%,70%,100%{opacity:.35;transform:translateY(0)}35%{opacity:1;transform:translateY(-4px)}}@media(prefers-reduced-motion:reduce){.ktr-activity i{animation:none;opacity:1}}
       @container ktr-workspace (min-width:960px){.ktr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);gap:24px;overflow:hidden}.ktr-chat-log{min-height:0;max-height:none;overscroll-behavior:contain}.ktr-conversation{overflow:hidden}.ktr-current{border-top:0;border-left:1px solid var(--ktr-line);padding:0 8px 0 24px;margin:0;overflow:auto}}
-      .ktr-code-shell{width:100%;height:100%;min-width:0;min-height:0;container:ktr-code-shell / inline-size}.ktr-code-columns{width:100%;height:100%;min-width:0;min-height:0}.ktr-code-conversation-host{width:100%;min-width:0;min-height:0}.ktr-code-slot{min-width:0;min-height:0;overflow:auto;border-left:1px solid var(--kt-line,#dbe2ec);padding:16px}.ktr-code-slot[hidden]{display:none}.ktr-code-shell.is-code-open>.ktr-code-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.08fr);grid-template-rows:minmax(0,1fr);overflow:hidden}.ktr-code-open .ktr-layout{display:flex;flex-direction:column;overflow:hidden}.ktr-code-open .ktr-current{display:none}.ktr-code-open .ktr-conversation{flex:1;overflow:hidden}.ktr-code-open .ktr-chat-log{min-height:0;max-height:none}.ktr-code-progress{display:flex;flex:none;gap:10px;align-items:center;flex-wrap:wrap;max-height:30%;overflow:auto;padding:10px;margin-bottom:8px;background:var(--ktr-soft);border-radius:6px}.ktr-code-progress>span:not(.ktr-activity){flex:1;min-width:120px;font-size:13px}.ktr-code-open .ktr-header{align-items:flex-start;flex-direction:column;gap:8px}.ktr-code-open .ktr-header-tools{justify-content:flex-start;gap:8px}
+      .ktr-code-slot{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;border-left:1px solid var(--ktr-line);padding-left:24px}.ktr-code-slot[hidden]{display:none}.ktr-code-open .ktr-current{display:none}.ktr-code-progress{display:flex;flex:none;gap:10px;align-items:center;flex-wrap:wrap;max-height:30%;overflow:auto;padding:10px;margin-bottom:8px;background:var(--ktr-soft);border-radius:6px}.ktr-code-progress>span:not(.ktr-activity){flex:1;min-width:120px;font-size:13px}
       .ktr-code-attention{flex:none;margin-bottom:12px;padding:12px;border-left:3px solid var(--ktr-warning);border-radius:4px;background:color-mix(in srgb,var(--ktr-warning) 9%,var(--ktr-paper))}.ktr-code-attention>p{margin:0 0 8px}
-      @container ktr-code-shell (max-width:959px){.ktr-code-shell.is-code-open>.ktr-code-columns{display:flex;flex-direction:column;overflow:auto}.ktr-code-shell.is-code-open .ktr-code-conversation-host{flex:none;height:auto!important;overflow:visible!important}.ktr-workspace.ktr-code-open{height:auto;overflow:visible}.ktr-code-open .ktr-content{height:auto}.ktr-code-open .ktr-layout{display:block;flex:none;overflow:visible}.ktr-code-open .ktr-conversation{overflow:visible}.ktr-code-open .ktr-chat-log{flex:none;min-height:180px;max-height:42dvh;overflow:auto}.ktr-code-slot{flex:none;border-left:0;border-top:1px solid var(--kt-line,#dbe2ec)}}
+      @container ktr-workspace (max-width:959px){.ktr-code-slot{height:70dvh;min-height:420px;border-left:0;border-top:1px solid var(--ktr-line);padding:16px 0 0;margin-top:24px}}
       @media(max-height:700px){@container ktr-workspace (max-width:959px){.ktr-content{overflow:auto}.ktr-layout{flex:none;overflow:visible}}}
       @media(max-width:560px){.ktr-workspace{padding:14px}.ktr-header{gap:8px;align-items:flex-start;flex-direction:column}.ktr-header-tools{justify-content:flex-start;gap:8px}.ktr-workspace h2{font-size:19px}.ktr-actions .ktr-primary{width:100%}.ktr-compose-actions{align-items:flex-end}.ktr-phase{white-space:normal;text-align:right}.kt-release-dialog{padding:16px}.ktr-dialog-header{gap:8px}.kt-release-dialog .ktr-dialog-header h2{font-size:18px}.kt-release-dialog label{display:block;margin:8px 0}.kt-release-dialog label>select{display:block;width:100%;margin-top:4px}}
     `;
@@ -15311,15 +15317,15 @@
       if (!host || !controller || !monaco?.editor) throw new Error('コードの比較に必要な情報がありません。');
       host.innerHTML = `<section class="ktr-code-comparison" aria-label="AIの修正案と差分"><style>
         .ktr-code-comparison{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:360px;height:100%;color:var(--kt-text,#253247);background:var(--kt-paper,#fff);font:14px/1.6 system-ui,sans-serif}
-        .ktr-code-comparison h3,.ktr-code-comparison p{margin:0}.ktr-code-comparison header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ktr-code-comparison select{min-width:0;max-width:100%;font:inherit;padding:6px;border:1px solid var(--kt-line,#dbe2ec);background:var(--kt-paper,#fff);color:inherit;border-radius:6px}
-        .ktr-code-comparison [data-comparison-modes]{display:flex;gap:6px;flex-wrap:wrap}.ktr-code-comparison button{font:inherit;padding:6px 10px;border:1px solid var(--kt-line,#dbe2ec);border-radius:6px;background:var(--kt-paper,#fff);color:inherit;cursor:pointer}.ktr-code-comparison button[aria-pressed="true"]{background:var(--kt-soft,#f5f7fb);border-color:var(--kt-accent,#285fbd)}.ktr-code-comparison button:disabled{opacity:.5;cursor:default}.ktr-code-comparison :is(button,select):focus-visible{outline:3px solid #83b6fb;outline-offset:2px}
+        .ktr-code-comparison h3,.ktr-code-comparison p{margin:0}.ktr-code-comparison header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ktr-code-comparison [data-comparison-file]{font-size:12px;color:var(--kt-muted,#58677d);overflow-wrap:anywhere}
+        .ktr-code-comparison [data-comparison-modes]{display:flex;gap:6px;flex-wrap:wrap}.ktr-code-comparison button{font:inherit;padding:6px 10px;border:1px solid var(--kt-line,#dbe2ec);border-radius:6px;background:var(--kt-paper,#fff);color:inherit;cursor:pointer}.ktr-code-comparison button[aria-pressed="true"]{background:var(--kt-soft,#f5f7fb);border-color:var(--kt-accent,#285fbd)}.ktr-code-comparison button:disabled{opacity:.5;cursor:default}.ktr-code-comparison button:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}
         .ktr-code-comparison [data-comparison-note],.ktr-code-comparison [data-comparison-empty]{font-size:12px;color:var(--kt-muted,#58677d)}.ktr-code-comparison [data-comparison-editor]{flex:1;min-height:280px;min-width:0;border:1px solid var(--kt-line,#dbe2ec)}.ktr-code-comparison [hidden]{display:none!important}
-        </style><header><h3>AIの修正案と差分</h3><label>対象ファイル <select data-comparison-file aria-label="比較するファイル"></select></label></header>
+        </style><header><h3>AIの修正案と差分</h3><span data-comparison-file></span></header>
         <div data-comparison-modes role="group" aria-label="コードの表示"><button type="button" data-comparison-mode="before">現在のコード</button><button type="button" data-comparison-mode="after">修正案</button><button type="button" data-comparison-mode="diff">差分</button></div>
         <p data-comparison-note></p><p data-comparison-empty role="status"></p><div data-comparison-editor></div></section>`;
-      const select = host.querySelector('[data-comparison-file]'), note = host.querySelector('[data-comparison-note]'), empty = host.querySelector('[data-comparison-empty]'), surface = host.querySelector('[data-comparison-editor]');
+      const identity = host.querySelector('[data-comparison-file]'), note = host.querySelector('[data-comparison-note]'), empty = host.querySelector('[data-comparison-empty]'), surface = host.querySelector('[data-comparison-editor]');
       const buttons = [...host.querySelectorAll('[data-comparison-mode]')];
-      let selected = null, mode = 'diff', editor = null, models = [], shown = null, disposed = false;
+      let mode = 'diff', editor = null, models = [], shown = null, disposed = false;
       function release() {
         editor?.dispose(); editor = null;
         for (const model of models) model.dispose();
@@ -15328,11 +15334,12 @@
       function render(state = controller.getState()) {
         if (disposed) return;
         const { run, prepared, files } = comparisonOf(state, getSelectedRunId());
-        if (!files.some(file => keyOf(file) === selected)) selected = files.length ? keyOf(files[0]) : null;
-        const options = files.map(file => `<option value="${escape(keyOf(file))}">${escape((file.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + file.name)}</option>`).join('');
-        if (select.innerHTML !== options) select.innerHTML = options;
-        select.disabled = !files.length; select.value = selected || '';
-        const file = files.find(item => keyOf(item) === selected);
+        const editingFile = getEditingFile();
+        const hasTarget = editingFile?.kind === 'js' && editingFile.environment === 'preview'
+          && ['desktop', 'mobile'].includes(editingFile.target) && typeof editingFile.name === 'string' && !!editingFile.name;
+        const matches = hasTarget ? files.filter(file => file.target === editingFile.target && file.name === editingFile.name) : [];
+        const file = matches.length === 1 ? matches[0] : null, selected = file ? keyOf(file) : null;
+        identity.textContent = hasTarget ? (editingFile.target === 'mobile' ? 'モバイル' : 'PC') + ' / ' + editingFile.name : '';
         const before = file?.kind === 'ADD_FILE' ? '' : file?.currentSource;
         const after = file?.content;
         const complete = typeof before === 'string' && typeof after === 'string';
@@ -15342,19 +15349,20 @@
         empty.hidden = complete; surface.hidden = !complete;
         if (!complete) {
           note.textContent = '';
-          empty.textContent = file ? '変更前後のコードがそろっていないため、まだ比較できません。反映前の確認結果を確認してください。'
+          empty.textContent = !hasTarget ? 'カスタマイズでJavaScriptを開き、「AIに相談」から相談すると、そのファイルの修正案をここで確認できます。'
+            : matches.length > 1 ? 'このファイルの修正案を一つに特定できません。変更案の内容を確認してください。'
+            : file ? '変更前後のコードがそろっていないため、まだ比較できません。反映前の確認結果を確認してください。'
+            : run ? 'この反映の記録には、このファイルの変更がありません。'
             : ['consulting', 'building', 'preparing', 'incomplete', 'blocked'].includes(state.phase)
-              ? '修正案の作成・確認が完了していません。変更前後のコードがそろうと、ここに表示します。'
-              : 'AIに相談し、案を作成すると、ここでコードと差分を確認できます。';
+              ? 'このファイルの修正案の作成・確認が完了していません。変更前後のコードがそろうと、ここに表示します。'
+              : 'このファイルの修正案はまだありません。AIに相談し、案を作成すると、ここで確認できます。';
           release(); return;
         }
         const stateNote = run ? 'この反映の記録に保存された変更前と修正案です。現在の登録内容を取り直した表示ではありません。'
           : prepared.ok ? '反映前の確認に使用しているコードです。確認後の登録は、相談欄の「動作テスト環境に反映」から行います。'
             : '反映前の確認は完了していません。この比較だけでは反映できません。';
-        const editingFile = getEditingFile();
-        const differentFile = editingFile && (editingFile.target !== file.target || editingFile.name !== file.name);
         note.textContent = stateNote + (file.kind === 'ADD_FILE' ? ' 新しいファイルのため、変更前は空欄です。' : file.reason === 'JS_UNCHANGED' ? ' 既存のコードと同じため、このファイルは登録しません。' : '')
-          + ' 手元の編集中のコードとの差分ではありません。' + (differentFile ? ' 上のエディターとは別のファイルを比較しています。' : '') + ' この表示からコードは編集できません。';
+          + ' 手元の編集中のコードとの差分ではありません。' + ' この表示からコードは編集できません。';
         if (shown?.key === selected && shown.mode === mode && shown.before === before && shown.after === after) { editor?.layout(); return; }
         release();
         const optionsEditor = { readOnly: true, domReadOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, wordWrap: 'on' };
@@ -15368,11 +15376,10 @@
         }
         shown = { key: selected, mode, before, after };
       }
-      const change = () => { selected = select.value; render(); };
       const click = event => { const button = event.target?.closest?.('[data-comparison-mode]'); if (!button || !buttons.includes(button) || button.disabled) return; mode = button.dataset.comparisonMode; render(); };
-      select.addEventListener('change', change); host.addEventListener('click', click);
+      host.addEventListener('click', click);
       const unsubscribe = controller.subscribe(render), unsubscribeDisplay = subscribeDisplay?.(() => render()); render();
-      return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); select.removeEventListener('change', change); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
+      return { render, layout() { editor?.layout(); }, dispose() { if (disposed) return; disposed = true; unsubscribe(); unsubscribeDisplay?.(); host.removeEventListener('click', click); release(); host.replaceChildren(); } };
     }
     // Manual edits use the existing API adapter; registration and app deployment
     // have separate read-only preparations and single-use confirmations.
@@ -15533,12 +15540,11 @@
     const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
     host.style.overflow = 'auto';
     host.style.height = '100%';
-    let codePanel = null, codeOpen = false, codeShell = null, codeSlot = null;
+    let codePanel = null, codeOpen = false, codeSlot = null;
     function setCodeOpen(open) {
       const next = !!open && !!codePanel;
       if (next === codeOpen) { if (next) codePanel.onVisible?.(); return next; }
       codeOpen = next;
-      codeShell?.classList.toggle('is-code-open', next);
       if (codeSlot) codeSlot.hidden = !next;
       if (codePanel) (next ? codeSlot : codePanel.home).appendChild(codePanel.element);
       view?.render();
@@ -15548,16 +15554,11 @@
     function attachCodePanel(panel) {
       if (!panel?.element || !panel.home || !host.parentElement) return false;
       if (codePanel && codePanel.element !== panel.element) setCodeOpen(false);
-      if (!codeShell) {
-        const doc = host.ownerDocument || document, columns = doc.createElement('div');
-        codeShell = doc.createElement('div'); codeShell.className = 'ktr-code-shell';
-        columns.className = 'ktr-code-columns';
-        codeSlot = doc.createElement('aside'); codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
+      if (!codeSlot) {
+        codeSlot = (host.ownerDocument || document).createElement('aside');
+        codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
         codeSlot.id = (host.id || 'kt-release') + '-code-panel';
         codeSlot.setAttribute('aria-label', 'コードと差分');
-        host.parentElement.insertBefore(codeShell, host);
-        codeShell.appendChild(columns); columns.appendChild(host); columns.appendChild(codeSlot);
-        host.classList.add('ktr-code-conversation-host');
       }
       codePanel = panel;
       view?.render();
@@ -15887,6 +15888,7 @@
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
     view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+      codePanelElement: () => codeOpen ? codeSlot : null,
       codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
       onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
       onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
@@ -15913,9 +15915,8 @@
         clearTimeout(usageResetTimer);
         flow?.cancel(); controller.cancel(); setCodeOpen(false);
         if (codePanel) codePanel.home.appendChild(codePanel.element);
-        if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }
-        host.classList.remove('ktr-code-conversation-host');
-        codePanel = null; codeShell = null; codeSlot = null;
+        codeSlot?.remove();
+        codePanel = null; codeSlot = null;
         window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose();
       }
     };
@@ -20484,11 +20485,11 @@
         .kt-customize-menu .kt-customize-files{border-top:0;padding-top:0}.kt-customize-menu #kt-customize-source{flex:1 1 140px;width:140px}.kt-customize-file-picker{display:flex;align-items:center;gap:4px;flex:2 1 150px;min-width:0}.kt-customize-menu #kt-customize-file{flex:1;min-width:0;width:100%}
         #kt-toolkit .kt-customize-menu #kt-customize-picker .btn{font-size:12px;line-height:1.4;height:34px;padding:6px 8px}.kt-customize-menu #kt-customize-refresh{width:34px;flex:none}
         .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:column;align-items:stretch}
-        .ktr-code-slot #kt-customize{display:flex;flex-direction:column;gap:8px}.ktr-code-slot .kt-customize-menu{display:contents}.ktr-code-slot .kt-customize-modes{display:flex}.ktr-code-slot .kt-customize-menu h3{display:none}.ktr-code-slot .kt-customize-menu-section{border:0;padding:0}.ktr-code-slot .kt-customize-primary{width:auto}.ktr-code-slot .kt-customize-editor-pane{order:1}
-        .ktr-code-slot .kt-customize-menu .kt-customize-picker{display:flex}.ktr-code-slot .kt-customize-menu #kt-customize-source{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-file{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-consult{width:auto}.ktr-code-slot .kt-customize-menu #kt-customize-drafts-wrap{flex-direction:row;align-items:center}.ktr-code-slot .kt-customize-menu .kt-customize-editor-tools>*{flex:none}.ktr-code-slot #kt-customize-reference-info{order:3}.ktr-code-slot #kt-customize-width-resize{display:none}
+        .ktr-code-slot #kt-customize{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}.ktr-code-slot .kt-customize-menu,.ktr-code-slot #kt-customize-width-resize,.ktr-code-slot #kt-customize-consult{display:none!important}.ktr-code-slot .kt-customize-modes{display:flex;gap:6px}.ktr-code-slot .kt-customize-editor-pane{flex:1;min-height:0;overflow:hidden}
+        .ktr-code-slot #kt-customize-comparison{flex:1;min-height:0;padding:0;border:0;overflow:auto}.ktr-code-slot #kt-customize-editor-note{margin:0;font-size:12px}.ktr-code-slot #kt-customize-meta{white-space:normal;overflow-wrap:anywhere}
         @container kt-customize-home (max-width:899px){#kt-customize{display:flex;flex-direction:column;gap:12px}.kt-customize-menu{order:-1;align-self:stretch;overflow:visible;flex:none}#kt-customize-width-resize{display:none}}
         #kt-customize-editor{flex:1;min-height:220px;min-width:0;border:1px solid ${BD};border-radius:8px;background:${isDark ? '#0f0f0f' : '#fafafa'}}
-        .ktr-code-slot #kt-customize-editor{flex:none;height:clamp(260px,45dvh,480px)}
+        .ktr-code-slot #kt-customize-editor{flex:1;min-height:220px}
         #kt-customize-file-details{font-size:12px;flex:none}#kt-customize-file-details{color:var(--kt-muted)}
         #kt-customize-file-details #kt-customize-env{padding:6px 0;overflow-wrap:anywhere}
       </style>
@@ -20499,6 +20500,7 @@
             <div class="kt-customize-editor-pane">
               <header class="kt-customize-editor-heading"><div class="kt-customize-editor-identity"><div id="kt-customize-meta"></div><span id="kt-customize-edit-state" role="status" title="取得した本文、または登録後に一致を確認した本文との比較です。ローカル保存や運用環境への反映状況ではありません。" hidden></span></div><button id="kt-customize-consult" class="btn kt-customize-primary" title="AI Assistantへ移ります。移動だけではAIを呼びません。" disabled>AIに相談</button></header>
               <p id="kt-customize-editor-note">相談には動作テスト環境のコードを使います。手元の編集は送信しません。</p>
+              <p id="kt-customize-assistant-empty" role="status" hidden>相談元のJavaScriptをカスタマイズで開き、［AIに相談］から移動してください。手元のコードはそのまま保持しています。</p>
               <div id="kt-customize-editor"></div>
               <div id="kt-customize-comparison" hidden></div>
             </div>
@@ -20685,6 +20687,7 @@
       retainEditor(); const ticket = ++fileReadSeq;
       const d = { name: entry.file.name, target: conf.target, kind: conf.kind, environment: lastCustomize?.source || 'preview', fileKey: entry.file.fileKey };
       $fileStatus.textContent = d.name + ' を読み込んでいます。';
+      $consult.disabled = true;
       try {
         const saved = drafts.get(draftKey(d));
         const text = saved ? saved.text : await downloadByKey(entry.file.fileKey);
@@ -20697,13 +20700,22 @@
     }
     $drafts.addEventListener('change', () => { const next = drafts.get($drafts.value); if (!next) return; ++fileReadSeq; displayDocument(next); });
     let assistant = null, comparison = null, codeMode = 'editor';
+    function assistantDocument() {
+      const target = assistant?.controller.getState().consultationTarget;
+      return target?.type !== 'FILE' || (activeDocument?.environment === 'preview' && activeDocument.kind === 'js' && activeDocument.target === target.target && activeDocument.name === target.name) ? activeDocument : null;
+    }
     function syncCodeSurface() {
       const inAssistant = !!codePane.closest('.ktr-code-slot');
       codePane.querySelector('.kt-customize-modes').hidden = !inAssistant;
+      const missing = inAssistant && !assistantDocument();
+      $('#kt-customize-assistant-empty').hidden = !missing;
       $('#kt-customize-comparison').hidden = !inAssistant || codeMode !== 'comparison';
+      $editorHost.hidden = inAssistant && (codeMode === 'comparison' || missing);
+      $('#kt-customize-editor-note').hidden = inAssistant && (codeMode === 'comparison' || missing);
+      codePane.querySelector('.kt-customize-editor-heading').hidden = missing;
       codePane.querySelectorAll('[data-customize-mode]').forEach(b => {
         b.setAttribute('aria-pressed', String(b.dataset.customizeMode === codeMode));
-        if (b.dataset.customizeMode === 'comparison') b.textContent = codeMode === 'comparison' ? '差分を閉じる' : 'AIの修正案・差分';
+
       });
       if (inAssistant && manualPending) cancelManualConfirmation();
       updateManualButtons(); comparison?.render(); layoutCode();
@@ -20712,7 +20724,7 @@
       if (mode === 'comparison' && !codePane.closest('.ktr-code-slot')) return;
       codeMode = mode; syncCodeSurface();
     }
-    codePane.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode === 'comparison' && codeMode === 'comparison' ? 'editor' : b.dataset.customizeMode)));
+    codePane.querySelectorAll('[data-customize-mode]').forEach(b => b.addEventListener('click', () => setCodeMode(b.dataset.customizeMode)));
     function layoutCode() { editor.layout?.(); comparison?.layout(); }
     function onVisible() {
       assistant?.setCodeOpen(false);
@@ -20721,17 +20733,25 @@
     function attachAssistant(panel) {
       if (!panel || assistant === panel) return;
       comparison?.dispose(); assistant = panel; observeManualAvailability();
-      comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: () => activeDocument });
+      comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: assistantDocument });
       panel.attachCodePanel({ element: codePane, home: codeHome, onVisible() {
-        syncCodeSurface(); renderReferenceInfo();
-        ensureLoaded().catch(error => { $fileStatus.textContent = 'ファイル一覧を読み込めませんでした。' + (error?.message || ''); });
+        const target = panel.controller.getState().consultationTarget;
+        if (target?.type === 'FILE') {
+          ++fileReadSeq; // A delayed selection from Customize must not replace the consultation source.
+          const source = { environment: 'preview', target: target.target, kind: 'js', name: target.name };
+          if (!activeDocument || draftKey(activeDocument) !== draftKey(source)) {
+            const saved = drafts.get(draftKey(source));
+            if (saved) displayDocument(saved);
+          }
+        }
+        syncCodeSurface();
       } });
       if (root.ktPanel?.visibleTab?.() === 'customize') onVisible();
     }
     let listedFiles = [], listedConf = null;
     function updateConsultButton() {
       const entry = $file.value === '' ? null : listedFiles[Number($file.value)];
-      $consult.disabled = manualBusy || !(entry?.type === 'FILE' && listedConf?.kind === 'js' && lastCustomize?.source === 'preview' && typeof consult === 'function');
+      $consult.disabled = manualBusy || !(entry?.type === 'FILE' && listedConf?.kind === 'js' && lastCustomize?.source === 'preview' && activeDocument?.environment === 'preview' && activeDocument.kind === 'js' && activeDocument.target === listedConf.target && activeDocument.name === entry.file.name && typeof consult === 'function');
     }
     function syncFileSelection() {
       const matches = activeDocument && listedConf && activeDocument.target === listedConf.target && activeDocument.kind === listedConf.kind && activeDocument.environment === lastCustomize?.source;

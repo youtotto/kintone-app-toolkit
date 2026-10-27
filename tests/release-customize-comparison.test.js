@@ -20,18 +20,19 @@ function fixture(initial = state([file('desktop')]), options = {}) {
   } };
   let current = initial;
   const listeners = new Set(), controller = { getState: () => current, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } };
-  const api = KTReleaseCustomize.createComparison(host, { controller, monaco, ...options });
+  let editing = { target: 'desktop', name: 'same.js', kind: 'js', environment: 'preview' };
+  const api = KTReleaseCustomize.createComparison(host, { controller, monaco, getEditingFile: () => editing, ...options });
   return { host, elements, buttons, models, editors, events, listeners, api,
     emit(next) { current = next; for (const listener of listeners) listener(next); },
-    choose(index) { const next = KTReleaseCustomize.comparisonOf(current).files[index]; elements.file.value = JSON.stringify([next.target, next.name, next.changeId]); elements.file.listeners.change(); },
+    focus(document) { editing = document; api.render(); },
     mode(mode) { host.listeners.click({ target: buttons.find(button => button.dataset.comparisonMode === mode) }); } };
 }
 
-test('反映前確認の原文をそのまま使い、コード・選択・差分は読み取り専用', () => {
+test('反映前確認の原文をそのまま使い、コード・修正案・差分は読み取り専用', () => {
   const before = '/* <script>danger()</script> */\r\nconst before = "<&>";\r\n';
   const after = '/* </code><img src=x onerror=alert(1)> */\r\nconst after = "<&>";\r\n';
   const initial = state([file('desktop', 'test.js', { currentSource: before, content: after })]), original = JSON.stringify(initial);
-  const f = fixture(initial), diff = f.editors[0];
+  const f = fixture(initial, { getEditingFile: () => ({ target: 'desktop', name: 'test.js', kind: 'js', environment: 'preview' }) }), diff = f.editors[0];
   assert.equal(diff.model.original.text, before); assert.equal(diff.model.modified.text, after);
   assert.equal(diff.options.readOnly, true); assert.equal(diff.options.domReadOnly, true); assert.equal(diff.options.originalEditable, false);
   assert.equal(f.host.innerHTML.includes('danger()'), false); assert.equal(f.host.innerHTML.includes('onerror=alert'), false);
@@ -40,27 +41,32 @@ test('反映前確認の原文をそのまま使い、コード・選択・差�
   assert.equal(JSON.stringify(initial), original, '表示や切替で採用・準備データを書き換えない');
 });
 
-test('同名ファイルのPCとモバイルを区別し、再描画でも選択を維持する', () => {
+test('同名ファイルでも相談元のPC・モバイルだけを表示し、再描画でもモデルを保持する', () => {
   const initial = state([file('desktop'), file('mobile', 'same.js', { currentSource: 'mobileBefore', content: 'mobileAfter' })]);
   const f = fixture(initial);
-  assert.match(f.elements.file.innerHTML, /PC \/ same.js/); assert.match(f.elements.file.innerHTML, /モバイル \/ same.js/);
-  f.choose(1); assert.equal(f.editors.at(-1).model.modified.text, 'mobileAfter');
+  assert.equal(f.elements.file.textContent, 'PC / same.js');
+  assert.doesNotMatch(f.host.innerHTML, /<select/);
+  f.focus({ target: 'mobile', name: 'same.js', kind: 'js', environment: 'preview' });
+  assert.equal(f.elements.file.textContent, 'モバイル / same.js');
+  assert.equal(f.editors.at(-1).model.modified.text, 'mobileAfter');
   const count = f.models.length; f.emit(JSON.parse(JSON.stringify(initial)));
   assert.equal(f.models.length, count, '同一本文でモデルを作り直さない');
   assert.equal(f.editors.at(-1).model.modified.text, 'mobileAfter');
 });
 
-test('対象名はHTMLとして扱わない', () => {
-  const f = fixture(state([file('desktop', '<img src=x onerror=alert(1)>.js')]));
-  assert.equal(f.elements.file.innerHTML.includes('<img'), false);
-  assert.match(f.elements.file.innerHTML, /&lt;img/);
+test('対象名はHTMLに入れずテキストとして表示する', () => {
+  const name = '<img src=x onerror=alert(1)>.js';
+  const f = fixture(state([file('desktop', name)]), { getEditingFile: () => ({ target: 'desktop', name, kind: 'js', environment: 'preview' }) });
+  assert.equal(f.elements.file.textContent, 'PC / ' + name);
+  assert.equal(f.elements.file.innerHTML, '');
+  assert.equal(f.host.innerHTML.includes('<img'), false);
 });
 
 test('新規ファイルだけは変更前を空にする。既存本文未取得を追加扱いにしない', () => {
-  const f = fixture(state([file('desktop', 'new.js', { kind: 'ADD_FILE', currentSource: undefined, content: 'newBody' })]));
+  const f = fixture(state([file('desktop', 'same.js', { kind: 'ADD_FILE', currentSource: undefined, content: 'newBody' })]));
   assert.equal(f.models[0].text, ''); assert.equal(f.models[1].text, 'newBody');
   assert.match(f.elements.note.textContent, /新しいファイル/);
-  f.emit(state([file('desktop', 'old.js', { currentSource: undefined })]));
+  f.emit(state([file('desktop', 'same.js', { currentSource: undefined })]));
   assert.equal(f.elements.editor.hidden, true); assert.match(f.elements.empty.textContent, /そろっていない/);
   assert.ok(f.buttons.every(button => button.disabled)); assert.ok(f.models.every(model => model.disposed));
 });
@@ -91,8 +97,8 @@ test('変更なしは既存と同じコードで示す', () => {
 test('反映結果ではその反映の準備を使い、別作業や現在の登録内容と混同しない', () => {
   const prepared = state([file('mobile', 'applied.js', { content: 'applied body' })]).prepared;
   const initial = { ...state([file('desktop', 'unrelated.js')]), phase: 'result', resultRunId: 'R1', runs: [{ id: 'R1', prepared }, { id: 'R2', prepared: state([file('desktop', 'later.js')]).prepared }] };
-  const f = fixture(initial);
-  assert.match(f.elements.file.innerHTML, /applied.js/); assert.equal(f.elements.file.innerHTML.includes('unrelated'), false);
+  const f = fixture(initial, { getEditingFile: () => ({ target: 'mobile', name: 'applied.js', kind: 'js', environment: 'preview' }) });
+  assert.equal(f.elements.file.textContent, 'モバイル / applied.js');
   assert.equal(f.editors.at(-1).model.modified.text, 'applied body'); assert.match(f.elements.note.textContent, /取り直した表示ではありません/);
   assert.equal(f.buttons[0].textContent, '反映前のコード'); assert.equal(f.buttons[1].textContent, '反映に使用した案');
   f.emit({ phase: 'idle', prepared: null, resultRunId: 'R1', runs: initial.runs });
@@ -111,9 +117,9 @@ test('切替と終了でMonacoを先に破棄してからモデルを解放す�
 test('会話で選んだ過去の反映記録に比較も追随し、現在へ戻るまで混在させない', () => {
   let selectedRunId = null;
   const displayListeners = new Set();
-  const initial = { ...state([file('desktop', 'current.js', { content: 'current body' })]), resultRunId: 'R2', runs: [
-    { id: 'R1', prepared: state([file('desktop', 'first.js', { content: 'first body' })]).prepared },
-    { id: 'R2', prepared: state([file('mobile', 'second.js', { content: 'second body' })]).prepared }
+  const initial = { ...state([file('desktop', 'same.js', { content: 'current body' })]), resultRunId: 'R2', runs: [
+    { id: 'R1', prepared: state([file('desktop', 'same.js', { content: 'first body' })]).prepared },
+    { id: 'R2', prepared: state([file('desktop', 'same.js', { content: 'second body' })]).prepared }
   ] };
   const f = fixture(initial, { getSelectedRunId: () => selectedRunId,
     subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); } });
@@ -126,18 +132,41 @@ test('会話で選んだ過去の反映記録に比較も追随し、現在へ�
   f.api.dispose(); assert.equal(displayListeners.size, 0);
 });
 
-test('上下表示の比較は手元の編集中の差分ではないと伝え、別ファイルでも選択を勝手に変えない', () => {
-  let editing = { target: 'desktop', name: 'same.js', text: 'unsaved code' };
+test('手編集を比較へ混ぜず、対象の修正案が無ければ別ファイルへ切り替えない', () => {
+  const editing = { target: 'desktop', name: 'same.js', kind: 'js', environment: 'preview', text: 'unsaved code' };
   const f = fixture(state([file('desktop'), file('mobile', 'same.js', { content: 'mobile after' })]), { getEditingFile: () => editing });
   assert.match(f.elements.note.textContent, /手元の編集中のコードとの差分ではありません/);
-  assert.doesNotMatch(f.elements.note.textContent, /別のファイル/);
-  f.choose(1);
-  const selected = f.elements.file.value;
-  assert.match(f.elements.note.textContent, /上のエディターとは別のファイル/);
-  editing = { target: 'desktop', name: 'another.js' }; f.api.render();
-  assert.equal(f.elements.file.value, selected);
-  assert.equal(f.editors.at(-1).model.modified.text, 'mobile after');
-  editing = { target: 'mobile', name: 'same.js' }; f.api.render();
-  assert.doesNotMatch(f.elements.note.textContent, /別のファイル/);
-  assert.match(f.elements.note.textContent, /手元の編集中のコードとの差分ではありません/);
+  assert.equal(f.editors.at(-1).model.original.text, 'const before = 1;\r\n');
+  assert.equal(editing.text, 'unsaved code');
+  f.emit(state([file('mobile', 'same.js', { content: 'mobile after' })]));
+  assert.equal(f.elements.editor.hidden, true);
+  assert.match(f.elements.empty.textContent, /このファイルの修正案はまだありません/);
+  assert.ok(f.models.every(model => model.disposed));
+});
+
+test('相談元のない状態・CSS・運用環境・不明な対象から別のコードを選ばない', () => {
+  const f = fixture();
+  for (const document of [null, { target: 'desktop', name: 'same.js' },
+    { target: 'desktop', name: 'same.js', kind: 'css', environment: 'preview' },
+    { target: 'desktop', name: 'same.js', kind: 'js', environment: 'production' },
+    { target: 'other', name: 'same.js', kind: 'js', environment: 'preview' }]) {
+    f.focus(document);
+    assert.equal(f.elements.editor.hidden, true); assert.equal(f.elements.file.textContent, '');
+    assert.match(f.elements.empty.textContent, /カスタマイズでJavaScriptを開き/);
+    assert.ok(f.buttons.every(button => button.disabled));
+  }
+});
+
+test('相談元に合う変更が重複していたら先頭を選ばず確認を案内する', () => {
+  const f = fixture(state([file('desktop'), file('desktop', 'same.js', { changeId: 'duplicate', content: 'another' })]));
+  assert.equal(f.models.length, 0); assert.equal(f.elements.editor.hidden, true);
+  assert.match(f.elements.empty.textContent, /一つに特定できません/);
+});
+
+test('過去の反映に相談元の変更がなければ、その反映の別ファイルも現在の案も表示しない', () => {
+  const initial = state([file('desktop', 'same.js', { content: 'current' })]);
+  initial.runs = [{ id: 'prior', prepared: state([file('mobile', 'same.js', { content: 'prior mobile' })]).prepared }];
+  const f = fixture(initial, { getSelectedRunId: () => 'prior' });
+  assert.equal(f.models.length, 0); assert.equal(f.elements.editor.hidden, true);
+  assert.match(f.elements.empty.textContent, /この反映の記録には、このファイルの変更がありません/);
 });

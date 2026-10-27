@@ -99,8 +99,8 @@ async function dragBy(page,handle,dx,dy){
 }
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  const rect=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu'),home:rect('#kt-customize-workspace')};
+  const rect=selector=>{const r=(document.querySelector(selector)?.getBoundingClientRect() || {left:0,top:0,right:0,bottom:0,width:0,height:0});return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host .ktr-conversation'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu'),home:rect('#kt-customize-workspace')};
 });}
 function assertHorizontal(g,label){
   assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
@@ -343,6 +343,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
         await page.screenshot({path:path.join(out,colorScheme+'-customize.png'),fullPage:true});
         await page.locator('#tab-ai').click();
+        const headerBefore=await page.locator('.ktr-header').boundingBox();
+        const toolsBefore=await page.locator('.ktr-tools').boundingBox();
         const normal=await geometry(page);
         assert.ok(normal.proposal.left>=normal.chat.right-2,'AI Assistantは左相談・右通常案');
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
@@ -351,7 +353,16 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.evaluate(()=>{window.originalEditor=document.querySelector('#kt-customize-editor textarea[data-test-editor]');});
         await page.locator('[data-release-action="code"]').click();
         assert.equal(await page.locator('[data-release-action="code"]').innerText(),'変更案・結果を見る');
-        assertHorizontal(await geometry(page),'AI Assistantでコードを開く');
+        const codeGeometry=await geometry(page);
+        assertHorizontal(codeGeometry,'AI Assistantでコードを開く');
+        const headerAfter=await page.locator('.ktr-header').boundingBox(),toolsAfter=await page.locator('.ktr-tools').boundingBox();
+        assert.deepEqual(headerAfter,headerBefore,'コード開閉で共通ヘッダーの位置・幅を変えない');
+        assert.equal(toolsAfter.y,toolsBefore.y,'メニューを左ペインへ移さない');
+        assert.equal(toolsAfter.x+toolsAfter.width,toolsBefore.x+toolsBefore.width,'メニューの右端を固定する');
+        assert.ok(codeGeometry.editor.height>=450,'コードが最初から十分な高さで見える');
+        assert.ok(codeGeometry.editor.top-codeGeometry.codeSlot.top<140,'メニューでコードを下へ押し出さない');
+        assert.ok(codeGeometry.editor.bottom<=codeGeometry.shell.bottom,'エディターの下端が画面内に収まる');
+        for(const selector of ['.kt-customize-menu','#kt-customize-file','#kt-customize-source','#kt-customize-dependencies','#kt-customize-new','#kt-customize-consult'])assert.equal(await page.locator(selector).isVisible(),false,selector+' はカスタマイズだけに残す');
         assert.equal(await widthHandle.isVisible(),false,'AI Assistantの右コード欄でCustomize用の幅ハンドルを出さない');
         assert.equal(await saveHelp.isVisible(),false,'AI Assistantのコード表示には手編集の保存・反映ガイドを混ぜない');
         assert.equal(await editState(page).innerText(),'手元の変更あり','同じエディターを移しても編集状態を保つ');
@@ -361,6 +372,42 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.evaluate(()=>work.view.render());
         assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true,'会話の再描画でエディターDOMを作り直さない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        await editor(page).focus();
+        await page.evaluate(()=>{const el=document.activeElement;el.setSelectionRange(4,10);work.view.render();});
+        assert.equal(await editor(page).evaluate(el=>el===document.activeElement),true,'再描画でエディターのフォーカスを失わない');
+        assert.deepEqual(await editor(page).evaluate(el=>[el.selectionStart,el.selectionEnd]),[4,10]);
+        const codeCalls=await page.evaluate(()=>proposalCalls.length);
+        await page.locator('#tab-customize').click();
+        await page.locator('#kt-customize-source').selectOption('JavaScriptMobile');
+        await selected(page,'same.js','// mobile unsaved edit\n');
+        await page.locator('#tab-ai').click();
+        await page.locator('[data-release-action="code"]').click();
+        assert.match(await page.locator('#kt-customize-meta').innerText(),/same\.js（PC）/,'相談元PCと同名のモバイルを取り違えない');
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await page.evaluate(()=>proposalCalls.length),codeCalls,'対象へ戻すだけではAIを呼ばない');
+        assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true);
+        await page.locator('#tab-customize').click();
+        await page.locator('#kt-customize-source').selectOption('JavaScript');
+        await selected(page,'same.js','// PC unsaved edit\nconst memo = 10;\n');
+        await page.evaluate(()=>{window.pendingFile=null;});
+        await filePicker(page).selectOption({label:'slow.js'});
+        await page.waitForFunction(()=>typeof pendingFile==='function');
+        assert.equal(await page.locator('#kt-customize-consult').isEnabled(),false,'本文の読み込み途中では別ファイルの相談を始めない');
+        await page.locator('#tab-ai').click();
+        await page.locator('[data-release-action="code"]').click();
+        await page.evaluate(()=>pendingFile());
+        await page.waitForTimeout(30);
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n','遅れた別ファイルの読み込みで相談元を上書きしない');
+        const pendingTarget=await page.evaluate(()=>work.consult({name:'not-loaded.js',target:'desktop',type:'FILE',environment:'preview'}));
+        assert.equal(pendingTarget.ok,true);
+        await page.locator('[data-release-action="code"]').click();
+        assert.equal(await editor(page).isVisible(),false,'相談元が未取得のときに他のコードを出さない');
+        assert.equal(await page.locator('#kt-customize-assistant-empty').isVisible(),true);
+        await page.evaluate(()=>work.consult({name:'same.js',target:'desktop',type:'FILE',environment:'preview'}));
+        await page.locator('[data-release-action="code"]').click();
+        assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
+        assert.equal(await page.locator('#kt-customize-assistant-empty').isVisible(),false);
+        assert.equal(await page.evaluate(()=>proposalCalls.length),codeCalls);
         await page.screenshot({path:path.join(out,colorScheme+'-code-open.png'),fullPage:true});
         // Keeping code open must not hide progress, cancellation, or an artifact's failure.
         await page.evaluate(()=>{
@@ -435,24 +482,19 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('[data-release-action="code"]').click();
         await page.locator('[data-customize-mode="comparison"]').click();
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true);
-        assert.equal(await editor(page).isVisible(),true,'比較を開いても手元のコードを残す');
-        const comparisonTop=await page.locator('#kt-customize-comparison').boundingBox(),editorAbove=await page.locator('#kt-customize-editor').boundingBox();
-        assert.ok(comparisonTop.y>=editorAbove.y+editorAbove.height,'比較はエディターの下に開く');
+        assert.equal(await editor(page).isVisible(),false,'差分はエディターと同じ場所で切り替える');
+        assert.equal(await page.locator('select[data-comparison-file]').count(),0,'AI側にもファイル選択を増やさない');
         assert.equal(await page.locator('#kt-customize-upload').count(),0);
         const comparison=()=>page.evaluate(()=>{const d=monacoDiffs.findLast(x=>!x.disposed);return {before:d.getModel().original.getValue(),after:d.getModel().modified.getValue(),readOnly:d.options.readOnly,originalEditable:d.options.originalEditable};});
         assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
-        await page.locator('[data-comparison-file]').selectOption({index:1});
-        assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false});
-        assert.match(await page.locator('#kt-customize-meta').innerText(),/same\.js（PC）/,'上の手元のコードはPCのまま');
-        assert.match(await page.locator('[data-comparison-file]').evaluate(el=>el.selectedOptions[0].textContent),/モバイル.*same\.js/,'下の比較対象のモバイルを明示する');
-        assert.match(await page.locator('[data-comparison-note]').innerText(),/手元の編集/,'上下を現在の手編集との差分と誤解させない');
-        await page.locator('[data-customize-mode="comparison"]').click();
-        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),false,'比較のボタンでも下側を閉じられる');
+        assert.match(await page.locator('[data-comparison-note]').innerText(),/手元の編集/,'手編集との差分と誤解させない');
+        await page.locator('[data-customize-mode="editor"]').click();
+        assert.equal(await page.locator('#kt-customize-comparison').isVisible(),false,'エディターへ戻ると差分を閉じる');
         assert.equal(await page.evaluate(()=>document.querySelector('#kt-customize-editor textarea[data-test-editor]')===originalEditor),true);
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         await page.locator('[data-customize-mode="comparison"]').click();
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true);
-        assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false});
+        assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false});
         const stateBeforeTabs=await page.evaluate(()=>JSON.stringify({adopted:work.controller.getState().adopted,prepared:work.controller.getState().prepared,runs:work.controller.getState().runs}));
         await page.locator('#tab-customize').click();
         assert.equal(await page.locator('#view-customize #kt-customize-code-pane').count(),1,'Customizeへ戻るとコードを元の場所へ戻す');
@@ -471,13 +513,13 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
         assert.equal(await page.locator('#kt-customize-comparison').isVisible(),true,'AI Assistantで開き直すと差分表示を戻す');
-        assert.deepEqual(await comparison(),{before:prepared.files.changes[1].currentSource,after:prepared.files.changes[1].content,readOnly:true,originalEditable:false},'戻る前の比較対象を保持する');
+        assert.deepEqual(await comparison(),{before:prepared.files.changes[0].currentSource,after:prepared.files.changes[0].content,readOnly:true,originalEditable:false},'戻る前の比較対象を保持する');
         await page.screenshot({path:path.join(out,colorScheme+'-comparison.png'),fullPage:true});
         await page.evaluate(()=>{
           const prepared=displayState.prepared;
           const prior=structuredClone(prepared);
-          prior.files.changes=[{changeId:'old-C1',kind:'REPLACE_FILE',target:'desktop',name:'prior.js',currentSource:'// earlier before\n',content:'// earlier after\n'}];
-          prior.changes=[{kind:'javascript',target:'desktop',file:'prior.js',title:'前の反映内容',operation:'REPLACE_FILE'}];
+          prior.files.changes=[{changeId:'old-C1',kind:'REPLACE_FILE',target:'desktop',name:'same.js',currentSource:'// earlier before\n',content:'// earlier after\n'}];
+          prior.changes=[{kind:'javascript',target:'desktop',file:'same.js',title:'前の反映内容',operation:'REPLACE_FILE'}];
           displayState={...displayState,phase:'result',prepared:null,resultRunId:'run-1',runs:[
             {id:'run-0',taskId:0,status:'complete',goal:'前の反映内容',prepared:prior,result:{status:'complete',written:1,message:'以前の内容を反映しました。',rows:[]}},
             {id:'run-1',taskId:displayState.taskId,status:'complete',goal:'備考の編集条件',prepared,result:{status:'complete',written:2,message:'動作テスト環境に反映しました。',rows:[]}}

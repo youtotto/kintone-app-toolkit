@@ -32,12 +32,11 @@ function mountReleaseWorkspace(host, d) {
   const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation'].every(mark => cap.conversation?.includes(mark)));
   host.style.overflow = 'auto';
   host.style.height = '100%';
-  let codePanel = null, codeOpen = false, codeShell = null, codeSlot = null;
+  let codePanel = null, codeOpen = false, codeSlot = null;
   function setCodeOpen(open) {
     const next = !!open && !!codePanel;
     if (next === codeOpen) { if (next) codePanel.onVisible?.(); return next; }
     codeOpen = next;
-    codeShell?.classList.toggle('is-code-open', next);
     if (codeSlot) codeSlot.hidden = !next;
     if (codePanel) (next ? codeSlot : codePanel.home).appendChild(codePanel.element);
     view?.render();
@@ -47,16 +46,11 @@ function mountReleaseWorkspace(host, d) {
   function attachCodePanel(panel) {
     if (!panel?.element || !panel.home || !host.parentElement) return false;
     if (codePanel && codePanel.element !== panel.element) setCodeOpen(false);
-    if (!codeShell) {
-      const doc = host.ownerDocument || document, columns = doc.createElement('div');
-      codeShell = doc.createElement('div'); codeShell.className = 'ktr-code-shell';
-      columns.className = 'ktr-code-columns';
-      codeSlot = doc.createElement('aside'); codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
+    if (!codeSlot) {
+      codeSlot = (host.ownerDocument || document).createElement('aside');
+      codeSlot.className = 'ktr-code-slot'; codeSlot.hidden = true;
       codeSlot.id = (host.id || 'kt-release') + '-code-panel';
       codeSlot.setAttribute('aria-label', 'コードと差分');
-      host.parentElement.insertBefore(codeShell, host);
-      codeShell.appendChild(columns); columns.appendChild(host); columns.appendChild(codeSlot);
-      host.classList.add('ktr-code-conversation-host');
     }
     codePanel = panel;
     view?.render();
@@ -386,6 +380,7 @@ function mountReleaseWorkspace(host, d) {
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
   view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+    codePanelElement: () => codeOpen ? codeSlot : null,
     codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
     onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
@@ -412,9 +407,8 @@ function mountReleaseWorkspace(host, d) {
       clearTimeout(usageResetTimer);
       flow?.cancel(); controller.cancel(); setCodeOpen(false);
       if (codePanel) codePanel.home.appendChild(codePanel.element);
-      if (codeShell?.parentElement) { codeShell.parentElement.insertBefore(host, codeShell); codeShell.remove(); }
-      host.classList.remove('ktr-code-conversation-host');
-      codePanel = null; codeShell = null; codeSlot = null;
+      codeSlot?.remove();
+      codePanel = null; codeSlot = null;
       window.removeEventListener('beforeunload', warnBeforeLeave); view.dispose();
     }
   };
