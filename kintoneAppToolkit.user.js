@@ -11965,7 +11965,10 @@
     const CONFIG_PREFIX = 'ktAi.budget.v1', LEDGER_PREFIX = 'ktAi.budgetLedger.v1', LEDGER_VERSION = 1;
     const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     /** OpenAI Standard単価（2026-10-27、米ドル/100万token）。予約は読取割引に頼らず書込の最大単価を使う。 */
-    const PRICES = Object.freeze({ 'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1, cacheWrite30m: 2.5, cacheWrite12h: 5, longThreshold: 272000 }) });
+    const PRICES = Object.freeze({
+      'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1, cacheWrite30m: 2.5, cacheWrite12h: 5, longThreshold: 272000 }),
+      'gpt-6.1-terra': Object.freeze({ input: 1, output: 5, cachedInput: 0.05, cacheWrite30m: 1.25, cacheWrite12h: 2.5, longThreshold: 272000 }),
+    });
     /** 送る要求の種類 → Gateway の feature（表に無い種類は送らない） */
     const FEATURE_OF = Object.freeze({ ask: 'assistant-qa', propose: 'assistant-qa', plan: 'change-planner', generate: 'customization-generator' });
     /** feature ごとのモデル（health の limits が無い古い Gateway のとき。staging の値） */
