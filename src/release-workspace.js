@@ -226,10 +226,11 @@ const KTReleaseWorkspace = (() => {
       const request = suggestionRequest(state);
       return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
-    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
+    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
       if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
+      if (environmentComparison && requestPurpose !== 'document') return false;
       const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
       const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
       const operationLabel = ideation ? 'アイディア出し' : '資料の作成';
@@ -273,7 +274,7 @@ const KTReleaseWorkspace = (() => {
             && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
             && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
         userMessage.consultationTarget = clone(resolvedTarget);
-        return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
+        return services.propose({ text: value, requestPurpose, environmentComparison: clone(environmentComparison), consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
       };
       if (readOnly) {
         // Document and ideation actions cannot revise a plan, even if their AI request fails.

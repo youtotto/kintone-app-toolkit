@@ -2595,94 +2595,6 @@
       return out;
     }
 
-    /** 動作テスト環境と運用環境の差（運用環境に未反映の変更）。比べた事実だけを返す（理由・承認の有無は分からない） */
-    function diffEnvs({ preview, production, previewFiles = [], productionFiles = [] } = {}) {
-      const items = [];
-      const push = (kind, id, change, message, extra = {}) => items.push({ kind, id: String(id), change, message, ...extra });
-      // フィールド（テーブルの中のフィールドも 1 件ずつ。テーブル自体は中身を除いて比べる）
-      const flat = (props) => { const m = new Map(); for (const f of Object.values(props || {})) { if (!f || !f.code) continue; if (f.type === 'SUBTABLE') { m.set(f.code, without(f, ['fields'])); for (const c of Object.values(f.fields || {})) if (c && c.code) m.set(c.code, { ...c, subtable: f.code }); } else m.set(f.code, f); } return m; };
-      const pf = flat(preview?.fields), qf = flat(production?.fields);
-      for (const [code, f] of pf) {
-        const q = qf.get(code);
-        if (!q) push('field', code, 'PREVIEW_ONLY', `フィールド「${f.label}」（${code}・${f.type}${f.subtable ? `・テーブル ${f.subtable} 内` : ''}）は動作テスト環境にだけあります（運用環境には未反映）`, { label: f.label, type: f.type });
-        else if (!same(f, q)) { const keys = changedKeys(q, f); push('field', code, 'CHANGED', `フィールド「${f.label}」（${code}）の設定が運用環境と違います（${keys.join('・') || '詳細'}）`, { label: f.label, keys }); }
-      }
-      for (const [code, q] of qf) if (!pf.has(code)) push('field', code, 'PRODUCTION_ONLY', `フィールド「${q.label}」（${code}）は運用環境にありますが、動作テスト環境では削除されています（未反映の削除）`, { label: q.label, type: q.type });
-      // フォームの配置（追加・削除したフィールドだけで説明できる違いは重ねて出さない）
-      if (!same(preview?.layout || [], production?.layout || [])) {
-        const codes = (layout) => { const out = []; const walk = (rows) => { for (const r of rows || []) { if (!r) continue; if (r.type === 'GROUP') { out.push(`G:${r.code}`); walk(r.layout); continue; } if (r.type === 'SUBTABLE') { out.push(`T:${r.code}`); continue; } for (const x of r.fields || []) out.push(x?.code ? `F:${x.code}` : `E:${x?.type}:${x?.elementId || ''}`); out.push('|'); } }; walk(layout); return out; };
-        const moved = new Set(items.filter(x => x.kind === 'field' && x.change !== 'CHANGED').map(x => `F:${x.id}`));
-        const a = codes(preview?.layout).filter(c => !moved.has(c)), b = codes(production?.layout).filter(c => !moved.has(c));
-        const explained = moved.size > 0 && JSON.stringify(a.filter(c => c !== '|')) === JSON.stringify(b.filter(c => c !== '|'));
-        if (!explained) push('layout', 'form', 'CHANGED', 'フォームの配置（並び・行・幅・グループ）が運用環境と違います');
-      }
-      // 一覧
-      const pv = preview?.views?.views || {}, qv = production?.views?.views || {};
-      for (const [name, v] of Object.entries(pv)) { const q = qv[name]; if (!q) push('view', name, 'PREVIEW_ONLY', `一覧「${name}」は動作テスト環境にだけあります`); else if (!same(without(v, ['id']), without(q, ['id']))) push('view', name, 'CHANGED', `一覧「${name}」の設定が運用環境と違います（${changedKeys(q, v).join('・') || '詳細'}）`); }
-      for (const name of Object.keys(qv)) if (!pv[name]) push('view', name, 'PRODUCTION_ONLY', `一覧「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
-      // プロセス管理
-      const ps = preview?.status, qs = production?.status;
-      if (ps && qs) {
-        if (!!ps.enable !== !!qs.enable) push('process', 'enable', 'CHANGED', `プロセス管理が動作テスト環境では${ps.enable ? '有効' : '無効'}です（運用環境は${qs.enable ? '有効' : '無効'}）`);
-        const pst = ps.states || {}, qst = qs.states || {};
-        for (const [name, s] of Object.entries(pst)) { const q = qst[name]; if (!q) push('process-state', name, 'PREVIEW_ONLY', `ステータス「${name}」は動作テスト環境にだけあります`); else if (!same(s, q)) push('process-state', name, 'CHANGED', `ステータス「${name}」（順序・作業者）が運用環境と違います`); }
-        for (const name of Object.keys(qst)) if (!pst[name]) push('process-state', name, 'PRODUCTION_ONLY', `ステータス「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
-        const ak = (x) => `${x.name}|${x.from}`;
-        const pa = new Map((ps.actions || []).map(x => [ak(x), x])), qa = new Map((qs.actions || []).map(x => [ak(x), x]));
-        const actText = (x) => `→ ${x.to}${x.filterCond ? `・条件 ${x.filterCond}` : ''}`;
-        for (const [k, x] of pa) { const q = qa.get(k); if (!q) push('process-action', k, 'PREVIEW_ONLY', `アクション「${x.name}」（${x.from} ${actText(x)}）は動作テスト環境にだけあります`); else if (!same(x, q)) push('process-action', k, 'CHANGED', `アクション「${x.name}」（${x.from} から）が運用環境と違います（運用環境 ${actText(q)} / 動作テスト環境 ${actText(x)}${!same(x.executableUser, q.executableUser) ? '・実行できるユーザー' : ''}）`); }
-        for (const [k, q] of qa) if (!pa.has(k)) push('process-action', k, 'PRODUCTION_ONLY', `アクション「${q.name}」（${q.from} ${actText(q)}）は運用環境にありますが、動作テスト環境では削除されています`);
-      }
-      // 通知・リマインダー（同じ識別子が無いので、内容が同じものを対応させ、残りを追加 / 削除として出す）
-      const listDiff = (kind, label, pl, ql, title) => {
-        const a = (pl || []).map(x => JSON.stringify(stable(x))), b = (ql || []).map(x => JSON.stringify(stable(x)));
-        (pl || []).forEach((x, i) => { if (!b.includes(a[i])) push(kind, title(x), 'PREVIEW_ONLY', `${label}「${title(x)}」は動作テスト環境にだけあります（追加または内容の変更）`); });
-        (ql || []).forEach((x, i) => { if (!a.includes(b[i])) push(kind, title(x), 'PRODUCTION_ONLY', `${label}「${title(x)}」は運用環境の内容です（動作テスト環境では削除または変更）`); });
-      };
-      if (preview?.generalNotify && production?.generalNotify) {
-        listDiff('notification', 'アプリの条件通知', preview.generalNotify.notifications, production.generalNotify.notifications, (n) => `${n.entity?.type ?? ''}:${n.entity?.code ?? ''}`);
-        if (!!preview.generalNotify.notifyToCommenter !== !!production.generalNotify.notifyToCommenter) push('notification', 'notifyToCommenter', 'CHANGED', 'アプリの条件通知の「コメントの書き込み者への通知」が運用環境と違います');
-      }
-      if (preview?.perRecordNotify && production?.perRecordNotify) listDiff('notification', 'レコードの条件通知', preview.perRecordNotify.notifications, production.perRecordNotify.notifications, (n) => n.title || '（無題）');
-      if (preview?.reminderNotify && production?.reminderNotify) {
-        listDiff('reminder', 'リマインダー', preview.reminderNotify.notifications, production.reminderNotify.notifications, (n) => n.title || '（無題）');
-        if ((preview.reminderNotify.timezone ?? null) !== (production.reminderNotify.timezone ?? null)) push('reminder', 'timezone', 'CHANGED', `リマインダーのタイムゾーンが運用環境と違います（運用環境 ${production.reminderNotify.timezone ?? '未設定'} → 動作テスト環境 ${preview.reminderNotify.timezone ?? '未設定'}）`);
-      }
-      // アプリアクション（名前で対応）
-      const pact = preview?.actions?.actions || {}, qact = production?.actions?.actions || {};
-      for (const [name, x] of Object.entries(pact)) { const q = qact[name]; if (!q) push('app-action', name, 'PREVIEW_ONLY', `アプリアクション「${name}」は動作テスト環境にだけあります`); else if (!same(without(x, ['id']), without(q, ['id']))) push('app-action', name, 'CHANGED', `アプリアクション「${name}」の設定が運用環境と違います（${changedKeys(q, x).join('・') || '詳細'}）`); }
-      for (const name of Object.keys(qact)) if (!pact[name]) push('app-action', name, 'PRODUCTION_ONLY', `アプリアクション「${name}」は運用環境にありますが、動作テスト環境では削除されています`);
-      // JavaScript / CSS（名前・順序・本文の指紋。本文が片方でも取れなければサイズで比べ、その旨を書く）
-      const pc = preview?.customize, qc = production?.customize;
-      if (pc && qc) {
-        if ((pc.scope ?? 'ALL') !== (qc.scope ?? 'ALL')) push('customize', 'scope', 'CHANGED', `カスタマイズの適用範囲が運用環境と違います（${qc.scope ?? 'ALL'} → ${pc.scope ?? 'ALL'}）`);
-        const nameOf = (e) => (e?.type === 'URL' ? String(e.url ?? '') : String(e?.file?.name ?? ''));
-        for (const target of ['desktop', 'mobile']) for (const fk of ['js', 'css']) {
-          const pl = (pc[target]?.[fk] || []), ql = (qc[target]?.[fk] || []);
-          const pn = pl.map(nameOf), qn = ql.map(nameOf);
-          const where = `${target === 'mobile' ? 'モバイル' : 'PC'}の${fk === 'js' ? ' JavaScript' : ' CSS'}`;
-          for (const n of pn) if (!qn.includes(n)) push('customize', `${target}:${fk}:${n}`, 'PREVIEW_ONLY', `${where}「${n}」は動作テスト環境にだけあります（運用環境には未反映）`, { target, fileKind: fk, name: n });
-          for (const n of qn) if (!pn.includes(n)) push('customize', `${target}:${fk}:${n}`, 'PRODUCTION_ONLY', `${where}「${n}」は運用環境にありますが、動作テスト環境では外されています`, { target, fileKind: fk, name: n });
-          for (const n of pn.filter(x => qn.includes(x))) {
-            const pf2 = (previewFiles || []).find(f => f.target === target && f.kind === fk && f.name === n), qf2 = (productionFiles || []).find(f => f.target === target && f.kind === fk && f.name === n);
-            if (pf2?.hash && qf2?.hash) { if (pf2.hash !== qf2.hash) push('customize', `${target}:${fk}:${n}`, 'CHANGED', `${where}「${n}」の内容が運用環境と違います（指紋 運用環境 ${qf2.hash} → 動作テスト環境 ${pf2.hash}）`, { target, fileKind: fk, name: n, previewHash: pf2.hash, productionHash: qf2.hash }); continue; }
-            const pe = pl.find(e => nameOf(e) === n), qe = ql.find(e => nameOf(e) === n);
-            if (pe?.type === 'FILE' && qe?.type === 'FILE' && String(pe.file?.size ?? '') !== String(qe.file?.size ?? '')) push('customize', `${target}:${fk}:${n}`, 'CHANGED', `${where}「${n}」の内容が運用環境と違います（サイズ ${qe.file?.size ?? '?'} → ${pe.file?.size ?? '?'} バイト。本文は比べていません）`, { target, fileKind: fk, name: n });
-          }
-          const cp = pn.filter(x => qn.includes(x)), cq = qn.filter(x => pn.includes(x));
-          if (JSON.stringify(cp) !== JSON.stringify(cq)) push('customize', `${target}:${fk}:order`, 'CHANGED', `${where}の読み込み順が運用環境と違います`, { target, fileKind: fk });
-        }
-      }
-      // 一般設定・アクセス権・グラフ・プラグイン（どちらかが取れていなければ比べない）
-      if (preview?.settings && production?.settings && !same(preview.settings, production.settings)) push('settings', 'app', 'CHANGED', `アプリの一般設定が運用環境と違います（${changedKeys(production.settings, preview.settings).join('・') || '詳細'}）`);
-      for (const [k, label] of [['appAcl', 'アプリのアクセス権'], ['recordAcl', 'レコードのアクセス権'], ['fieldAcl', 'フィールドのアクセス権']]) if (preview?.[k] && production?.[k] && !same(preview[k], production[k])) push('acl', k, 'CHANGED', `${label}が運用環境と違います`);
-      if (preview?.reports && production?.reports) { const pr = preview.reports.reports || {}, qr = production.reports.reports || {}; for (const n of Object.keys(pr)) if (!qr[n]) push('report', n, 'PREVIEW_ONLY', `グラフ「${n}」は動作テスト環境にだけあります`); else if (!same(without(pr[n], ['id']), without(qr[n], ['id']))) push('report', n, 'CHANGED', `グラフ「${n}」の設定が運用環境と違います`); for (const n of Object.keys(qr)) if (!pr[n]) push('report', n, 'PRODUCTION_ONLY', `グラフ「${n}」は運用環境にありますが、動作テスト環境では削除されています`); }
-      if (preview?.appPlugins && production?.appPlugins) { const ids = (x) => (x.plugins || []).map(p => p.id).sort(); if (JSON.stringify(ids(preview.appPlugins)) !== JSON.stringify(ids(production.appPlugins))) push('plugin', 'app', 'CHANGED', 'このアプリに追加されているプラグインが運用環境と違います'); }
-      const byKind = {};
-      for (const it of items) byKind[it.kind] = (byKind[it.kind] || 0) + 1;
-      return { items, counts: { total: items.length, byKind } };
-    }
-
     /** 計画・生成の版に残す基準の要約（いつ・どの revision の動作テスト環境で作ったか）と内容の指紋 */
     function fingerprint(base) {
       if (!base || !base.ok || !base.data) return null;
@@ -2774,6 +2686,7 @@
         baseVersion: BASE_VERSION, env: ENV.PREVIEW, appId: String(appId ?? ''), loadedAt: new Date(started).toISOString(),
         ok: !coreErr.length, status: !coreErr.length ? 'OK' : coreErr.some(isPermission) ? 'PERMISSION_DENIED' : 'FETCH_FAILED', message: null,
         errors: [...prev.errors, ...prod.errors], revision: { preview: prev.raw.fields?.revision != null ? String(prev.raw.fields.revision) : null, production: prod.raw.fields?.revision != null ? String(prod.raw.fields.revision) : null },
+        comparisonInputs: { preview: prev.raw, production: prod.raw },
         data: null, files: [], productionData: null, productionFiles: [], diff: { available: false, items: [], counts: { total: 0, byKind: {} }, reason: null }, deps: null, scan: null, incoming: incoming || null, relatedLoadedAt: null,
       };
       if (!base.ok) {
@@ -2805,7 +2718,7 @@
         base.productionData = dataFrom(prod.raw, { appId, plugins });   // 差の説明用（基準ではない）
         if (needsDownload(prod.raw.customize) && !live()) return pausedBase();
         base.productionFiles = await loadFiles(prod.raw.customize, download, { env: ENV.PRODUCTION });
-        base.diff = { available: true, reason: null, ...diffEnvs({ preview: base.data, production: base.productionData, previewFiles: base.files, productionFiles: base.productionFiles }) };
+        base.diff = KTReleaseEnvironmentDiff.toLegacySummary(KTReleaseEnvironmentDiff.compare(base));
       } else base.diff = { available: false, items: [], counts: { total: 0, byKind: {} }, reason: prodCoreErr.map(e => `${e.label}: ${e.message || e.code || '不明'}`).join(' / ') };
       if (analysis) analyze(base, { appNames });
       base.elapsedMs = now() - started;
@@ -2831,7 +2744,7 @@
     }
     const loadForRelease = (options = {}) => load({ ...options, analysis: false });
 
-    return { BASE_VERSION, ENV, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, diffEnvs, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, currentOf, load, loadForRelease, analyze, stable, timeText };
+    return { BASE_VERSION, ENV, CORE, OPTIONAL, LABEL, fetchEnv, dataFrom, loadFiles, fingerprint, stamp, facts, notesOf, inputsOf, environmentOf, currentOf, load, loadForRelease, analyze, stable, timeText };
   })();
 
   // ==========================================
@@ -13486,6 +13399,455 @@
   //   回答済みでも、計画の検証（実在・権限・反映の可否）は省略しない（ここは対応づけと記録だけ。検証は KTPlanReview / Executor）。
   // ==========================================
   // BEGIN RELEASE WORKSPACE (generated from src/release-*.js)
+  /* Pure comparison functions extracted unchanged from kintone Config Lens v0.9.2.
+   * https://github.com/youtotto/kintone-config-lens
+   * Commit: fa9a942024c7947c3766414d5e6a2d254940260d
+   * Source SHA-256 (LF): 6727d3363641e416e0c9cc422803448a2cd72d4016607db833a161b2ec26eecb
+   * No network, browser controls or collection code is included.
+   *
+   * MIT License
+   *
+   * Copyright (c) 2026 Yuto Kawai (Nest Rec)
+   *
+   * Permission is hereby granted, free of charge, to any person obtaining a copy
+   * of this software and associated documentation files (the "Software"), to deal
+   * in the Software without restriction, including without limitation the rights
+   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   * copies of the Software, and to permit persons to whom the Software is
+   * furnished to do so, subject to the following conditions:
+   *
+   * The above copyright notice and this permission notice shall be included in
+   * all copies or substantial portions of the Software.
+   *
+   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   * THE SOFTWARE.
+   *
+   */
+  'use strict';
+  const KTConfigLensCompare = (() => {
+    const NAMES = {
+      label: 'フィールド名', type: '種類', code: 'フィールドコード', required: '必須項目',
+      unique: '値の重複を禁止', noLabel: 'フィールド名を非表示', defaultValue: '初期値',
+      defaultNowValue: '現在日時を初期値にする', options: '選択肢・順序', align: '選択肢の並び',
+      minLength: '最小文字数', maxLength: '最大文字数', minValue: '最小値', maxValue: '最大値',
+      expression: '計算式', hideExpression: '計算式を非表示', digit: '桁区切り', displayScale: '小数点以下の桁数',
+      unit: '単位', unitPosition: '単位の位置', format: '表示形式', protocol: 'リンクの種類',
+      thumbnailSize: 'サムネイルサイズ', entities: '選択候補', openGroup: 'グループを開いて表示',
+      lookup: 'ルックアップ', referenceTable: '関連レコード一覧', relatedApp: '参照先アプリ',
+      relatedKeyField: 'コピー元フィールド', fieldMappings: 'ほかのフィールドのコピー',
+      lookupPickerFields: '選択時に表示するフィールド', filterCond: '絞り込み条件', sort: '並び順',
+      condition: '表示条件', displayFields: '表示するフィールド', size: '表示件数', app: 'アプリID',
+      enabled: '有効', parent: '所属テーブル'
+    };
+    const TYPES = { SINGLE_LINE_TEXT: '文字列（1行）', MULTI_LINE_TEXT: '文字列（複数行）',
+      RICH_TEXT: 'リッチエディター', NUMBER: '数値', CALC: '計算', RADIO_BUTTON: 'ラジオボタン',
+      CHECK_BOX: 'チェックボックス', MULTI_SELECT: '複数選択', DROP_DOWN: 'ドロップダウン',
+      DATE: '日付', TIME: '時刻', DATETIME: '日時', FILE: '添付ファイル', LINK: 'リンク',
+      USER_SELECT: 'ユーザー選択', ORGANIZATION_SELECT: '組織選択', GROUP_SELECT: 'グループ選択',
+      SUBTABLE: 'テーブル', GROUP: 'グループ', REFERENCE_TABLE: '関連レコード一覧' };
+    const SYSTEM = new Set(['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY']);
+    Object.assign(NAMES, {
+      name: '名称', description: '説明', theme: 'テーマ', icon: 'アイコン', titleField: 'レコードのタイトル',
+      enableThumbnails: 'サムネイル表示', enableBulkDeletion: '一括削除を許可', enableComments: 'コメントを使用',
+      enableDuplicateRecord: 'レコード再利用を許可', enableInlineRecordEditing: '一覧での編集を許可',
+      numberPrecision: '数値の精度', digits: '全体の桁数', decimalPlaces: '小数部の桁数', roundingMode: '丸め方',
+      firstMonthOfFiscalYear: '年度の開始月', selectionMode: '選択方法', fields: '表示フィールド・順序',
+      index: '表示順（0始まり）', html: 'カスタマイズHTML', pager: 'ページ送りを表示', device: '表示端末',
+      date: '日付フィールド', title: '表示内容', builtinType: '組み込み一覧', enable: '有効', states: 'ステータス',
+      assignee: '作業者', actions: 'アクション・順序', from: '実行前ステータス', to: '実行後ステータス',
+      executableUser: '実行可能ユーザー', notifications: '通知ルール・順序', entity: '対象', targets: '通知先',
+      includeSubs: '下位組織を含む', recordAdded: 'レコード追加時', recordEdited: 'レコード編集時',
+      commentAdded: 'コメント追加時', statusChanged: 'ステータス変更時', fileImported: 'ファイル読み込み時',
+      notifyToCommenter: 'コメントしたユーザーへの通知', timing: '通知日時', daysLater: '日数の差',
+      hoursLater: '時間の差', time: '時刻', timezone: 'タイムゾーン', rights: 'アクセス権・優先順',
+      appEditable: 'アプリ管理', recordViewable: 'レコード閲覧', recordAddable: 'レコード追加',
+      recordEditable: 'レコード編集', recordDeletable: 'レコード削除', recordImportable: 'ファイル読み込み',
+      recordExportable: 'ファイル書き出し', viewable: '閲覧', editable: '編集', deletable: '削除',
+      accessibility: '許可する操作', chartType: 'グラフの種類', chartMode: '表示方法', groups: '分類',
+      aggregations: '集計方法', sorts: '並び順', periodicReport: '定期レポート', active: '有効', period: '間隔',
+      destApp: 'コピー先アプリ', mappings: 'コピーする項目', srcType: 'コピー元の種類', srcField: 'コピー元フィールド',
+      destField: 'コピー先フィールド', scope: '適用範囲', desktop: 'PC', mobile: 'モバイル', js: 'JavaScript・順序',
+      css: 'CSS・順序', url: 'URL', file: 'ファイル', fileKey: 'ファイル識別情報', contentType: 'ファイル形式', contentHash: '内容（SHA-256）',
+      content: 'メモ本文', includeInTemplateAndDuplicates: 'テンプレート・再利用時にメモを含める',
+      layout: '配置・部品', width: '幅', height: '高さ', innerHeight: '入力欄の高さ', elementId: '要素ID'
+    });
+    // Each category declares the public API response shape. Missing data must never mean no changes.
+    const CATEGORIES = [
+      { id: 'fields', label: 'フォーム項目', path: 'app/form/fields', shape: { properties: 'object' }, mode: 'fields' },
+      { id: 'layout', label: 'フォーム配置', path: 'app/form/layout', shape: { layout: 'array' }, note: '保存済みフォームの配置を左右の図で確認します。寸法はPC用です。' },
+      { id: 'views', label: '一覧', path: 'app/views', shape: { views: 'object' }, collection: 'views', key: 'id' },
+      { id: 'process', label: 'プロセス管理', path: 'app/status', shape: { enable: 'boolean', states: 'object?', actions: 'array?' } },
+      { id: 'notifyApp', label: '通知：アプリ', path: 'app/notifications/general', shape: { notifications: 'array', notifyToCommenter: 'boolean' } },
+      { id: 'notifyRecord', label: '通知：レコード', path: 'app/notifications/perRecord', shape: { notifications: 'array' } },
+      { id: 'notifyReminder', label: '通知：リマインダー', path: 'app/notifications/reminder', shape: { notifications: 'array', timezone: 'string?' } },
+      { id: 'aclApp', label: 'アクセス権：アプリ', path: 'app/acl', shape: { rights: 'array' } },
+      { id: 'aclRecord', label: 'アクセス権：レコード', path: 'record/acl', shape: { rights: 'array' } },
+      { id: 'aclField', label: 'アクセス権：フィールド', path: 'field/acl', shape: { rights: 'array' }, collection: 'rights', key: 'code' },
+      { id: 'general', label: '一般設定・高度な設定', path: 'app/settings', shape: { name: 'string', description: 'string' } },
+      { id: 'reports', label: 'グラフ・定期レポート', path: 'app/reports', shape: { reports: 'object' }, collection: 'reports', key: 'id' },
+      { id: 'actions', label: 'アプリアクション', path: 'app/actions', shape: { actions: 'object' }, collection: 'actions', key: 'id', note: 'コピー先や対応項目が権限により取得できない場合、その部分は比較できません。' },
+      { id: 'customize', label: 'JavaScript・CSS', path: 'app/customize', shape: { scope: 'string', desktop: 'object', mobile: 'object' }, note: '登録情報・読み込み順と、アップロードしたファイルの内容を比較します。同じURLの配信内容は比較しません。' },
+      { id: 'plugins', label: 'プラグインの追加・有効状態', path: 'app/plugins', shape: { plugins: 'array' }, collection: 'plugins', key: 'id', note: 'プラグイン内部の設定・バージョンは対象外です。' },
+      { id: 'notes', label: 'アプリ管理者用メモ', path: 'app/adminNotes', shape: { content: 'string', includeInTemplateAndDuplicates: 'boolean' } }
+    ];
+    const UNSUPPORTED = '未対応：カテゴリー・プラグイン内部設定（APIラボ）、言語別名称一式、Webhook、APIトークン。';
+    const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const displayName = key => Object.hasOwn(NAMES, key) ? NAMES[key] : key;
+    function validateResponse(category, data) {
+      if (!object(data) || !/^\d+$/.test(String(data.revision ?? ''))) throw new Error('応答形式が不正です（リビジョンなし）。');
+      for (const [key, type] of Object.entries(category.shape)) {
+        const value = data[key], base = type.replace('?', '');
+        if (value === null && type.endsWith('?')) continue;
+        if (!(base === 'array' ? Array.isArray(value) : base === 'object' ? object(value) : typeof value === base)) {
+          throw new Error(`応答形式が不正です（${key}）。`);
+        }
+      }
+      return data;
+    }
+    function settingsOnly(data) {
+      return Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'revision'));
+    }
+    function collectionMap(category, data) {
+      const result = new Map();
+      for (const value of Object.values(data[category.collection])) {
+        const key = value?.[category.key];
+        if (!object(value) || key === undefined || key === null || key === '' || result.has(String(key))) {
+          throw new Error('項目の識別情報が不足または重複しているため比較できません。');
+        }
+        result.set(String(key), value);
+      }
+      return result;
+    }
+    function settingFiles(category, data) {
+      if (category.id === 'general') return [data.icon].filter(v => v?.type === 'FILE');
+      if (category.id !== 'customize') return [];
+      return ['desktop', 'mobile'].flatMap(device => ['js', 'css'].flatMap(kind => {
+        const entries = data[device][kind];
+        if (!Array.isArray(entries)) throw new Error('ファイル一覧の応答形式が不正です。');
+        return entries.filter(v => v?.type === 'FILE');
+      }));
+    }
+    function fileComparison(category, live, preview, hashes, warnings) {
+      // Download keys can differ without a content change. Only normalize the documented file slots.
+      const copies = [live, preview].map(data => JSON.parse(JSON.stringify(data)));
+      for (const data of copies) for (const entry of settingFiles(category, data)) {
+        const f = entry.file;
+        if (!object(f) || !['fileKey', 'name', 'contentType', 'size'].every(k => typeof f[k] === 'string') || !/^\d+$/.test(f.size)) {
+          throw new Error('ファイル情報が不足しているため比較できません。');
+        }
+      }
+      const normalizePair = (a, b) => {
+        const files = [a, b].map(entry => entry?.type === 'FILE' ? entry.file : null);
+        const verified = files.every(f => !f || hashes.has(f.fileKey));
+        for (const f of files.filter(Boolean)) {
+          if (verified) f.contentHash = hashes.get(f.fileKey);
+          else warnings.push(`ファイル「${f.name}」の内容を取得・確認できず比較できません。設定を再取得してください。`);
+          delete f.fileKey;
+        }
+      };
+      if (category.id === 'general') normalizePair(copies[0].icon, copies[1].icon);
+      if (category.id === 'customize') for (const device of ['desktop', 'mobile']) for (const kind of ['js', 'css']) {
+        const a = copies[0][device][kind], b = copies[1][device][kind];
+        for (let i = 0; i < Math.max(a.length, b.length); i++) normalizePair(a[i], b[i]);
+      }
+      return copies;
+    }
+    function compareCategory(category, live, preview, hashes = new Map()) {
+      validateResponse(category, live); validateResponse(category, preview);
+      const warnings = [];
+      if (['general', 'customize'].includes(category.id)) [live, preview] = fileComparison(category, live, preview, hashes, warnings);
+      if (category.id === 'actions' && [live, preview].some(data => Object.values(data.actions).some(a => a.destApp == null || a.mappings == null))) {
+        warnings.push('一部のコピー先・対応項目が取得できず比較できません。取得できた部分のみ表示しています。');
+      }
+      let result;
+      if (category.mode === 'fields') result = compare(live.properties, preview.properties);
+      else if (category.collection) {
+        const a = collectionMap(category, live), b = collectionMap(category, preview);
+        result = [];
+        for (const code of new Set([...a.keys(), ...b.keys()])) {
+          const before = a.get(code), after = b.get(code), rows = changes(before, after);
+          if (!before || !after || rows.length) result.push({ code, label: (after || before).name || code,
+            kind: !before ? 'added' : !after ? 'deleted' : 'changed', before, after, rows });
+        }
+      } else {
+        const a = settingsOnly(live), b = settingsOnly(preview);
+        result = [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap(code => {
+          const rows = changes(a[code], b[code], [code]);
+          return rows.length ? [{ code, label: displayName(code), kind: 'changed', before: a[code], after: b[code], rows }] : [];
+        });
+      }
+      return { category, state: warnings.length ? 'partial' : 'ok', warnings: [...new Set(warnings)],
+        ...(['fields', 'layout', 'views', 'reports'].includes(category.id) ? { snapshots: [live, preview] } : {}),
+        entries: result.map(entry => ({ ...entry, categoryId: category.id })), liveRevision: String(live.revision), previewRevision: String(preview.revision) };
+    }
+    function formatSetting(value, depth = 0) {
+      if (value === null) return 'null（未設定または取得不可）';
+      if (!object(value) && !Array.isArray(value)) return format(value);
+      if (!Object.keys(value).length) return '（なし）';
+      return Object.entries(value).map(([key, child]) => `${'  '.repeat(depth)}${Array.isArray(value) ? Number(key) + 1 : key === 'code' ? 'コード' : key === 'size' ? 'サイズ' : displayName(key)}：${object(child) || Array.isArray(child) ? '\n' + formatSetting(child, depth + 1) : formatSetting(child)}`).join('\n');
+    }
+
+    function stable(v) {
+      if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+      if (object(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+      return JSON.stringify(v);
+    }
+
+    function flatten(properties) {
+      const result = new Map();
+      function walk(fields, parent = '') {
+        for (const [key, field] of Object.entries(fields)) {
+          if (SYSTEM.has(field.type)) continue;
+          const { fields: children, ...settings } = field;
+          const code = field.code || key;
+          result.set(code, { code, parent, settings });
+          if (children) walk(children, code);
+        }
+      }
+      walk(properties);
+      return result;
+    }
+
+    function changes(before, after, path = []) {
+      if (stable(before) === stable(after)) return [];
+      if (object(before) && object(after)) return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+        .sort().flatMap(key => changes(before[key], after[key], [...path, key]));
+      return [{ path, before, after }];
+    }
+    function compare(live, preview) {
+      const a = flatten(live), b = flatten(preview), result = [];
+      for (const code of new Set([...a.keys(), ...b.keys()])) {
+        const before = a.get(code), after = b.get(code);
+        // Options are one setting: preserve explicit index order in their human-readable representation.
+        let rows = [];
+        for (const key of new Set([...Object.keys(before?.settings || {}), ...Object.keys(after?.settings || {})])) {
+          const oldValue = before?.settings[key], newValue = after?.settings[key];
+          if (key === 'options') {
+            if (stable(oldValue) !== stable(newValue)) rows.push({ path: [key], before: oldValue, after: newValue });
+          } else rows.push(...changes(oldValue, newValue, [key]));
+        }
+        if (before && after && before.parent !== after.parent) rows.push({ path: ['parent'], before: before.parent, after: after.parent });
+        if (!before || !after || rows.length) result.push({ code, before, after, rows,
+          kind: !before ? 'added' : !after ? 'deleted' : 'changed',
+          label: (after || before).settings.label || code });
+      }
+      return result.sort((x, y) => x.label.localeCompare(y.label, 'ja') || x.code.localeCompare(y.code));
+    }
+    function format(value, path = []) {
+      if (value === undefined) return '—';
+      if (value === null) return '取得不可／未設定';
+      if (value === '') return '（空欄）';
+      if (typeof value === 'boolean') return value ? 'はい' : 'いいえ';
+      if (path[0] === 'options' && object(value)) return Object.values(value)
+        .sort((a, b) => Number(a.index) - Number(b.index)).map(v => `${Number(v.index) + 1}. ${v.label}`).join('\n') || '（なし）';
+      if (path[0] === 'type') return TYPES[value] || String(value);
+      if (Array.isArray(value) && value.every(v => typeof v === 'string')) return value.join('\n') || '（なし）';
+      if (object(value) || Array.isArray(value)) return JSON.stringify(value, null, 2);
+      return String(value);
+    }
+    return { compare, changes, flatten, stable, format, formatSetting, CATEGORIES, UNSUPPORTED, compareCategory, validateResponse, settingFiles, fileComparison, displayName };
+  })();
+
+  /* Unpublished application settings: production -> preview.
+   * Config Lens owns structural comparison. This adapter only supplies already
+   * acquired KTDevBase responses, provenance and decoded JavaScript text.
+   * No request, AI call, conversation interpretation or local editor parsing. */
+  'use strict';
+  const KTReleaseEnvironmentDiff = (() => {
+    const Lens = typeof KTConfigLensCompare !== 'undefined' ? KTConfigLensCompare : require('./vendor/config-lens-compare.js').KTConfigLensCompare;
+    const SOURCE_KEYS = Object.freeze({ fields: 'fields', layout: 'layout', views: 'views', process: 'status',
+      notifyApp: 'generalNotify', notifyRecord: 'perRecordNotify', notifyReminder: 'reminderNotify',
+      aclApp: 'appAcl', aclRecord: 'recordAcl', aclField: 'fieldAcl', general: 'settings', reports: 'reports',
+      actions: 'actions', customize: 'customize', plugins: 'appPlugins', notes: 'adminNotes' });
+    const LIMITATIONS = Object.freeze([
+      '取得した設定を、運用環境から動作テスト環境への変更として比較しています。変更した理由や承認の有無は分かりません。',
+      'JavaScriptの本文は取得したテキストを比較しています。元のバイト列・文字コードの一致は確かめていません。',
+      'URL指定のファイル、CSS、アイコンの内容と、プラグイン内部の設定は比較していません。',
+      'カテゴリー、言語別の名称、Webhook、APIトークン、レコードの内容と実際の動作は比較していません。',
+      '手元で編集してまだ登録していないコードは、環境間の変更一覧に含めません。'
+    ]);
+    const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+    const revision = value => typeof value === 'string' && /^\d+$/.test(value) || Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+    const sourceOf = base => ({ appId: String(base?.appId ?? ''), loadedAt: base?.loadedAt ?? null,
+      productionEnvironment: 'production', previewEnvironment: 'preview',
+      productionRevision: revision(base?.revision?.production), previewRevision: revision(base?.revision?.preview) });
+    function staleReasons(base, inputs, source) {
+      const reasons = [];
+      if (base?.env !== 'preview' || !source.appId) reasons.push('比較元のアプリまたは環境を確認できません。');
+      if (base?.stale || base?.status === 'stale' || base?.status === 'loading' || base?.status === 'cancelled') reasons.push('設定の取得が完了していないか、取得後に設定が変わっています。');
+      for (const env of ['production', 'preview']) {
+        const data = env === 'preview' ? base?.data : base?.productionData;
+        if (data?.appId != null && String(data.appId) !== source.appId) reasons.push('別のアプリの設定が含まれているため比較できません。');
+        const revisions = new Set(Object.values(inputs?.[env] || {}).map(value => revision(value?.revision)).filter(Boolean));
+        const expected = source[env + 'Revision'];
+        if (expected) revisions.add(expected);
+        if (revisions.size > 1) reasons.push((env === 'preview' ? '動作テスト環境' : '運用環境') + 'の設定の版が取得中に変わったため比較できません。設定を取り直してください。');
+      }
+      return [...new Set(reasons)];
+    }
+    // File keys are environment-specific. Equality tokens represent exact decoded
+    // text, not a hash, byte count, approval or assertion about original bytes.
+    function fileInputs(base) {
+      const tokens = new Map(), hashes = new Map(), conflicted = new Set();
+      for (const [env, files] of [['production', base?.productionFiles], ['preview', base?.files]]) {
+        for (const file of files || []) {
+          if (file?.env !== env || file.type !== 'FILE' || file.kind !== 'js' || !['desktop', 'mobile'].includes(file.target) || file.sourceAvailable !== true || typeof file.text !== 'string' || !file.fileKey) continue;
+          if (!tokens.has(file.text)) tokens.set(file.text, '取得した本文 ' + (tokens.size + 1));
+          const key = env + ':' + file.fileKey, token = tokens.get(file.text);
+          if (hashes.has(key) && hashes.get(key) !== token) conflicted.add(key);
+          hashes.set(key, token);
+        }
+      }
+      for (const key of conflicted) hashes.delete(key);
+      return hashes;
+    }
+    function fileResponse(category, response, env) {
+      const copy = clone(response);
+      for (const entry of Lens.settingFiles(category, copy)) {
+        if (typeof entry.file?.fileKey === 'string') entry.file.fileKey = env + ':' + entry.file.fileKey;
+      }
+      return copy;
+    }
+    function publicValue(value) {
+      if (Array.isArray(value)) return value.map(publicValue);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key === 'contentHash' ? 'contentComparison' : key, publicValue(item)]));
+    }
+    function entryOf(entry) {
+      return { categoryId: entry.categoryId, code: entry.code, label: entry.label,
+        kind: entry.before === undefined ? 'added' : entry.after === undefined ? 'deleted' : entry.kind,
+        before: publicValue(entry.before), after: publicValue(entry.after),
+        rows: entry.rows.map(row => ({ path: row.path.map(key => key === 'contentHash' ? 'contentComparison' : key), before: publicValue(row.before), after: publicValue(row.after) })) };
+    }
+    function changedCode(base, customization, hashes) {
+      if (!customization || !['ok', 'partial'].includes(customization.status)) return [];
+      const input = base.comparisonInputs;
+      const read = (entry, env, target) => {
+        if (!entry) return null;
+        const name = entry.type === 'FILE' ? entry.file?.name : entry.url;
+        const files = env === 'preview' ? base.files : base.productionFiles;
+        const found = entry.type === 'FILE' && hashes.has(env + ':' + entry.file?.fileKey)
+          ? (files || []).find(file => file.env === env && file.target === target && file.kind === 'js' && file.type === 'FILE' && file.fileKey === entry.file?.fileKey && file.sourceAvailable === true && typeof file.text === 'string') : null;
+        return { environment: env, name: String(name || ''), type: entry.type,
+          contentStatus: found ? 'available' : 'unavailable', text: found ? found.text : null };
+      };
+      const result = [];
+      for (const target of ['desktop', 'mobile']) {
+        const beforeFiles = input.production.customize[target].js, afterFiles = input.preview.customize[target].js;
+        for (let index = 0; index < Math.max(beforeFiles.length, afterFiles.length); index++) {
+          const before = read(beforeFiles[index], 'production', target), after = read(afterFiles[index], 'preview', target);
+          if (before && after && before.contentStatus === 'available' && after.contentStatus === 'available' && before.text === after.text) continue;
+          const contentKnown = [before, after].filter(Boolean).every(file => file.contentStatus === 'available');
+          result.push({ target, position: index + 1, kind: !before ? 'added' : !after ? 'deleted' : contentKnown ? 'changed' : 'unknown',
+            comparison: contentKnown ? 'decoded-text-exact' : 'unavailable', before, after });
+        }
+      }
+      return result;
+    }
+    function compare(base) {
+      const source = sourceOf(base), inputs = base?.comparisonInputs, stale = staleReasons(base, inputs, source), hashes = fileInputs(base);
+      const categories = Lens.CATEGORIES.map(category => {
+        const key = SOURCE_KEYS[category.id], before = inputs?.production?.[key], after = inputs?.preview?.[key];
+        const failed = (base?.errors || []).filter(error => error.what === key && ['production', 'preview'].includes(error.env));
+        if (stale.length) return { id: category.id, label: category.label, status: 'stale', warnings: [...stale], entries: [] };
+        if (!before || !after || failed.length) {
+          const missing = ['production', 'preview'].filter(env => !inputs?.[env]?.[key] || failed.some(error => error.env === env));
+          return { id: category.id, label: category.label, status: 'unavailable',
+            warnings: missing.map(env => (env === 'preview' ? '動作テスト環境' : '運用環境') + 'の「' + category.label + '」を取得できていないため比較していません。'), entries: [] };
+        }
+        try {
+          let live = before, preview = after;
+          if (['general', 'customize'].includes(category.id)) {
+            live = fileResponse(category, before, 'production'); preview = fileResponse(category, after, 'preview');
+          }
+          const result = Lens.compareCategory(category, live, preview, hashes), warnings = [...result.warnings];
+          if (category.id === 'customize' && [before, after].some(data => ['desktop', 'mobile'].some(device => ['js', 'css'].some(kind => data[device][kind].some(file => file?.type === 'URL'))))) {
+            warnings.push('URL指定のファイルは登録先だけを比較しています。配信される内容は確認していません。');
+          }
+          return { id: category.id, label: category.label, status: warnings.length ? 'partial' : result.state,
+            warnings: [...new Set(warnings)], entries: result.entries.map(entryOf),
+            productionRevision: result.liveRevision, previewRevision: result.previewRevision };
+        } catch (error) {
+          return { id: category.id, label: category.label, status: 'unavailable', warnings: ['「' + category.label + '」の取得結果が比較に必要な形式を満たしていません。設定を取り直してください。'], entries: [] };
+        }
+      });
+      const entries = categories.flatMap(category => category.entries), unavailable = categories.filter(category => category.status !== 'ok')
+        .map(category => ({ categoryId: category.id, label: category.label, status: category.status, reasons: category.warnings }));
+      const availableCount = categories.filter(category => ['ok', 'partial'].includes(category.status)).length;
+      return { status: stale.length ? 'stale' : !availableCount ? 'unavailable' : unavailable.length ? 'partial' : 'ok',
+        source, categories, entries, unavailable, codeChanges: changedCode(base, categories.find(category => category.id === 'customize'), hashes), limitations: [...LIMITATIONS] };
+    }
+    function toLegacySummary(result) {
+      const kindOf = { fields: 'field', layout: 'layout', views: 'view', process: 'process', customize: 'javascript',
+        notifyApp: 'notification', notifyRecord: 'notification', notifyReminder: 'reminder', aclApp: 'acl', aclRecord: 'acl', aclField: 'acl', general: 'settings', reports: 'report', actions: 'action', plugins: 'plugin', notes: 'notes' };
+      const items = result.entries.map(entry => ({ kind: kindOf[entry.categoryId] || entry.categoryId, id: String(entry.code),
+        change: { added: 'PREVIEW_ONLY', deleted: 'PRODUCTION_ONLY', changed: 'CHANGED' }[entry.kind], label: entry.label,
+        message: (result.categories.find(category => category.id === entry.categoryId)?.label || entry.categoryId) + '「' + entry.label + '」：' + ({ added: '追加', deleted: '削除', changed: '変更' }[entry.kind]),
+        categoryId: entry.categoryId }));
+      const byKind = {}; for (const item of items) byKind[item.kind] = (byKind[item.kind] || 0) + 1;
+      return { available: ['ok', 'partial'].includes(result.status), complete: result.status === 'ok', status: result.status,
+        items, counts: { total: items.length, byKind }, coverage: result.unavailable,
+        reason: result.unavailable.length ? '取得できた範囲の比較です。比較できていない設定があります。' : null };
+    }
+    const pathLabel = path => path.map(key => key === 'contentComparison' ? '本文（取得したテキスト）' : Lens.displayName(key)).join(' / ');
+    const formatValue = (value, path = []) => Lens.format(value, path);
+    return { compare, toLegacySummary, pathLabel, formatValue, SOURCE_KEYS };
+  })();
+
+  /* Presentation and explicit AI context for saved environment differences. */
+  'use strict';
+  const KTReleaseEnvironmentView = (() => {
+    const core = typeof KTReleaseEnvironmentDiff !== 'undefined' ? KTReleaseEnvironmentDiff : require('./release-environment-diff.js').KTReleaseEnvironmentDiff;
+    const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const stable = value => JSON.stringify(value, (_key, v) => v && !Array.isArray(v) && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
+    // Compare the displayed snapshot with the fresh read used by the existing
+    // explanation flow. A changed baseline must not silently change the subject.
+    const keyOf = result => stable({ ...result, source: { ...result.source, loadedAt: null } });
+    const canExplain = result => ['ok', 'partial'].includes(result?.status);
+    function localEdits(value) {
+      if (!Array.isArray(value)) return { available: false, files: [] };
+      return { available: true, files: value.filter(f => ['new', 'edited', 'unknown'].includes(f?.state)).map(f => ({
+        name: String(f.name || ''), kind: f.kind === 'css' ? 'css' : 'js', target: f.target === 'mobile' ? 'mobile' : 'desktop',
+        environment: ['preview', 'production'].includes(f.environment) ? f.environment : 'unknown', state: f.state
+      })) };
+    }
+    const localText = file => file.name + '（' + (file.target === 'mobile' ? 'モバイル' : 'PC') + '・' + ({ new: '新規作成・未登録', edited: '手元で編集中・未登録', unknown: '取得時との違いは未確認' }[file.state]) + '）';
+    function render(result, edits) {
+      const source = result.source, count = result.entries.length;
+      const unavailable = result.unavailable.map(c => '<li><strong>' + esc(c.label) + '</strong>：' + esc(c.reasons.join(' ')) + '</li>').join('');
+      const groups = result.categories.filter(c => c.entries.length).map(c => '<section class="ktr-env-category"><h3>' + esc(c.label) + ' <small>' + c.entries.length + '件</small></h3>' + c.entries.map(e => {
+        const rows = e.rows.length ? e.rows : [{ path: [], before: e.before, after: e.after }];
+        return '<details class="ktr-env-entry"><summary><span class="ktr-env-kind">' + esc({ added: '追加', changed: '変更', deleted: '削除' }[e.kind] || '変更') + '</span> ' + esc(e.label || e.code) + '</summary><div class="ktr-env-table"><table><thead><tr><th>項目</th><th>運用環境</th><th>動作テスト環境</th></tr></thead><tbody>' + rows.map(row => '<tr><th>' + esc(core.pathLabel(row.path) || e.label) + '</th><td><pre>' + esc(core.formatValue(row.before, row.path)) + '</pre></td><td><pre>' + esc(core.formatValue(row.after, row.path)) + '</pre></td></tr>').join('') + '</tbody></table></div></details>';
+      }).join('') + '</section>').join('');
+      return '<style>.ktr-env-category{margin:20px 0}.ktr-env-entry{border-bottom:1px solid var(--border,#485466);padding:10px 0}.ktr-env-entry summary{cursor:pointer;overflow-wrap:anywhere}.ktr-env-kind{font-size:.85em;font-weight:600}.ktr-env-table{overflow:auto;max-width:100%}.ktr-env-table table{width:100%;table-layout:fixed;border-collapse:collapse}.ktr-env-table th,.ktr-env-table td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid var(--border,#485466);overflow-wrap:anywhere}.ktr-env-table th:first-child{width:24%}.ktr-env-table pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto;margin:0;font:inherit}.ktr-env-coverage{margin:16px 0}.ktr-env-local{margin:20px 0;padding-top:12px;border-top:1px solid var(--border,#485466)}</style>' +
+        '<p>運用環境 → 動作テスト環境の、保存済みの設定を比較しています。この会話以外で変更した内容も含みます。</p>' +
+        '<p class="ktr-note">アプリ ' + esc(source.appId) + ' ／ 運用環境の版 ' + esc(source.productionRevision ?? '未確認') + ' → 動作テスト環境の版 ' + esc(source.previewRevision ?? '未確認') + '<br>取得日時：' + esc(source.loadedAt || '未確認') + '</p>' +
+        '<p role="status"><strong>' + esc(canExplain(result) ? count ? '確認できた変更 ' + count + '件' : '比較できた範囲に変更はありません' : '変更を比較できませんでした') + '</strong>' + (unavailable ? '。比較できていない範囲があります。' : '') + '</p>' +
+        groups + (unavailable ? '<details class="ktr-env-coverage"' + (!canExplain(result) ? ' open' : '') + '><summary>比較できていない範囲（' + result.unavailable.length + '項目）</summary><ul>' + unavailable + '</ul></details>' : '') +
+        '<section class="ktr-env-local"><h3>手元の未登録編集</h3><p>上の変更一覧には含めていません。AIにはファイル名と編集状態だけを伝え、編集した本文は送りません。</p>' + (!edits.available ? '<p>この画面では編集状態を取得できていません。</p>' : edits.files.length ? '<ul>' + edits.files.map(f => '<li>' + esc(localText(f)) + '</li>').join('') + '</ul>' : '<p>このタブに未登録の編集はありません。</p>') + '</section>' +
+        '<details><summary>比較の範囲について</summary><ul>' + result.limitations.map(text => '<li>' + esc(text) + '</li>').join('') + '</ul></details>';
+    }
+    function context(base, request) {
+      const result = core.compare(base);
+      if (!canExplain(result) || request.key !== keyOf(result)) throw Object.assign(new Error('表示後に設定または取得できる範囲が変わりました。未反映の変更一覧を取り直してから説明を依頼してください。AIにはまだ送信していません。'), { code: 'ENVIRONMENT_COMPARISON_CHANGED' });
+      const edits = localEdits(request.localEdits?.available ? request.localEdits.files : null), facts = [];
+      const add = (kind, statement, value) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value });
+      add('env-diff-coverage', '比較の対象・時点と未確認の範囲', { ...result.source, status: result.status,
+        categories: result.categories.map(c => ({ id: c.id, label: c.label, status: c.status, warnings: c.warnings })), limitations: result.limitations });
+      for (const entry of result.entries) add('env-diff', (result.categories.find(c => c.id === entry.categoryId)?.label || '') + '：' + entry.label, entry);
+      for (const code of result.codeChanges || []) add('env-diff', 'JavaScriptの登録内容・本文の違い', { categoryId: 'customize', ...code });
+      add('local-unregistered-edit', '環境の比較には含めない手元の編集', edits);
+      if (facts.length > 500) throw Object.assign(new Error('比較結果が一度に送れる量を超えています。一覧は確認できますが、AIには送信していません。'), { code: 'CONTEXT_TOO_LARGE' });
+      return { facts, coverage: { fields: result.categories.find(c => c.id === 'fields')?.status === 'ok', dependencies: false, javascript: result.categories.find(c => c.id === 'customize')?.status === 'ok', incoming: false, plugins: false, environmentComparison: { status: result.status, source: result.source, unavailable: result.unavailable }, localUnregisteredEdits: edits.available, recordData: false, runtime: false } };
+    }
+    return { render, context, keyOf, canExplain, localEdits };
+  })();
+
   /* Release workspace: explicit user actions, service outcomes, and one execution record.
    * No requirement-text interpretation or verification-case aggregation belongs here.
    */
@@ -13714,10 +14076,11 @@
         const request = suggestionRequest(state);
         return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
       }
-      async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
+      async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
         if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
+        if (environmentComparison && requestPurpose !== 'document') return false;
         const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
         const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
         const operationLabel = ideation ? 'アイディア出し' : '資料の作成';
@@ -13761,7 +14124,7 @@
               && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
               && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
           userMessage.consultationTarget = clone(resolvedTarget);
-          return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
+          return services.propose({ text: value, requestPurpose, environmentComparison: clone(environmentComparison), consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
         };
         if (readOnly) {
           // Document and ideation actions cannot revise a plan, even if their AI request fails.
@@ -14095,13 +14458,14 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
-      const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
+    function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base, environmentComparison = null }, dependencyTools = null) {
+      const comparison = environmentComparison ? (typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView).context(base, environmentComparison) : null;
+      const dependencies = comparison ? { facts: [] } : dependencyContext(base, dependencyTools, consultationTarget);
       const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
         ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
         : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-        focus, facts: factsOf(base, dependencies, requestTargets, consultationTarget), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+        focus: comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
@@ -14885,7 +15249,7 @@
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
         <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
@@ -14946,7 +15310,7 @@
         const state = controller.getState(), conn = connectionOf(options);
         return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
       }
-      async function send(request, onStart, suggestionReference = null) {
+      async function send(request, onStart, suggestionReference = null, requestOptions = null) {
         const fromDocument = typeof request === 'string' && !suggestionReference;
         if (!canSend(fromDocument ? 'document' : controller.getState().requestPurpose)) return false;
         const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
@@ -14969,7 +15333,7 @@
           if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
           selectedRunId = null; notice = '';
           onStart?.();
-          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { requestPurpose: 'document' } : undefined);
+          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: 'document' } : undefined);
           if (sent === false) restoreInput();
           return sent !== false;
         } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
@@ -15024,6 +15388,7 @@
           else { if (typeof options.onDownload !== 'function') return; await options.onDownload(result.generated?.targetFile || result.targetFile || 'customization.js', body); notice = 'ファイルを保存しました。'; }
           draw(); return;
         }
+        if (action === 'pending-changes') return options.onPendingChanges?.({ request: (text, onStart, sendOptions) => send(text, onStart, null, sendOptions), canRequest: () => canSend('document') });
         if (action === 'documents') return options.onDocuments?.({ request: send, canRequest: () => canSend('document'), hasDraft: () => !!String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim() });
         const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, details: options.onDetails, preview: options.onOpenPreview };
         if (typeof handlers[action] === 'function') { await handlers[action](); draw(); }
@@ -15882,12 +16247,50 @@
       el.querySelector('[data-copy]').addEventListener('click', () => d.copyText(el.querySelector('[data-output]').value));
       el.querySelector('[data-save]').addEventListener('click', () => d.downloadText('app-context.' + (el.querySelector('[data-format]').value === 'json' ? 'json' : 'md'), el.querySelector('[data-output]').value, 'text/plain'));
     }
+    function pendingChanges({ request, canRequest }) {
+      const el = dialog('未反映の変更', '<p>この一覧はAIを使わずに表示します。設定やコードの登録は行いません。</p><div data-environment-comparison></div><p data-comparison-status role="status"></p><div class="ktr-actions"><button type="button" data-comparison-refresh>取り直す</button><button type="button" data-comparison-explain>変更点をAIに説明してもらう</button></div>', { wide: true });
+      const body = el.querySelector('[data-environment-comparison]'), note = el.querySelector('[data-comparison-status]'), refresh = el.querySelector('[data-comparison-refresh]'), explain = el.querySelector('[data-comparison-explain]');
+      let result = null, baseAvailable = false, reading = false, sending = false, closed = false, generation = 0;
+      const editsOf = () => KTReleaseEnvironmentView.localEdits(codePanel?.getLocalEdits?.());
+      const writing = () => ['applying', 'rolling-back', 'checking-result'].includes(controller.getState().phase);
+      const update = () => {
+        refresh.disabled = reading || sending || writing();
+        explain.disabled = reading || sending || !baseAvailable || !KTReleaseEnvironmentView.canExplain(result) || !canRequest();
+      };
+      const read = async () => {
+        if (reading || sending || writing()) return;
+        reading = true; result = null; baseAvailable = false; const current = ++generation;
+        body.textContent = '両方の環境の設定を取得しています。'; note.textContent = ''; update();
+        try {
+          const base = await loadBase({ reason: 'environment-comparison' });
+          if (closed || current !== generation) return;
+          baseAvailable = base?.ok === true; result = KTReleaseEnvironmentDiff.compare(base);
+          body.innerHTML = KTReleaseEnvironmentView.render(result, editsOf());
+          note.textContent = !baseAvailable ? 'AIの説明に必要な動作テスト環境の設定を取得できませんでした。取得できた範囲は一覧で確認できます。' : canRequest() ? 'AIの説明が必要な場合だけ、下のボタンを押してください。作成回数を1回使います。' : '一覧は接続せずに確認できます。AIの説明には接続と利用可能な作成回数が必要です。';
+        } catch (error) {
+          if (!closed) { body.textContent = '変更を比較できませんでした。'; note.textContent = error.message || '設定を取得できませんでした。'; }
+        } finally { reading = false; if (!closed) update(); }
+      };
+      const unsubscribe = controller.subscribe(update); connectionDialogs.add(update);
+      el.addEventListener('close', () => { closed = true; generation++; unsubscribe(); connectionDialogs.delete(update); }, { once: true });
+      refresh.addEventListener('click', read);
+      explain.addEventListener('click', async () => {
+        if (explain.disabled || closed) return;
+        const comparison = { key: KTReleaseEnvironmentView.keyOf(result), localEdits: editsOf() };
+        sending = true; update();
+        try {
+          await request('運用環境へ未反映の変更を説明してください。運用環境から動作テスト環境への変更内容と、反映前に確認する点を整理してください。取得できない範囲と手元の未登録編集は分けてください。変更案の作成・採用・反映は依頼していません。', () => el.close(), { requestPurpose: 'document', consultationTarget: null, environmentComparison: comparison });
+        } catch (error) { if (!closed) note.textContent = error.message; }
+        finally { sending = false; if (!closed) update(); }
+      });
+      read();
+    }
     function details() {
       const b = latestBase;
-      const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.items?.length ?? b.diff?.length ?? b.diff?.count ?? '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
+      const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.available ? String(b.diff.items.length) + '件' + (b.diff.complete === false ? '（比較できた範囲）' : '') : '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
-    view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+    view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: pendingChanges,
       codePanelElement: () => codeOpen ? codeSlot : null,
       codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
       onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
@@ -20652,6 +21055,14 @@
       if (typeof d.registeredText !== 'string') return { key: 'unknown', label: '比較元を未取得' };
       return text === d.registeredText ? { key: 'same', label: '取得時と同じ' } : { key: 'edited', label: '手元で編集中' };
     }
+    function getLocalEdits() {
+      const documents = new Map(drafts);
+      if (activeDocument) documents.set(draftKey(activeDocument), { ...activeDocument, text: editor.getValue() });
+      return Array.from(documents.values()).flatMap(d => {
+        const state = editingState(d).key;
+        return state === 'same' ? [] : [{ name: d.name, kind: d.kind, target: d.target, environment: d.environment, state }];
+      });
+    }
     function sourceLabel(d) {
       return d.isNew ? '手元で作成' : d.environment === 'preview' ? '動作テスト環境から取得' : d.environment === 'production' ? '運用環境から取得' : '取得元は未確認';
     }
@@ -20741,7 +21152,7 @@
       if (!panel || assistant === panel) return;
       comparison?.dispose(); assistant = panel; observeManualAvailability();
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: assistantDocument });
-      panel.attachCodePanel({ element: codePane, home: codeHome, onVisible() {
+      panel.attachCodePanel({ element: codePane, home: codeHome, getLocalEdits, onVisible() {
         const target = panel.controller.getState().consultationTarget;
         if (target?.type === 'FILE') {
           ++fileReadSeq; // A delayed selection from Customize must not replace the consultation source.

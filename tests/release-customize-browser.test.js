@@ -81,6 +81,7 @@ async function mount(page) {
     shell.ktAi=work;
     window.customize=T.renderCustomize(shell,data,'310',{autoLoad:true,getInputs:()=>({data,deps:{},scan:window.referenceScan}),onSettingsChanged:info=>manualChanges.push(clone(info)),consult:seed=>work.consult(seed)});
     window.customize=await window.customize;shell.ktCustomize=window.customize;
+    const attachCodePanel=work.attachCodePanel;work.attachCodePanel=panel=>{window.attachedCodePanel=panel;return attachCodePanel(panel);};
     window.customize.attachAssistant(work);
     window.originalHost=shell.querySelector('#kt-ai-host');
     await work.refreshCapability();
@@ -866,5 +867,42 @@ test('依存関係からの影響相談は共有会話と下書きを保持し�
     assert.equal(await impact.isDisabled(),true,'設定変更で失効した選択から古い解析を相談へ持ち込まない');
     assert.equal(await editor(page).inputValue(),'// LOCAL_UNSAVED_ONLY\nconst memo = 42;');
     assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await page.evaluate(()=>work.dispose());
+  }finally{await context.close();await browser.close();}
+});
+
+test('未登録の編集は本文を渡さず一覧にし、開いているコードと別ファイルの編集を保持する',{timeout:60000},async()=>{
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'}),unexpected=[],errors=[];
+  try{
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('https://customize.test.invalid/');await page.addScriptTag({content:bundle()});await mount(page);
+    const edits=()=>page.evaluate(()=>attachedCodePanel.getLocalEdits());
+    assert.deepEqual(await edits(),[]);
+    await selected(page,'same.js','// PC original\nconst memo = 1;\n');assert.deepEqual(await edits(),[],'取得時と同じファイルは未登録編集にしない');
+    await editor(page).fill('// secret PC edit');
+    const pc={name:'same.js',kind:'js',target:'desktop',environment:'preview',state:'edited'};
+    assert.deepEqual(await edits(),[pc],'現在のエディターの本文で編集状態を調べる');
+    const before=await page.evaluate(()=>({state:work.controller.getState(),calls:proposalCalls.length,reads:fileReads.length,operations:[...operations],models:monacoModels.length}));
+    await page.evaluate(()=>{const list=attachedCodePanel.getLocalEdits();list[0].name='changed outside';list.push({text:'must not enter drafts'});});
+    assert.deepEqual(await edits(),[pc],'戻り値を変更しても作業中の文書に影響しない');
+    assert.equal(await editor(page).inputValue(),'// secret PC edit');
+    assert.deepEqual(await page.evaluate(()=>({state:work.controller.getState(),calls:proposalCalls.length,reads:fileReads.length,operations:[...operations],models:monacoModels.length})),before,'読取だけで会話・モデル・通信を変えない');
+    await page.locator('#kt-customize-source').selectOption('JavaScriptMobile');await selected(page,'same.js','// mobile original\nconst memo = 2;\n');
+    assert.deepEqual(await edits(),[pc],'別のファイルへ移動した編集も残す');await editor(page).fill('// secret mobile edit');
+    const mobile={name:'same.js',kind:'js',target:'mobile',environment:'preview',state:'edited'};
+    assert.deepEqual(await edits(),[pc,mobile],'同名でもPCとモバイルを分ける');
+    await page.locator('#kt-customize-source').selectOption('css');await selected(page,'style.css','.memo { color: blue; }\n');await editor(page).fill('.secret { color: red; }');
+    const css={name:'style.css',kind:'css',target:'desktop',environment:'preview',state:'edited'};
+    assert.deepEqual(await edits(),[pc,mobile,css]);
+    await page.locator('#kt-customize-source').selectOption('JavaScript');await page.locator('#kt-customize-new').click();await page.locator('#kt-newfile-name').fill('local-draft.js');await page.locator('#kt-newfile-ok').click();await editor(page).fill('// secret new file');
+    const fresh={name:'local-draft.js',kind:'js',target:'desktop',environment:'preview',state:'new'};
+    assert.deepEqual(await edits(),[pc,mobile,css,fresh]);
+    assert.doesNotMatch(JSON.stringify(await edits()),/secret|fileKey|registeredText|viewState|\"text\"/,'本文・登録の識別子・エディターの状態は返さない');
+    await selected(page,'same.js','// secret PC edit');await editor(page).fill('// PC original\nconst memo = 1;\n');
+    assert.deepEqual(await edits(),[mobile,css,fresh],'取得時の本文に戻すと未登録編集から外れる');
+    await page.evaluate(()=>{shell.ktTabs.switchTab('ai');work.setCodeOpen(true);work.setCodeOpen(false);shell.ktTabs.switchTab('customize');});
+    assert.deepEqual(await edits(),[mobile,css,fresh]);assert.equal(await editor(page).inputValue(),'// PC original\nconst memo = 1;\n');
+    assert.equal(await page.evaluate(()=>proposalCalls.length),before.calls);assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);await page.evaluate(()=>work.dispose());
   }finally{await context.close();await browser.close();}
 });

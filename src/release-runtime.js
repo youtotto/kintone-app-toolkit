@@ -374,12 +374,50 @@ function mountReleaseWorkspace(host, d) {
     el.querySelector('[data-copy]').addEventListener('click', () => d.copyText(el.querySelector('[data-output]').value));
     el.querySelector('[data-save]').addEventListener('click', () => d.downloadText('app-context.' + (el.querySelector('[data-format]').value === 'json' ? 'json' : 'md'), el.querySelector('[data-output]').value, 'text/plain'));
   }
+  function pendingChanges({ request, canRequest }) {
+    const el = dialog('未反映の変更', '<p>この一覧はAIを使わずに表示します。設定やコードの登録は行いません。</p><div data-environment-comparison></div><p data-comparison-status role="status"></p><div class="ktr-actions"><button type="button" data-comparison-refresh>取り直す</button><button type="button" data-comparison-explain>変更点をAIに説明してもらう</button></div>', { wide: true });
+    const body = el.querySelector('[data-environment-comparison]'), note = el.querySelector('[data-comparison-status]'), refresh = el.querySelector('[data-comparison-refresh]'), explain = el.querySelector('[data-comparison-explain]');
+    let result = null, baseAvailable = false, reading = false, sending = false, closed = false, generation = 0;
+    const editsOf = () => KTReleaseEnvironmentView.localEdits(codePanel?.getLocalEdits?.());
+    const writing = () => ['applying', 'rolling-back', 'checking-result'].includes(controller.getState().phase);
+    const update = () => {
+      refresh.disabled = reading || sending || writing();
+      explain.disabled = reading || sending || !baseAvailable || !KTReleaseEnvironmentView.canExplain(result) || !canRequest();
+    };
+    const read = async () => {
+      if (reading || sending || writing()) return;
+      reading = true; result = null; baseAvailable = false; const current = ++generation;
+      body.textContent = '両方の環境の設定を取得しています。'; note.textContent = ''; update();
+      try {
+        const base = await loadBase({ reason: 'environment-comparison' });
+        if (closed || current !== generation) return;
+        baseAvailable = base?.ok === true; result = KTReleaseEnvironmentDiff.compare(base);
+        body.innerHTML = KTReleaseEnvironmentView.render(result, editsOf());
+        note.textContent = !baseAvailable ? 'AIの説明に必要な動作テスト環境の設定を取得できませんでした。取得できた範囲は一覧で確認できます。' : canRequest() ? 'AIの説明が必要な場合だけ、下のボタンを押してください。作成回数を1回使います。' : '一覧は接続せずに確認できます。AIの説明には接続と利用可能な作成回数が必要です。';
+      } catch (error) {
+        if (!closed) { body.textContent = '変更を比較できませんでした。'; note.textContent = error.message || '設定を取得できませんでした。'; }
+      } finally { reading = false; if (!closed) update(); }
+    };
+    const unsubscribe = controller.subscribe(update); connectionDialogs.add(update);
+    el.addEventListener('close', () => { closed = true; generation++; unsubscribe(); connectionDialogs.delete(update); }, { once: true });
+    refresh.addEventListener('click', read);
+    explain.addEventListener('click', async () => {
+      if (explain.disabled || closed) return;
+      const comparison = { key: KTReleaseEnvironmentView.keyOf(result), localEdits: editsOf() };
+      sending = true; update();
+      try {
+        await request('運用環境へ未反映の変更を説明してください。運用環境から動作テスト環境への変更内容と、反映前に確認する点を整理してください。取得できない範囲と手元の未登録編集は分けてください。変更案の作成・採用・反映は依頼していません。', () => el.close(), { requestPurpose: 'document', consultationTarget: null, environmentComparison: comparison });
+      } catch (error) { if (!closed) note.textContent = error.message; }
+      finally { sending = false; if (!closed) update(); }
+    });
+    read();
+  }
   function details() {
     const b = latestBase;
-    const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.items?.length ?? b.diff?.length ?? b.diff?.count ?? '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
+    const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.available ? String(b.diff.items.length) + '件' + (b.diff.complete === false ? '（比較できた範囲）' : '') : '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
-  view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details,
+  view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: pendingChanges,
     codePanelElement: () => codeOpen ? codeSlot : null,
     codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
