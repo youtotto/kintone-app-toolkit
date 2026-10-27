@@ -194,7 +194,7 @@ for (const outcome of ['unverified', 'declined']) test('後続の資料相談が
   } });
   await build(f);
   f.services.propose = async () => { throw Object.assign(Error('budget'), { code: 'BUDGET_EXCEEDED' }); };
-  await f.controller.send('資料を作って', { documentOnly: true });
+  await f.controller.send('資料を作って', { requestPurpose: 'document' });
   const before = get(f), counts = ai(f), screen = html(before);
   assert.equal(before.error.code, 'BUDGET_EXCEEDED'); assert.equal(before.phase, 'incomplete');
   assert.equal(Workspace.creationStateOf(before).kind, outcome);

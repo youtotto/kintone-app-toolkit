@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { KTReleaseWorkspace: Workspace } = require('../src/release-workspace.js');
 const { fixture, proposal, REQUEST, deferred } = require('./helpers/release-workspace-fixture.js');
-const DOCUMENT = { documentOnly: true };
+const DOCUMENT = { requestPurpose: 'document' };
 const explanation = () => ({ reply: '資料を作成しました。', intent: 'question', proposalUnchanged: true,
   explanation: { title: '引継ぎ資料', sections: [{ heading: '変更内容', paragraphs: ['一覧と編集制御を追加する案です。まだ反映していません。'], items: [], table: null, evidenceIds: [] }], unknowns: [] },
   turn: { ops: [], answers: [], requirementOps: [] }, facts: [] });
@@ -25,6 +25,50 @@ test('明示した資料作成は採用内容と準備を維持し、同じ会�
   assert.equal(f.state().messages.at(-1).explanationId, f.state().explanationId);
   assert.equal(f.count('propose'), 2); assert.equal(f.count('plan'), 1); assert.equal(f.count('prepare'), prepares);
   assert.equal(f.count('apply'), 0); assert.equal(f.writes.length, 0);
+});
+
+test('資料の用途を送信に引き継ぎ、続く自由文の修正も変更案を変えずに資料として扱う', async () => {
+  const { KTReleaseContext: Context } = require('../src/release-context.js');
+  const f = scenario(); await built(f); const before = work(f.state());
+  assert.equal(f.input().requestPurpose, 'consultation');
+  f.respond(explanation()); await f.controller.send('引継ぎ資料にまとめて', DOCUMENT);
+  assert.equal(f.state().requestPurpose, 'document');
+  await f.controller.send('その見出しを短くして');
+  assert.equal(f.input().requestPurpose, 'document');
+  assert.equal(Context.proposal(f.input()).requestPurpose, 'document');
+  assert.deepEqual(work(f.state()), before);
+  assert.equal(f.state().explanations.length, 2); assert.equal(f.count('plan'), 1); assert.equal(f.writes.length, 0);
+  const count = f.count('propose');
+  f.controller.showChanges(); f.controller.showExplanation(f.state().explanations[0].id);
+  assert.equal(f.state().requestPurpose, 'document'); assert.equal(f.count('propose'), count);
+  assert.equal(f.controller.setRequestPurpose('consultation'), true);
+  f.controller.showChanges(); f.controller.showExplanation(f.state().explanations[0].id);
+  assert.equal(f.state().requestPurpose, 'consultation'); assert.equal(f.count('propose'), count);
+  f.respond(proposal()); await f.controller.send('一覧は取り消してください');
+  assert.equal(f.input().requestPurpose, 'consultation'); assert.equal(Context.proposal(f.input()).requestPurpose, 'consultation');
+});
+
+test('用途の選択はAIを呼ばず、新しい会話や対象からの相談は相談用途に戻る', async () => {
+  const f = scenario();
+  assert.equal(f.controller.setRequestPurpose('document'), true);
+  assert.equal(f.controller.setRequestPurpose('unknown'), false);
+  assert.equal(await f.controller.send('不正な用途', { requestPurpose: 'unknown' }), false);
+  assert.equal(f.count('propose'), 0); assert.equal(f.state().messages.length, 0);
+  assert.equal(f.controller.setConsultationTarget({ name: 'sample.js', target: 'desktop', type: 'FILE', environment: 'preview' }), true);
+  assert.equal(f.state().requestPurpose, 'consultation'); assert.equal(f.count('propose'), 0);
+  f.controller.setRequestPurpose('document'); f.controller.newTask();
+  assert.equal(f.state().requestPurpose, 'consultation'); assert.equal(f.count('propose'), 0);
+});
+
+test('資料用途からでも選択した追加提案の更新は相談として送る', async () => {
+  const f = scenario(), p = proposal();
+  p.proposal.behaviors.push({ id: 'B3', text: '期限順の一覧を追加する', origin: 'suggestion' });
+  f.respond(p); await f.controller.send(REQUEST);
+  const reference = { taskId: f.state().taskId, version: f.state().version };
+  f.controller.selectSuggestion('B3', true, reference); f.controller.setRequestPurpose('document');
+  f.respond(proposal()); assert.equal(await f.controller.updateSuggestions(reference), true);
+  assert.equal(f.input().requestPurpose, 'consultation'); assert.equal(f.state().requestPurpose, 'consultation');
+  assert.match(f.input().text, /期限順の一覧/); assert.equal(f.count('plan'), 0);
 });
 
 for (const code of ['NETWORK_ERROR', 'MODEL_OUTPUT_INVALID']) test(`資料作成が${code}でも採用済み案を失わず、失敗を表示する`, async () => {
@@ -55,6 +99,7 @@ test('資料の中断は元の案を保持し、遅い応答が次の相談を�
   const f = scenario(); await built(f); const before = work(f.state()), gate = deferred(); f.respond(() => gate.promise);
   const pending = f.controller.send('資料を作って', DOCUMENT); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state().phase, 'consulting'); assert.equal(await f.controller.apply(), false);
+  assert.equal(f.controller.setRequestPurpose('consultation'), false); assert.equal(f.state().requestPurpose, 'document');
   assert.equal(await f.controller.send('二重送信', DOCUMENT), false); assert.equal(f.count('propose'), 2);
   assert.equal(f.controller.cancel(), true); assert.deepEqual(work(f.state()), before); assert.equal(f.state().error.code, 'CANCELLED');
   f.controller.newTask(); f.respond(proposal('新しい相談の案です。')); await f.controller.send('別の相談');
@@ -77,6 +122,7 @@ test('資料だけの新しい会話は業務要件や採用案を作らず、�
   const f = scenario(); f.respond(explanation()); assert.equal(await f.controller.send('概要資料を作って', DOCUMENT), true);
   assert.equal(f.state().phase, 'idle'); assert.equal(f.state().goal, ''); assert.equal(f.state().proposal, null); assert.equal(f.state().adopted, null);
   assert.equal(f.state().explanations.length, 1); assert.equal(f.count('plan'), 0); assert.equal(f.count('prepare'), 0);
+  f.controller.setRequestPurpose('consultation');
   f.respond(proposal()); await f.controller.send(REQUEST); assert.equal(f.state().goal, REQUEST); assert.equal(f.state().phase, 'proposal');
   assert.equal(f.state().explanations.length, 1); assert.equal(f.state().explanationId, null);
 });

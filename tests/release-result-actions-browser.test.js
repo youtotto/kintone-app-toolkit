@@ -14,10 +14,12 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     await page.goto('https://release.test.invalid/');
     for (const file of ['release-workspace.js', 'release-view.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
     await page.evaluate(() => {
-      window.calls = { ai: 0, apply: 0, read: 0, rollback: 0, rollbackRead: 0 }; window.unverified = false;
+      window.calls = { ai: 0, apply: 0, read: 0, rollback: 0, rollbackRead: 0 }; window.unverified = false; window.purposes = [];
       const proposal = { behaviors: [{ id: 'B1', text: '承認待ちの一覧を追加する', origin: 'user' }], decisions: [], assumptions: [], cannot: ['画面からの操作だけが対象です。'] };
       window.controller = KTReleaseWorkspace.create({ loadBase: async () => ({ ok: true, stamp: 'fixed' }), services: {
-        propose: async () => { calls.ai++; return { reply: '変更案を確認してください。', proposal }; },
+        propose: async ({ requestPurpose }) => { calls.ai++; purposes.push(requestPurpose); return requestPurpose === 'document'
+          ? { reply: '資料を作りました。', intent: 'question', proposalUnchanged: true, explanation: { title: '今の作業の資料', sections: [{ heading: '未確認', paragraphs: ['編集制御の動作は確認できていません。'], items: [], evidenceIds: [] }], unknowns: [] } }
+          : { reply: '変更案を確認してください。', proposal }; },
         plan: async () => { calls.ai++; return { plan: { steps: [], customizations: unverified ? [{ customizationId: 'C1', requirement: '備考の編集制御', risks: [], questions: [] }] : [],
           provisionals: [{ id: 'V1', topic: '対象', choice: '一覧からの編集にも同じ制御を適用します。', reason: '同じ項目を一覧から変更できるためです。', changeHint: '一覧の編集は対象外にしたい、と相談してください。' }] } }; },
         generate: async () => { calls.ai++; return { artifactOutcome: { version: 'artifact-outcome-1', state: 'unverified', message: '模擬テストの環境がこの処理に対応していません。', reasonCodes: ['sandbox-outdated'], operations: [] } }; }
@@ -83,13 +85,22 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     assert.equal(await page.getByRole('heading', { name: '検証できない内容があります', exact: true }).isVisible(), true);
     assert.equal(await page.locator('[data-release-action="resume"]').count(), 0);
     assert.equal(await page.locator('[data-release-action="apply"]').count(), 0);
+    await page.locator('[data-release-purpose]').selectOption('document');
+    await send('今の作業を資料にまとめて');
+    await page.waitForFunction(() => controller.getState().explanations.length === 1);
+    await page.locator('[data-release-action="show-changes"]').click();
+    assert.equal(await page.locator('[data-release-purpose]').inputValue(), 'document');
     const stopped = await page.evaluate(() => ({ ...calls }));
     await page.locator('#kt-release-input').fill('対象を変えたいです');
     await page.locator('[data-release-action="focus-consultation"]').click();
     assert.equal(await page.locator('#kt-release-input').evaluate(el => el === document.activeElement), true);
     assert.equal(await page.locator('#kt-release-input').inputValue(), '対象を変えたいです');
+    assert.equal(await page.locator('[data-release-purpose]').inputValue(), 'consultation');
     assert.deepEqual(await page.evaluate(() => calls), stopped);
     await page.screenshot({ path: path.join(out, 'unverified-consultation.png') });
+    await page.locator('[data-release-action="send"]').click();
+    await page.waitForFunction(() => controller.getState().phase === 'proposal');
+    assert.equal(await page.evaluate(() => purposes.at(-1)), 'consultation');
     assert.deepEqual(errors, []); assert.deepEqual(network, []);
   } finally { await browser.close(); }
 });

@@ -12020,12 +12020,17 @@
      *   limits = health の limits（limitsFromHealth の形。features[feature] の model・maxOutputTokens・maxAiCalls）。表に無いモデル・種類は ok: false
      * @returns {{ ok:true, kind, feature, mode, model, price, maxOutputTokens, ctxBytes, calls:Array<{kind,input,output,usd}>, maxCalls, maxUsd, maxCallUsd } | { ok:false, reason, ... }}
      */
+    function requestModelOf(feature, lf, ctx) {
+      const purpose = feature === 'assistant-qa' && ['consultation', 'document'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
+      const model = purpose && lf?.modelsByPurpose?.[purpose] || lf?.model;
+      return typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_MODEL[feature];
+    }
     function estimate({ kind, ctx = null, limits = null, ctxBytes = null } = {}) {
       const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
       if (!feature) return { ok: false, reason: 'unknown-feature', kind: String(kind || '').slice(0, 40) };
       const lfs = limits && limits.features && typeof limits.features === 'object' ? limits.features : null;
       const lf = lfs && lfs[feature] && typeof lfs[feature] === 'object' ? lfs[feature] : null;
-      const model = lf && typeof lf.model === 'string' && lf.model.trim() ? lf.model.trim() : DEFAULT_MODEL[feature];
+      const model = requestModelOf(feature, lf, ctx);
       const price = priceOf(model);
       if (!price) return { ok: false, reason: 'unknown-model', kind, feature, model: String(model || '').slice(0, 60) };
       //   レビューの指摘（2026-10-09・費用の見積もり）: 出力の上限は health の limits.features[feature].maxOutputTokens（Gateway が実際に使う上限）があればその値、
@@ -12161,13 +12166,13 @@
      * 2026-10-10（再検証前の指示 §4）: この要求の費用の上限を Gateway が強制できるか。health の limits.budgetAllowance（version 1）があり、その feature のモデル（limits.features の model、
      *   無ければ表の既定）が印の models にあるときだけ 'gateway'（envelope に budget: { allowanceUsd } を付ける）。それ以外は 'estimate'（Toolkit の推定による送信制限だけ。上限の強制は無い）
      */
-    function enforcementOf(limits, kind) {
+    function enforcementOf(limits, kind, ctx = null) {
       const ba = limits && limits.budgetAllowance && typeof limits.budgetAllowance === 'object' ? limits.budgetAllowance : null;
       if (!ba || ba.version !== 1 || !Array.isArray(ba.models)) return 'estimate';
       const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
       if (!feature) return 'estimate';
       const lf = limits.features && limits.features[feature] && typeof limits.features[feature] === 'object' ? limits.features[feature] : null;
-      const model = lf && typeof lf.model === 'string' && lf.model.trim() ? lf.model.trim() : DEFAULT_MODEL[feature];
+      const model = requestModelOf(feature, lf, ctx);
       const base = (m) => { const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(String(m || '')); return d ? d[1] : String(m || ''); };
       return ba.models.some(m => m === model || base(m) === base(model)) ? 'gateway' : 'estimate';
     }
@@ -12506,7 +12511,7 @@
           const L = lim();
           const est = estimate({ kind, ctx: p ? p.ctx : null, limits: L });
           if (!est.ok) throw budgetError(est.reason, { kind, ...(est.model ? { model: est.model } : {}) });
-          const enforcement = enforcementOf(L, kind);
+          const enforcement = enforcementOf(L, kind, p?.ctx);
           const gb = enforcement === 'gateway' ? gatewayBound({ kind, ctx: p ? p.ctx : null, limits: L }) : null;
           let res = await reserve({ requestId, kind, est, enforcement, capUsd: gb && gb.ok ? gb.maxUsd : null });
           if (!res) return client[kind](p);
@@ -13538,7 +13543,7 @@
     }
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+      const state = { phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -13634,12 +13639,15 @@
       async function updateSuggestions(reference) {
         if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
         const request = suggestionRequest(state);
-        return request ? send(request, { requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
+        return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
       }
-      async function send(text, { documentOnly = false, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
+      async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
+        if (!['consultation', 'document'].includes(requestPurpose)) return false;
         const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
+        const documentOnly = requestPurpose === 'document';
+        state.requestPurpose = requestPurpose;
         let resolvedTarget = null, userMessage = null;
         const unresolved = state.proposalPending;
         // Suspend actions before any consultation. Restore only when the service
@@ -13664,7 +13672,7 @@
               && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
               && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
           userMessage.consultationTarget = clone(resolvedTarget);
-          return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
         };
         if (documentOnly) {
           // The explicit document action cannot revise a plan, even if its AI request fails.
@@ -13749,7 +13757,7 @@
       }
       async function adopt() {
         if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
-        invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
+        invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
         return activity('building', async (signal, live) => {
@@ -13845,12 +13853,13 @@
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
         send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
-        setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
+        setRequestPurpose(value) { if (!available() || !['consultation', 'document'].includes(value)) return false; set({ requestPurpose: value }); return true; },
+        setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
         showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { set({ explanationId: null }); return true; },
         async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -13996,12 +14005,12 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
+    function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
       const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
       const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
         ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
         : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
-      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
+      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
         focus, facts: factsOf(base, dependencies, requestTargets, consultationTarget), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -14590,7 +14599,9 @@
     }
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-      return `<form class="ktr-composer" data-release-form="consult"><label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="例：このアプリの仕組みを教えて。変更したいことも相談できます。"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      const document = state.requestPurpose === 'document';
+      const purpose = `<div class="ktr-request-purpose"><select data-release-purpose aria-label="送信する内容"${disabled ? ' disabled' : ''}><option value="consultation"${!document ? ' selected' : ''}>アプリの相談</option><option value="document"${document ? ' selected' : ''}>資料の作成・修正</option></select>${document ? '<span class="ktr-note">資料への依頼を送ります。変更案はそのまま残ります。</span>' : ''}</div>`;
+      return `<form class="ktr-composer" data-release-form="consult">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -14849,7 +14860,7 @@
           if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
           selectedRunId = null; notice = '';
           onStart?.();
-          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { documentOnly: true } : undefined);
+          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { requestPurpose: 'document' } : undefined);
           if (sent === false) restoreInput();
           return sent !== false;
         } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
@@ -14858,7 +14869,7 @@
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
-        if (action === 'focus-consultation') { if (!busy.has(state.phase)) host.querySelector?.('#kt-release-input')?.focus?.(); return; }
+        if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }
         if (action === 'code') {
           const opened = options.onToggleCode?.();
           if (opened === false) host.querySelector?.('[data-release-action="code"]')?.focus?.({ preventScroll: true });
@@ -14886,7 +14897,7 @@
           }
           draw(); return;
         }
-        if (action === 'answer') { draft = target.dataset?.releaseAnswer || ''; const input = host.querySelector?.('#kt-release-input'); if (input) { input.value = draft; input.focus?.(); } updateDraftGuard(); return; }
+        if (action === 'answer') { controller.setRequestPurpose('consultation'); draft = target.dataset?.releaseAnswer || ''; const input = host.querySelector?.('#kt-release-input'); if (input) { input.value = draft; input.focus?.(); } updateDraftGuard(); return; }
         if (action === 'new-task') { draft = ''; const input = host.querySelector?.('#kt-release-input'); if (input) input.value = ''; selectedRunId = null; notice = ''; return controller.newTask(); }
         if (action === 'cancel-rollback') return controller.cancelRollback();
         if (action === 'request-rollback') { selectedRunId = null; return controller.requestRollback(id); }
@@ -14920,6 +14931,7 @@
       }
       function suggestionChanged(event) {
         const target = event.target;
+        if (target?.hasAttribute?.('data-release-purpose') && !target.disabled && !disposed && !sending && !selectedRunId) { controller.setRequestPurpose(target.value); return; }
         if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || selectedRunId) return;
         controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
       }
@@ -14944,6 +14956,7 @@
       .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
       .ktr-actions,.ktr-compose-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0 8px}.ktr-compose-actions{justify-content:space-between}.ktr-workspace button,.kt-release-dialog button{font:inherit;line-height:1.4;padding:7px 12px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;background:var(--ktr-paper);color:var(--ktr-text);max-width:100%;overflow-wrap:anywhere}.ktr-workspace button.ktr-primary,.kt-release-dialog button.ktr-primary{color:#fff;background:var(--ktr-primary);border-color:var(--ktr-primary);font-weight:600}.ktr-workspace button:disabled,.kt-release-dialog button:disabled{opacity:.5;cursor:default}.ktr-workspace button:focus-visible,.ktr-workspace textarea:focus-visible,.ktr-workspace summary:focus-visible,.kt-release-dialog :is(button,textarea,select,summary):focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-workspace button:hover:not(:disabled),.kt-release-dialog button:hover:not(:disabled){background:var(--ktr-soft)}.ktr-workspace button.ktr-primary:hover:not(:disabled),.kt-release-dialog button.ktr-primary:hover:not(:disabled),.kt-release-dialog [data-document-create]:hover:not(:disabled){background:#204e9c}.ktr-composer:focus-within{border-color:var(--ktr-accent)}
+      .ktr-request-purpose{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px}.ktr-request-purpose select{max-width:100%;font:inherit;font-size:13px;padding:5px 8px;border:1px solid var(--ktr-line);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-request-purpose select:focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid var(--ktr-danger);background:color-mix(in srgb,var(--ktr-danger) 9%,var(--ktr-paper));color:var(--ktr-danger)}.ktr-reasons{color:var(--ktr-danger)}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:color-mix(in srgb,var(--ktr-accent) 9%,var(--ktr-paper));border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}

@@ -126,6 +126,30 @@ test('Terraは通常・読取・保持期間別書込の単価と長文境界で
   assert.equal(entry.costUsd, null); assert.equal(entry.costComplete, false); assert.ok(entry.reservedUsd > 0);
 });
 
+test('明示した相談・資料の用途をhealthから選び、見積もりと上限強制を同じモデルにそろえる', async () => {
+  const { KTAiClient: Client } = require('./helpers/load-toolkit.js').loadToolkit();
+  const advertised = { model: 'gpt-6.1-sol', modelsByPurpose: { consultation: 'gpt-6.1-terra', document: 'gpt-6.1-sol' }, maxOutputTokens: 4000, maxAiCalls: 1 };
+  const limits = Client.limitsFromHealth({ limits: { version: 1, features: { 'toolkit.assistant-qa': advertised },
+    deadlineMs: { 'toolkit.assistant-qa': 30000 }, budgetAllowance: { version: 1, models: ['gpt-6.1-terra', 'gpt-6.1-sol'] } } });
+  const ctx = requestPurpose => ({ question: '同じ依頼文', requestPurpose });
+  for (const kind of ['ask', 'propose']) {
+    for (const [purpose, model] of [['consultation', 'gpt-6.1-terra'], ['document', 'gpt-6.1-sol'], [undefined, 'gpt-6.1-sol']]) {
+      assert.equal(B.estimate({ kind, ctx: ctx(purpose), ctxBytes: 0, limits }).model, model);
+      assert.equal(B.gatewayBound({ kind, ctx: ctx(purpose), bodyBytes: 0, limits }).model, model);
+      assert.equal(B.enforcementOf(limits, kind, ctx(purpose)), 'gateway');
+    }
+  }
+  for (const kind of ['plan', 'generate']) assert.equal(B.estimate({ kind, ctx: ctx('consultation'), limits }).model, 'gpt-6.1-sol');
+  limits.budgetAllowance.models = ['gpt-6.1-terra'];
+  assert.equal(B.enforcementOf(limits, 'propose', ctx('consultation')), 'gateway');
+  assert.equal(B.enforcementOf(limits, 'propose', ctx('document')), 'estimate');
+  limits.features['assistant-qa'].modelsByPurpose.document = 'unknown-model';
+  assert.equal(B.estimate({ kind: 'propose', ctx: ctx('document'), limits }).reason, 'unknown-model');
+  delete limits.features['assistant-qa'].modelsByPurpose;
+  limits.features['assistant-qa'].model = 'gpt-6.1-terra';
+  assert.equal(B.estimate({ kind: 'propose', ctx: ctx('document'), limits }).model, 'gpt-6.1-terra', '旧healthは従来modelのまま');
+});
+
 for (const failure of [false, true]) test('Terraの' + (failure ? '失敗' : '成功') + 'の費用・キャッシュ内訳・モデル名をGatewayの記録から残す', async () => {
   const usage = { inputTokens: 1000, outputTokens: 100, cachedTokens: 400, cacheWriteTokens: 400, cacheWriteTokens30m: 100, cacheWriteTokens12h: 300 };
   const { entry, summary } = await settle({ budgetMeta: { spentUsd: 0.001595, complete: true,

@@ -95,7 +95,7 @@ const KTReleaseWorkspace = (() => {
   }
   function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+    const state = { phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
     let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
     const listeners = new Set(onChange ? [onChange] : []);
     const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
@@ -191,12 +191,15 @@ const KTReleaseWorkspace = (() => {
     async function updateSuggestions(reference) {
       if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
       const request = suggestionRequest(state);
-      return request ? send(request, { requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
+      return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
-    async function send(text, { documentOnly = false, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
+    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
+      if (!['consultation', 'document'].includes(requestPurpose)) return false;
       const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
+      const documentOnly = requestPurpose === 'document';
+      state.requestPurpose = requestPurpose;
       let resolvedTarget = null, userMessage = null;
       const unresolved = state.proposalPending;
       // Suspend actions before any consultation. Restore only when the service
@@ -221,7 +224,7 @@ const KTReleaseWorkspace = (() => {
             && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
             && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
         userMessage.consultationTarget = clone(resolvedTarget);
-        return services.propose({ text: value, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+        return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
       };
       if (documentOnly) {
         // The explicit document action cannot revise a plan, even if its AI request fails.
@@ -306,7 +309,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function adopt() {
       if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
-      invalidate(); pendingPlanQuestions = []; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
+      invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
       // Optional ideas are not adopted by the general create action.
       state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
       return activity('building', async (signal, live) => {
@@ -402,12 +405,13 @@ const KTReleaseWorkspace = (() => {
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
       send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
-      setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target }); return true; },
+      setRequestPurpose(value) { if (!available() || !['consultation', 'document'].includes(value)) return false; set({ requestPurpose: value }); return true; },
+      setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
       showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
       showChanges() { set({ explanationId: null }); return true; },
       async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
       cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+      newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
       cancel() {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';
