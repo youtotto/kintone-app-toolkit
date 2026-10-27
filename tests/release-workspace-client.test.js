@@ -44,7 +44,7 @@ test('無料のフィールド調査は、既存のモバイル用APIの目録�
   assert.ok(Number(T.KTJsCatalog.CATALOG_VERSION) >= 2);
   assert.ok(Number(T.KTScan.ANALYZER_VERSION) >= 15);
 });
-const successfulResponse = () => ({ ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100 } } });
+const successfulResponse = () => ({ ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } });
 function sse(blocks, end = 'close') {
   let index = 0;
   const enc = new TextEncoder();

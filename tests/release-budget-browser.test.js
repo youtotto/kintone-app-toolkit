@@ -40,7 +40,7 @@ test('検証用上限は接続の詳細だけで設定し、会話中は切り�
       calls.push(name);
       if (name === 'getHealth') return health;
       if (name === 'propose') return held.promise;
-      if (name === 'plan') return { ...F.plan({ settings: false, platforms: [] }), ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100 } } };
+      if (name === 'plan') return { ...F.plan({ settings: false, platforms: [] }), ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } };
       throw new Error('This fixture must not generate code or authenticate.');
     });
     await page.goto('https://budget.test.invalid/');
@@ -51,7 +51,7 @@ test('検証用上限は接続の詳細だけで設定し、会話中は切り�
       localStorage.setItem('ktAi.budget.v1.budget.test.invalid', JSON.stringify(config));
       window.testBudget = BudgetTest.KTAiBudget.create({ storage: localStorage, session: sessionStorage, host: 'budget.test.invalid', locks: null, sessionId: 'browser-test-only' });
       // The old ledger is seeded through real accounting with local, fixed responses only.
-      const settled = testBudget.wrap({ ask: async () => ({ ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100 } } }) });
+      const settled = testBudget.wrap({ ask: async () => ({ ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 500, output_tokens: 100, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } }) });
       await settled.ask({ ctx: { question: '旧枠の固定応答' }, requestId: 'old-done' });
       const interrupted = testBudget.wrap({ ask: async () => { throw new BudgetTest.KTAiClient.AiClientError({ code: BudgetTest.KTAiClient.ERROR_CODES.TIMEOUT, message: '固定の切断' }); } });
       try { await interrupted.ask({ ctx: { question: '旧枠の固定切断' }, requestId: 'old-unknown' }); } catch (_) {}
@@ -109,7 +109,7 @@ test('検証用上限は接続の詳細だけで設定し、会話中は切り�
     assert.equal(whileRunning.id, configured.id); assert.equal(whileRunning.inFlight, 1);
     await field('start').dispatchEvent('click');
     assert.equal((await summary()).id, configured.id, 'the click handler also guards a disabled control');
-    held.resolve({ ...F.proposal('既存の内容を変更せず確認します。'), ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 400, output_tokens: 100 } } });
+    held.resolve({ ...F.proposal('既存の内容を変更せず確認します。'), ai: { model: 'gpt-6.1-sol', usage: { input_tokens: 400, output_tokens: 100, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } });
     await phase('proposal'); await page.waitForFunction(() => testBudget.summary().inFlight === 0);
     assert.equal(await field('start').isDisabled(), true, 'a completed response still belongs to an active conversation');
     await sameStatus(); await field('start').dispatchEvent('click');

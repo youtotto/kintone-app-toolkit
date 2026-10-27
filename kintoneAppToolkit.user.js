@@ -11964,8 +11964,8 @@
     const { AiClientError, ERROR_CODES } = KTAiClient;
     const CONFIG_PREFIX = 'ktAi.budget.v1', LEDGER_PREFIX = 'ktAi.budgetLedger.v1', LEDGER_VERSION = 1;
     const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-    /** 単価（米ドル / 100 万 token）。gpt-6.1-sol は入力 2・出力 10。cachedInput は staging の設定のコメントの値で、記録の参考（costCachedUsd）だけに使う（上限の判定には使わない） */
-    const PRICES = Object.freeze({ 'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1 }) });
+    /** OpenAI Standard単価（2026-10-27、米ドル/100万token）。予約は読取割引に頼らず書込の最大単価を使う。 */
+    const PRICES = Object.freeze({ 'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1, cacheWrite30m: 2.5, cacheWrite12h: 5, longThreshold: 272000 }) });
     /** 送る要求の種類 → Gateway の feature（表に無い種類は送らない） */
     const FEATURE_OF = Object.freeze({ ask: 'assistant-qa', propose: 'assistant-qa', plan: 'change-planner', generate: 'customization-generator' });
     /** feature ごとのモデル（health の limits が無い古い Gateway のとき。staging の値） */
@@ -11975,10 +11975,10 @@
     /** 1 回の要求の中の AI の呼び出しの最大（会話・仮案 1・計画の全体 1・差分 2（差分 → 全体）・生成 1 ＋ 修復 2）。health の maxAiCalls があれば大きい方（計画の全体は 1 のまま） */
     const MAX_CALLS = Object.freeze({ ask: 1, propose: 1, 'plan-full': 1, 'plan-patch': 2, generate: 3 });
     /**
-     * Gateway の指示と出力の schema の大きさ（バイト。Toolkit からは見えない）。2026-10-09 に Gateway の prompts をローカルで測った値
-     * （質問 14.6 kB・仮案 18.3 kB＋規則 10 kB・計画 78.9 kB・差分 85.7 kB・生成 25.1 kB）に余裕を足した保守的な値
+     * Gatewayの固定指示とschemaのバイト数に余裕を足した推定。2026-10-27の固定素材測定を反映。
+     * 本文の実サイズはGatewayで確認する。Toolkit側の値を実際の入力上界と保証しない。
      */
-    const PROMPT_BYTES = Object.freeze({ ask: 18000, propose: 32000, 'plan-full': 92000, 'plan-patch': 100000, generate: 30000 });
+    const PROMPT_BYTES = Object.freeze({ ask: 18000, propose: 55000, 'plan-full': 110000, 'plan-patch': 120000, generate: 40000 });
     /** 送る Context は Gateway で字下げ・カタログが足される（計画で約 1.25 倍）。入力 token はバイト数 / 2（実機の計画で実際の約 2 倍）。修復の入力には前の出力と指摘が足される */
     const CTX_FACTOR = 1.3, BYTES_PER_TOKEN = 2, REPAIR_EXTRA_TOKENS = 4000;
     const STATUSES = Object.freeze(['in-flight', 'done', 'partial-unknown', 'unknown', 'released']);
@@ -11998,7 +11998,20 @@
       const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(m);
       return d && own(PRICES, d[1]) ? PRICES[d[1]] : null;
     }
-    const usdOf = (price, input, output) => round6(((input || 0) * price.input + (output || 0) * price.output) / 1e6);
+    const boundUsdOf = (price, input, output) => {
+      const long = input > price.longThreshold;
+      return Math.ceil(input * price.cacheWrite12h * (long ? 2 : 1) + output * price.output * (long ? 1.5 : 1)) / 1e6;
+    };
+    // Missing or inconsistent cache details are unknown, never zero-priced.
+    function usageCostUsd(price, c) {
+      if (!price || !c) return null;
+      const counts = [c.input, c.output, c.cached, c.cacheWrite, c.cacheWrite30m, c.cacheWrite12h];
+      if (!counts.every(n => Number.isSafeInteger(n) && n >= 0) || c.cached + c.cacheWrite > c.input || c.cacheWrite30m + c.cacheWrite12h !== c.cacheWrite || (c.reasoning != null && c.reasoning > c.output)) return null;
+      const long = c.input > price.longThreshold;
+      const inputCost = (c.input - c.cached - c.cacheWrite) * price.input + c.cached * price.cachedInput + c.cacheWrite30m * price.cacheWrite30m + c.cacheWrite12h * price.cacheWrite12h;
+      const micro = Math.ceil(inputCost * (long ? 2 : 1) + c.output * price.output * (long ? 1.5 : 1));
+      return Number.isSafeInteger(micro) ? micro / 1e6 : null;
+    }
     /**
      * 次の要求の最大費用（キャッシュの割引なし）。kind = ask / propose / plan / generate。ctx = 送る Context（バイト数だけを使う）。
      *   limits = health の limits（limitsFromHealth の形。features[feature] の model・maxOutputTokens・maxAiCalls）。表に無いモデル・種類は ok: false
@@ -12035,14 +12048,13 @@
         const n = kind === 'plan' ? MAX_CALLS['plan-full'] : Math.max(MAX_CALLS[kind], hCalls);
         for (let i = 0; i < n; i++) calls.push({ kind: mode, input: inTok(mode), output: maxOut });
       }
-      calls = calls.map(c => ({ ...c, usd: usdOf(price, c.input, c.output) }));
+      calls = calls.map(c => ({ ...c, usd: boundUsdOf(price, c.input, c.output) }));
       return { ok: true, kind, feature, mode, model, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
     }
     /** Gateway の上界の式のメッセージ 1 つあたりのバイト数（worker の budget.mjs の MESSAGE_OVERHEAD_BYTES と同じ）と、1 回の呼び出しのメッセージの数（指示と本文） */
     const MESSAGE_OVERHEAD_BYTES = 64, MESSAGES_PER_CALL = 2;
     /** 修復・全体の作り直しの入力に足す前回の出力（出力の上限の token 数 × このバイト数）と、指摘・失敗の情報の余裕（バイト） */
     const PREV_OUTPUT_BYTES_PER_TOKEN = 2, RETRY_EXTRA_BYTES = 8000;
-    const ceil6 = (x) => Math.ceil(Math.round(Number(x) * 1e9) / 1e3) / 1e6;
     /** 送る Context を Gateway が provider への本文に入れる形（字下げ 1 の JSON を、さらに本文の JSON の文字列として入れる）のバイト数。Toolkit の推定（Gateway は一部だけを入れることもある） */
     /** 2026-10-21: 見積もりに使う Context（AI に渡す部分）。生成の Context の動作テストに使う既存 JS の本文（verification.relatedFiles[].text）は生成の AI の指示文に入らないので数えない
      *   （Gateway の validate-generator-context が Context の上限から除くものと同じ。要求の大きさとは別。AI版 契約 20 §21） */
@@ -12078,7 +12090,7 @@
       } else {
         for (let i = 0; i < e.maxCalls; i++) calls.push({ kind: e.mode, inputBytes: first });
       }
-      const out = calls.map(c => ({ ...c, output: maxOut, usd: ceil6((c.inputBytes * price.input + maxOut * price.output) / 1e6) }));
+      const out = calls.map(c => ({ ...c, output: maxOut, usd: boundUsdOf(price, c.inputBytes, maxOut) }));
       return { ok: true, kind, mode: e.mode, model: e.model, maxOutputTokens: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
     }
     /** 検証の上限で送らない例外（BUDGET_EXCEEDED。details.budget = { reason, needUsd, remainingUsd, needCalls, remainingCalls, limitUsd, maxCalls, ... }） */
@@ -12139,7 +12151,7 @@
       if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
       const fin = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
       if (!fin(m.spentUsd) || !Array.isArray(m.calls) || typeof m.complete !== 'boolean') return null;
-      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null }));
+      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null, ...(typeof c.model === 'string' ? { model: c.model.slice(0, 60) } : {}), ...(typeof c.costReason === 'string' ? { costReason: c.costReason.slice(0, 80) } : {}), ...(c.usage ? { usage: tokensOfUsage(c.usage) } : {}) }));
       return { allowanceUsd: fin(m.allowanceUsd) ? m.allowanceUsd : null, spentUsd: m.spentUsd, complete: m.complete === true && calls.every(c => c.costUsd != null), calls };
     }
     /**
@@ -12156,15 +12168,23 @@
       const base = (m) => { const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(String(m || '')); return d ? d[1] : String(m || ''); };
       return ba.models.some(m => m === model || base(m) === base(model)) ? 'gateway' : 'estimate';
     }
-    /** provider の usage → { input, cached, output, reasoning }（入力と出力の両方が分かるときだけ。分からなければ null = 使用量が不明） */
+    /** Provider/Gatewayの使用量。欠けたキャッシュ内訳は0ではなくnull。 */
     function tokensOfUsage(u) {
       if (!u || typeof u !== 'object') return null;
-      const input = num(u.input_tokens) ?? num(u.prompt_tokens) ?? num(u.inputTokens);
-      const output = num(u.output_tokens) ?? num(u.completion_tokens) ?? num(u.outputTokens);
+      const count = v => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
+      const pick = (o, keys) => { for (const key of keys) if (own(o, key)) return o[key]; };
+      const input = count(pick(u, ['input_tokens', 'prompt_tokens', 'inputTokens']));
+      const output = count(pick(u, ['output_tokens', 'completion_tokens', 'outputTokens']));
       if (input == null || output == null) return null;
-      const cached = num(u.input_tokens_details && u.input_tokens_details.cached_tokens) ?? num(u.cachedTokens) ?? 0;
-      const reasoning = num(u.output_tokens_details && u.output_tokens_details.reasoning_tokens) ?? num(u.reasoningTokens);
-      return { input, cached: Math.min(cached, input), output, reasoning };
+      const d = u.input_tokens_details || u.prompt_tokens_details || {}, wd = d.cache_write_tokens_details || {};
+      const cached = count(own(d, 'cached_tokens') ? d.cached_tokens : pick(u, ['cache_read_input_tokens', 'cachedTokens']));
+      const cacheWrite = count(own(d, 'cache_write_tokens') ? d.cache_write_tokens : u.cacheWriteTokens);
+      const ttlCount = (key, alias) => own(wd, key) ? count(wd[key]) : own(u, alias) ? count(u[alias]) : cacheWrite === 0 ? 0 : null;
+      const cacheWrite30m = ttlCount('ttl_30m_tokens', 'cacheWriteTokens30m');
+      const cacheWrite12h = ttlCount('ttl_12h_tokens', 'cacheWriteTokens12h');
+      const od = u.output_tokens_details || u.completion_tokens_details || {};
+      const reasoning = count(own(od, 'reasoning_tokens') ? od.reasoning_tokens : u.reasoningTokens);
+      return { input, cached, output, cacheWrite, cacheWrite30m, cacheWrite12h, reasoning };
     }
     /**
      * 応答 → 1 回の要求の中の AI の呼び出しごとの token（分からない呼び出しは null）。生成は meta.timing の calls（呼び出しごと。無ければ最初の生成と最後の修復と修復の回数）、
@@ -12179,8 +12199,7 @@
         const tc = tm && Array.isArray(tm.calls) ? tm.calls.filter(c => c && typeof c === 'object') : [];
         let out;
         if (tc.length) {
-          out = tc.map(c => (num(c.inputTokens) != null && num(c.outputTokens) != null ? { input: num(c.inputTokens), cached: 0, output: num(c.outputTokens), reasoning: null } : null));
-          if (tc[0].kind !== 'repair' && first) out[0] = first;   // 最初の生成は meta.ai の usage（キャッシュ・推論の内訳がある）
+          out = tc.map(c => tokensOfUsage(c));
         } else {
           const nRep = num(r.verification && r.verification.repairs && r.verification.repairs.count) || 0;
           out = [first];
@@ -12370,7 +12389,8 @@
         const known = bm.calls.filter(c => c.costUsd != null);
         //   費用が分からない呼び出しの上界（boundUsd が無ければ渡した allowanceUsd）
         const unknownBound = round6(bm.calls.filter(c => c.costUsd == null).reduce((s2, c) => s2 + (c.boundUsd != null ? c.boundUsd : (e.allowanceUsd || 0)), 0));
-        e.gatewayCalls = bm.calls.map(c => ({ kind: c.kind, boundUsd: c.boundUsd, costUsd: c.costUsd }));
+        e.gatewayCalls = bm.calls.map(c => ({ ...c }));
+        if (bm.calls.some(c => own(c, 'usage'))) e.calls = bm.calls.map(c => c.usage || null);
         e.costKnownUsd = bm.complete ? round6(bm.spentUsd) : round6(known.reduce((s2, c) => s2 + c.costUsd, 0));
         e.status = bm.complete ? 'done' : known.length ? 'partial-unknown' : 'unknown';
         e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? e.costKnownUsd : null;
@@ -12401,7 +12421,6 @@
       //   記録が無ければ取り決めと合わないので以後を止め、今までの token の精算をする（確保は渡した allowanceUsd のまま残りうる＝保守的）
       const settle = (key, { kind, response }) => update(key, (e, ledger) => {
         const calls = callsOf(kind, response);
-        const known = calls.filter(Boolean);
         const ai = response && response.ai && typeof response.ai === 'object' ? response.ai : null;
         const model = ai && typeof ai.model === 'string' && ai.model.trim() ? ai.model.trim().slice(0, 60) : null;
         const est = priceOf(e.estimatedModel);
@@ -12410,9 +12429,8 @@
         const bm = gw ? budgetMetaOf(response && response.budgetMeta) : null;
         if (gw && bm) {
           e.endedAt = nowIso(now); e.model = model;
-          e.calls = calls.map(c => (c ? { input: c.input, cached: c.cached, output: c.output, ...(c.reasoning != null ? { reasoning: c.reasoning } : {}) } : null));
-          const priced = !!got;
-          e.costCachedUsd = priced && got.cachedInput != null && known.length === calls.length ? round6(known.reduce((s2, c) => s2 + ((c.input - c.cached) * got.input + c.cached * got.cachedInput + c.output * got.output) / 1e6, 0)) : null;
+          e.calls = calls.map(c => c ? { ...c } : null);
+          e.costCachedUsd = null; // 旧い読取割引だけの参考値を作らず、書込を含むGatewayの合計を使う。
           settleByMeta(e, ledger, bm, kind);
           e.reason = null;
           if (model && (!got || (est && (got.input > est.input || got.output > est.output))) && !ledger.stopped) ledger.stopped = { reason: 'model', model, at: nowIso(now), kind };
@@ -12427,16 +12445,18 @@
         const price = got || est;
         const priced = !!price && !(stop && stop.reason === 'model');
         e.endedAt = nowIso(now); e.model = model;
-        e.calls = calls.map(c => (c ? { input: c.input, cached: c.cached, output: c.output, ...(c.reasoning != null ? { reasoning: c.reasoning } : {}) } : null));
+        e.calls = calls.map(c => c ? { ...c } : null);
         //   レビューの指摘 row7: 確認できた費用（costKnownUsd）と、費用が確定したか（costComplete）。確定していない記録の costUsd は null（0 と読ませない）
-        const knownUsd = priced ? round6(known.reduce((s, c) => s + usdOf(price, c.input, c.output), 0)) : 0;
-        e.costCachedUsd = priced && price.cachedInput != null ? round6(known.reduce((s, c) => s + ((c.input - c.cached) * price.input + c.cached * price.cachedInput + c.output * price.output) / 1e6, 0)) : null;
-        const nullN = calls.length - known.length;
-        e.status = !priced || !known.length ? 'unknown' : nullN ? 'partial-unknown' : 'done';
+        const costs = calls.map(c => priced ? usageCostUsd(price, c) : null);
+        const knownCosts = costs.filter(c => c != null);
+        const knownUsd = round6(knownCosts.reduce((sum, cost) => sum + cost, 0));
+        e.costCachedUsd = null;
+        const nullN = calls.length - knownCosts.length;
+        e.status = !priced || !knownCosts.length ? 'unknown' : nullN ? 'partial-unknown' : 'done';
         e.costKnownUsd = knownUsd; e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? knownUsd : null;
         if (e.status === 'done') { e.reservedUsd = 0; e.reservedCalls = calls.length; }
         else if (e.status === 'partial-unknown') { e.reservedUsd = round6(Math.min(e.reservedUsd, nullN * (e.maxCallUsd || 0))); e.reservedCalls = calls.length; }
-        e.reason = known.length ? null : 'NO_USAGE';
+        e.reason = knownCosts.length ? null : 'INCOMPLETE_USAGE';
         if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
       });
       /** 失敗で精算: AI を呼ぶ前に止まったものだけ解放し、それ以外（中断・時間切れ・切断・AI を呼んだ後のエラー）は終了不明（確保を残す） */
