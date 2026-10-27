@@ -10,11 +10,11 @@ const raw = (input, output, cached = 0, write = 0, short = 0, long = 0) => ({
   },
 });
 const complete = raw(1000, 100, 400, 400, 100, 300);
-async function settle(response, { kind = 'ask', gateway = false, failure = false, model = 'gpt-6.1-sol' } = {}) {
+async function settle(response, { kind = 'ask', gateway = false, failure = false, model = 'gpt-6.1-sol', serviceTier } = {}) {
   const store = storage();
   const budget = B.create({ storage: store, session: storage(), host: 'cache.test', locks: null, sessionId: 'offline' });
   await budget.configure({ limitUsd: 20, maxCalls: 20 });
-  const limits = { features: { [B.FEATURE_OF[kind]]: { model } },
+  const limits = { features: { [B.FEATURE_OF[kind]]: { model, ...(serviceTier === undefined ? {} : { serviceTier }) } },
     ...(gateway ? { budgetAllowance: { version: 1, models: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'] } } : {}) };
   const client = budget.wrap({ [kind]: async () => {
     if (failure) throw Object.assign(new Error('upstream'), { code: 'UPSTREAM_ERROR', details: { error: { budget: response.budgetMeta } } });
@@ -126,28 +126,42 @@ test('Terraは通常・読取・保持期間別書込の単価と長文境界で
   assert.equal(entry.costUsd, null); assert.equal(entry.costComplete, false); assert.ok(entry.reservedUsd > 0);
 });
 
-test('明示した相談・資料の用途をhealthから選び、見積もりと上限強制を同じモデルにそろえる', async () => {
+test('healthのLuna Fast相談・仮案・アイディアとSol通常資料を見積もり・上限強制にそろえる', async () => {
   const { KTAiClient: Client } = require('./helpers/load-toolkit.js').loadToolkit();
-  const advertised = { model: 'gpt-6.1-sol', modelsByPurpose: { consultation: 'gpt-6.1-terra', document: 'gpt-6.1-sol', ideation: 'gpt-6-luna' }, maxOutputTokens: 4000, maxAiCalls: 1 };
+  const advertised = { model: 'gpt-6.1-sol', serviceTier: 'default', modelsByPurpose: { consultation: 'gpt-6-luna', document: 'gpt-6.1-sol', ideation: 'gpt-6-luna' },
+    serviceTiersByPurpose: { consultation: 'fast', document: 'default', ideation: 'fast' }, maxOutputTokens: 4000, maxAiCalls: 1 };
   const limits = Client.limitsFromHealth({ limits: { version: 1, features: { 'toolkit.assistant-qa': advertised },
     deadlineMs: { 'toolkit.assistant-qa': 30000 }, budgetAllowance: { version: 1, models: ['gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-luna'] } } });
   const ctx = requestPurpose => ({ question: '同じ依頼文', requestPurpose });
   for (const kind of ['ask', 'propose']) {
-    for (const [purpose, model] of [['consultation', 'gpt-6.1-terra'], ['document', 'gpt-6.1-sol'], ['ideation', 'gpt-6-luna'], [undefined, 'gpt-6.1-sol']]) {
-      assert.equal(B.estimate({ kind, ctx: ctx(purpose), ctxBytes: 0, limits }).model, model);
-      assert.equal(B.gatewayBound({ kind, ctx: ctx(purpose), bodyBytes: 0, limits }).model, model);
+    for (const [purpose, model, tier] of [['consultation', 'gpt-6-luna', 'fast'], ['document', 'gpt-6.1-sol', 'default'], ['ideation', 'gpt-6-luna', 'fast'], [undefined, 'gpt-6.1-sol', 'default']]) {
+      const estimate = B.estimate({ kind, ctx: ctx(purpose), ctxBytes: 0, limits }), bound = B.gatewayBound({ kind, ctx: ctx(purpose), bodyBytes: 0, limits });
+      assert.equal(estimate.model, model); assert.equal(estimate.serviceTier, tier);
+      assert.equal(bound.model, model); assert.equal(bound.serviceTier, tier);
+      if (tier === 'fast') {
+        const standard = { features: { 'assistant-qa': { model, serviceTier: 'default', maxOutputTokens: 4000, maxAiCalls: 1 } } };
+        assert.equal(estimate.maxUsd, B.estimate({ kind, ctxBytes: 0, limits: standard }).maxUsd * 2);
+        assert.equal(bound.maxUsd, B.gatewayBound({ kind, bodyBytes: 0, limits: standard }).maxUsd * 2);
+      }
       assert.equal(B.enforcementOf(limits, kind, ctx(purpose)), 'gateway');
     }
   }
-  for (const kind of ['plan', 'generate']) assert.equal(B.estimate({ kind, ctx: ctx('consultation'), limits }).model, 'gpt-6.1-sol');
-  limits.budgetAllowance.models = ['gpt-6.1-terra'];
+  for (const kind of ['plan', 'generate']) {
+    limits.features[B.FEATURE_OF[kind]] = { model: 'gpt-6.1-sol', serviceTier: 'default' };
+    const estimate = B.estimate({ kind, ctx: ctx('consultation'), limits });
+    assert.equal(estimate.model, 'gpt-6.1-sol'); assert.equal(estimate.serviceTier, 'default');
+  }
+  limits.budgetAllowance.models = ['gpt-6-luna'];
   assert.equal(B.enforcementOf(limits, 'propose', ctx('consultation')), 'gateway');
   assert.equal(B.enforcementOf(limits, 'propose', ctx('document')), 'estimate');
   limits.features['assistant-qa'].modelsByPurpose.document = 'unknown-model';
   assert.equal(B.estimate({ kind: 'propose', ctx: ctx('document'), limits }).reason, 'unknown-model');
   delete limits.features['assistant-qa'].modelsByPurpose;
+  delete limits.features['assistant-qa'].serviceTiersByPurpose;
+  delete limits.features['assistant-qa'].serviceTier;
   limits.features['assistant-qa'].model = 'gpt-6.1-terra';
   assert.equal(B.estimate({ kind: 'propose', ctx: ctx('document'), limits }).model, 'gpt-6.1-terra', '旧healthは従来modelのまま');
+  assert.equal(B.estimate({ kind: 'propose', ctx: ctx('document'), limits }).serviceTier, null);
 });
 
 for (const failure of [false, true]) test('Terraの' + (failure ? '失敗' : '成功') + 'の費用・キャッシュ内訳・モデル名をGatewayの記録から残す', async () => {
@@ -179,4 +193,72 @@ test('Lunaの実費・推論token・cache内訳を記録し、モデル変更の
  const {entry}=await settle({budgetMeta:{spentUsd:0.000162,complete:true,calls:[{kind:'qa',model:'gpt-6-luna',boundUsd:0.1,costUsd:0.000162,usage}]}},{model:'gpt-6-luna',gateway:true});
  assert.equal(entry.costUsd,0.000162);assert.equal(entry.gatewayCalls[0].model,'gpt-6-luna');assert.equal(entry.calls[0].reasoning,40);assert.equal(entry.calls[0].cacheWrite12h,300);
  const changed=await settle({ai:{model:'gpt-6.1-terra',usage:complete}},{model:'gpt-6-luna'});assert.equal(changed.summary.stopped.reason,'model');
+});
+
+test('Luna Fastと同義priorityは通常入力・cache・長文料金へ倍率を適用してから丸める', async () => {
+  for (const serviceTier of ['fast', 'priority']) for (const [usage, cost] of [[raw(1000, 100), 0.0003], [complete, 0.000323], [raw(272000, 100), 0.0545], [raw(272001, 100), 0.108951]]) {
+    const { entry, summary } = await settle({ ai: { model: 'gpt-6-luna', requestedServiceTier: serviceTier, serviceTier, usage } }, { model: 'gpt-6-luna', serviceTier });
+    assert.equal(entry.costUsd, cost); assert.equal(entry.reservedUsd, 0); assert.equal(summary.stopped, null);
+    assert.equal(entry.estimatedServiceTier, serviceTier); assert.equal(entry.requestedServiceTier, serviceTier); assert.equal(entry.serviceTier, serviceTier);
+  }
+});
+
+test('Fast要求でも実tierがdefaultなら通常料金で精算する', async () => {
+  const { entry, summary } = await settle({ ai: { model: 'gpt-6-luna', requestedServiceTier: 'fast', serviceTier: 'default', usage: complete } }, { model: 'gpt-6-luna', serviceTier: 'fast' });
+  assert.equal(entry.costUsd, 0.000162); assert.equal(entry.serviceTier, 'default'); assert.equal(entry.reservedUsd, 0); assert.equal(summary.stopped, null);
+});
+
+for (const serviceTier of ['default', 'fast']) test('明示' + serviceTier + 'の実tier欠落はusageが揃っていても確保を残す', async () => {
+  const { entry } = await settle({ ai: { model: 'gpt-6-luna', requestedServiceTier: serviceTier, usage: complete } }, { model: 'gpt-6-luna', serviceTier });
+  assert.equal(entry.costUsd, null); assert.equal(entry.costComplete, false); assert.ok(entry.reservedUsd > 0);
+  assert.equal(entry.reason, 'INCOMPLETE_SERVICE_TIER'); assert.equal(entry.estimatedServiceTier, serviceTier);
+});
+
+test('旧healthでも実providerのsettings.requestedServiceTierがあれば実tier欠落を通常料金で精算しない', async () => {
+  for (const serviceTier of [undefined, null]) {
+    const { entry } = await settle({ ai: { model: 'gpt-6-luna', settings: { requestedServiceTier: 'fast' }, serviceTier, usage: complete } }, { model: 'gpt-6-luna' });
+    assert.equal(entry.estimatedServiceTier, null); assert.equal(entry.requestedServiceTier, 'fast');
+    assert.equal(entry.costUsd, null); assert.equal(entry.costComplete, false); assert.ok(entry.reservedUsd > 0);
+    assert.equal(entry.reason, 'INCOMPLETE_SERVICE_TIER');
+  }
+  const { entry } = await settle({ ai: { model: 'gpt-6-luna', settings: { requestedServiceTier: 'fast' }, serviceTier: 'default', usage: complete } }, { model: 'gpt-6-luna' });
+  assert.equal(entry.requestedServiceTier, 'fast'); assert.equal(entry.serviceTier, 'default'); assert.equal(entry.costUsd, 0.000162); assert.equal(entry.reservedUsd, 0);
+});
+
+test('最後の修復の実tierで最初の生成を精算しない', async () => {
+  const { entry } = await settle({ ai: { serviceTier: 'fast', usage: complete }, timing: { ai: { count: 2 }, calls: [
+    { inputTokens: 1000, outputTokens: 100, cachedTokens: 0, cacheWriteTokens: 0 },
+    { serviceTier: 'default', inputTokens: 1000, outputTokens: 100, cachedTokens: 0, cacheWriteTokens: 0 },
+  ] } }, { kind: 'generate', model: 'gpt-6-luna', serviceTier: 'fast' });
+  assert.equal(entry.status, 'partial-unknown'); assert.equal(entry.costKnownUsd, 0.00015); assert.equal(entry.costUsd, null); assert.ok(entry.reservedUsd > 0);
+  assert.equal(entry.callServiceTiers[0].serviceTier, undefined); assert.equal(entry.callServiceTiers[1].serviceTier, 'default');
+});
+
+for (const failure of [false, true]) test('FastのGateway' + (failure ? '失敗' : '成功') + '費用を再換算せずtier監査情報を保持する', async () => {
+  const call = { kind: 'qa', model: 'gpt-6-luna', requestedServiceTier: 'fast', serviceTier: 'fast', boundUsd: 0.0085, costUsd: 0.000323, usage: complete };
+  const { entry } = await settle({ budgetMeta: { spentUsd: call.costUsd, complete: true, calls: [call] } }, { model: call.model, serviceTier: 'fast', gateway: true, failure });
+  assert.equal(entry.costUsd, 0.000323); assert.equal(entry.reservedUsd, 0); assert.equal(entry.estimatedServiceTier, 'fast');
+  assert.equal(entry.gatewayCalls[0].requestedServiceTier, 'fast'); assert.equal(entry.gatewayCalls[0].serviceTier, 'fast');
+  const unknown = await settle({ budgetMeta: { spentUsd: call.boundUsd, complete: false, calls: [{ ...call, serviceTier: null, costUsd: null, costReason: 'missing-service-tier' }] } }, { model: call.model, serviceTier: 'fast', gateway: true, failure });
+  assert.equal(unknown.entry.costUsd, null); assert.equal(unknown.entry.reservedUsd, call.boundUsd);
+  assert.equal(unknown.entry.gatewayCalls[0].serviceTier, null); assert.equal(unknown.entry.gatewayCalls[0].costReason, 'missing-service-tier');
+});
+
+test('未知のtierはStandardへ黙って戻さず、通常要求の高額tier応答も止める', async () => {
+  const limits = { features: { 'assistant-qa': { model: 'gpt-6-luna', serviceTier: 'unpriced' } } };
+  assert.equal(B.estimate({ kind: 'ask', limits }).reason, 'unknown-service-tier');
+  assert.equal(B.gatewayBound({ kind: 'ask', limits }).reason, 'unknown-service-tier');
+  limits.features['assistant-qa'].serviceTier = 'priority';
+  const aliasEstimate = B.estimate({ kind: 'ask', limits }), aliasBound = B.gatewayBound({ kind: 'ask', limits });
+  assert.equal(aliasEstimate.ok, true); assert.equal(aliasEstimate.serviceTier, 'priority');
+  limits.features['assistant-qa'].serviceTier = 'fast';
+  assert.equal(aliasEstimate.maxUsd, B.estimate({ kind: 'ask', limits }).maxUsd);
+  assert.equal(aliasBound.maxUsd, B.gatewayBound({ kind: 'ask', limits }).maxUsd);
+  const { entry, summary } = await settle({ ai: { model: 'gpt-6-luna', serviceTier: 'fast', usage: complete } }, { model: 'gpt-6-luna', serviceTier: 'default' });
+  assert.equal(summary.stopped.reason, 'service-tier'); assert.equal(entry.costUsd, null); assert.ok(entry.reservedUsd > 0);
+});
+
+test('旧Gatewayの確定金額と空callsは既存どおり受け取る', async () => {
+  const { entry } = await settle({ budgetMeta: { spentUsd: 0.00319, complete: true, calls: [] } }, { gateway: true });
+  assert.equal(entry.costUsd, 0.00319); assert.equal(entry.reservedUsd, 0);
 });

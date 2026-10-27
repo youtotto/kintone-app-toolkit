@@ -12002,6 +12002,14 @@
       const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(m);
       return d && own(PRICES, d[1]) ? PRICES[d[1]] : null;
     }
+    /** healthで明示されたtierを使う。古いhealthの未指定だけStandardとして扱う。 */
+    const SERVICE_TIER_FACTORS = Object.freeze({ default: 1, fast: 2, priority: 2 });
+    function tierPriceOf(model, serviceTier = null) {
+      const price = priceOf(model), factor = serviceTier == null ? 1 : SERVICE_TIER_FACTORS[serviceTier];
+      if (!price || !factor || !own(SERVICE_TIER_FACTORS, serviceTier == null ? 'default' : serviceTier)) return null;
+      return factor === 1 ? price : { ...price, input: price.input * factor, output: price.output * factor,
+        cachedInput: price.cachedInput * factor, cacheWrite30m: price.cacheWrite30m * factor, cacheWrite12h: price.cacheWrite12h * factor };
+    }
     const boundUsdOf = (price, input, output) => {
       const long = input > price.longThreshold;
       return Math.ceil(input * price.cacheWrite12h * (long ? 2 : 1) + output * price.output * (long ? 1.5 : 1)) / 1e6;
@@ -12026,14 +12034,20 @@
       const model = purpose && lf?.modelsByPurpose?.[purpose] || lf?.model;
       return typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_MODEL[feature];
     }
+    function requestServiceTierOf(feature, lf, ctx) {
+      const purpose = feature === 'assistant-qa' && ['consultation', 'document', 'ideation'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
+      const tier = purpose && lf?.serviceTiersByPurpose && own(lf.serviceTiersByPurpose, purpose) ? lf.serviceTiersByPurpose[purpose] : lf?.serviceTier;
+      return tier == null ? null : typeof tier === 'string' ? tier.trim() : '';
+    }
     function estimate({ kind, ctx = null, limits = null, ctxBytes = null } = {}) {
       const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
       if (!feature) return { ok: false, reason: 'unknown-feature', kind: String(kind || '').slice(0, 40) };
       const lfs = limits && limits.features && typeof limits.features === 'object' ? limits.features : null;
       const lf = lfs && lfs[feature] && typeof lfs[feature] === 'object' ? lfs[feature] : null;
       const model = requestModelOf(feature, lf, ctx);
-      const price = priceOf(model);
-      if (!price) return { ok: false, reason: 'unknown-model', kind, feature, model: String(model || '').slice(0, 60) };
+      if (!priceOf(model)) return { ok: false, reason: 'unknown-model', kind, feature, model: String(model || '').slice(0, 60) };
+      const serviceTier = requestServiceTierOf(feature, lf, ctx), price = tierPriceOf(model, serviceTier);
+      if (!price) return { ok: false, reason: 'unknown-service-tier', kind, feature, model, serviceTier };
       //   レビューの指摘（2026-10-09・費用の見積もり）: 出力の上限は health の limits.features[feature].maxOutputTokens（Gateway が実際に使う上限）があればその値、
       //   無ければ表の値（以前は大きい方）。応答の設定の上限がこの値を超えたら以後を止める（settle が見積もりに使った値と比べる）
       const hOut = lf ? num(lf.maxOutputTokens) : null;
@@ -12058,7 +12072,7 @@
         for (let i = 0; i < n; i++) calls.push({ kind: mode, input: inTok(mode), output: maxOut });
       }
       calls = calls.map(c => ({ ...c, usd: boundUsdOf(price, c.input, c.output) }));
-      return { ok: true, kind, feature, mode, model, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
+      return { ok: true, kind, feature, mode, model, serviceTier, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
     }
     /** Gateway の上界の式のメッセージ 1 つあたりのバイト数（worker の budget.mjs の MESSAGE_OVERHEAD_BYTES と同じ）と、1 回の呼び出しのメッセージの数（指示と本文） */
     const MESSAGE_OVERHEAD_BYTES = 64, MESSAGES_PER_CALL = 2;
@@ -12082,7 +12096,7 @@
     function gatewayBound({ kind, ctx = null, limits = null, bodyBytes = null } = {}) {
       const e = estimate({ kind, ctx, limits, ctxBytes: 0 });
       if (!e.ok) return e;
-      const price = priceOf(e.model);
+      const price = tierPriceOf(e.model, e.serviceTier);
       const body = num(bodyBytes) != null ? num(bodyBytes) : gatewayBodyBytesOf(ctx);
       const patch = kind === 'plan' && !!(ctx && ctx.revision && ctx.revision.mode === 'patch');
       const maxOut = e.maxOutputTokens;
@@ -12100,7 +12114,7 @@
         for (let i = 0; i < e.maxCalls; i++) calls.push({ kind: e.mode, inputBytes: first });
       }
       const out = calls.map(c => ({ ...c, output: maxOut, usd: boundUsdOf(price, c.inputBytes, maxOut) }));
-      return { ok: true, kind, mode: e.mode, model: e.model, maxOutputTokens: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
+      return { ok: true, kind, mode: e.mode, model: e.model, serviceTier: e.serviceTier, maxOutputTokens: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
     }
     /** 検証の上限で送らない例外（BUDGET_EXCEEDED。details.budget = { reason, needUsd, remainingUsd, needCalls, remainingCalls, limitUsd, maxCalls, ... }） */
     function budgetError(reason, info = {}) {
@@ -12160,7 +12174,7 @@
       if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
       const fin = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
       if (!fin(m.spentUsd) || !Array.isArray(m.calls) || typeof m.complete !== 'boolean') return null;
-      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null, ...(typeof c.model === 'string' ? { model: c.model.slice(0, 60) } : {}), ...(typeof c.costReason === 'string' ? { costReason: c.costReason.slice(0, 80) } : {}), ...(c.usage ? { usage: tokensOfUsage(c.usage) } : {}) }));
+      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null, ...(typeof c.model === 'string' ? { model: c.model.slice(0, 60) } : {}), ...serviceTierAuditOf(c), ...(typeof c.costReason === 'string' ? { costReason: c.costReason.slice(0, 80) } : {}), ...(c.usage ? { usage: tokensOfUsage(c.usage) } : {}) }));
       return { allowanceUsd: fin(m.allowanceUsd) ? m.allowanceUsd : null, spentUsd: m.spentUsd, complete: m.complete === true && calls.every(c => c.costUsd != null), calls };
     }
     /**
@@ -12222,6 +12236,22 @@
         if (rm && rm.patchAttempt && typeof rm.patchAttempt === 'object') return [tokensOfUsage(rm.patchAttempt.usage), first];
       }
       return [first];
+    }
+    const serviceTierAuditOf = (meta) => {
+      const audit = Object.fromEntries(['requestedServiceTier', 'serviceTier'].filter(key => meta && own(meta, key)).map(key => [key, typeof meta[key] === 'string' ? meta[key].slice(0, 40) : null]));
+      const requested = meta?.settings?.requestedServiceTier;
+      if (audit.requestedServiceTier == null && requested != null) audit.requestedServiceTier = typeof requested === 'string' ? requested.slice(0, 40) : null;
+      return audit;
+    };
+    /** ローカル精算の呼び出しごとのtier。最後の修復のtierを前の呼び出しに流用しない。 */
+    function callTierMetadataOf(kind, r, count) {
+      let source = [r?.ai];
+      if (kind === 'generate') {
+        const tc = Array.isArray(r?.timing?.calls) ? r.timing.calls.filter(c => c && typeof c === 'object') : [];
+        if (tc.length) source = tc;
+        else if (count > 1) source = [r?.ai, ...Array(Math.max(0, count - 2)).fill(null), r?.aiRepair];
+      } else if (kind === 'plan' && r?.revisionMeta?.patchAttempt) source = [r.revisionMeta.patchAttempt, r?.ai];
+      return Array.from({ length: count }, (_, i) => serviceTierAuditOf(source[i]));
     }
     const configKeyOf = (host) => `${CONFIG_PREFIX}.${host}`;
     const ledgerKeyOf = (host, id) => `${LEDGER_PREFIX}.${host}.${id}`;
@@ -12383,7 +12413,7 @@
         const allowanceUsd = gw ? floor6(cap != null ? Math.min(remainingUsd, cap) : remainingUsd) : null;
         if (gw && aboveUsd != null && !(allowanceUsd > num(aboveUsd) + 1e-6)) return { skipped: true, remainingUsd };
         const key = `${sid}:${++seq}`;
-        ledger.entries.push({ key, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : null, feature: est.feature, kind, mode: est.mode, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}), sessionId: sid, startedAt: nowIso(now), endedAt: null, status: 'in-flight', reservedUsd: gw ? allowanceUsd : est.maxUsd, reservedCalls: est.maxCalls, maxCallUsd: est.maxCallUsd, estimatedModel: est.model, maxOutputTokens: est.maxOutputTokens, ctxBytes: est.ctxBytes, model: null, calls: [], costUsd: null, costKnownUsd: 0, costComplete: false, costCachedUsd: null, reason: null });
+        ledger.entries.push({ key, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : null, feature: est.feature, kind, mode: est.mode, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}), sessionId: sid, startedAt: nowIso(now), endedAt: null, status: 'in-flight', reservedUsd: gw ? allowanceUsd : est.maxUsd, reservedCalls: est.maxCalls, maxCallUsd: est.maxCallUsd, estimatedModel: est.model, estimatedServiceTier: est.serviceTier ?? null, maxOutputTokens: est.maxOutputTokens, ctxBytes: est.ctxBytes, model: null, calls: [], costUsd: null, costKnownUsd: 0, costComplete: false, costCachedUsd: null, reason: null });
         writeLedger(config, ledger);
         notify();
         return { key, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}) };
@@ -12436,6 +12466,7 @@
         const got = model ? priceOf(model) : est;
         const gw = e.enforcement === 'gateway';
         const bm = gw ? budgetMetaOf(response && response.budgetMeta) : null;
+        Object.assign(e, serviceTierAuditOf(ai));
         if (gw && bm) {
           e.endedAt = nowIso(now); e.model = model;
           e.calls = calls.map(c => c ? { ...c } : null);
@@ -12451,12 +12482,20 @@
         const mo = ai && ai.settings ? num(ai.settings.maxOutputTokens) : null;
         if (!stop && !gw && mo != null && mo > e.maxOutputTokens) stop = { reason: 'output-limit', maxOutputTokens: mo };
         if (!stop && calls.length > e.reservedCalls) stop = { reason: 'calls', calls: calls.length };
-        const price = got || est;
-        const priced = !!price && !(stop && stop.reason === 'model');
+        const tierMetadata = callTierMetadataOf(kind, response, calls.length);
+        const estimatedPrice = tierPriceOf(e.estimatedModel, e.estimatedServiceTier);
+        const prices = tierMetadata.map(meta => {
+          const explicitTier = e.estimatedServiceTier != null || meta.requestedServiceTier != null;
+          if (explicitTier && meta.serviceTier == null) return null;
+          return tierPriceOf(model || e.estimatedModel, meta.serviceTier);
+        });
+        if (!stop && tierMetadata.some((meta, i) => meta.serviceTier != null && (!prices[i] || (estimatedPrice && (prices[i].input > estimatedPrice.input || prices[i].output > estimatedPrice.output))))) stop = { reason: 'service-tier' };
+        const priced = !(stop && ['model', 'service-tier'].includes(stop.reason));
         e.endedAt = nowIso(now); e.model = model;
         e.calls = calls.map(c => c ? { ...c } : null);
+        e.callServiceTiers = tierMetadata;
         //   レビューの指摘 row7: 確認できた費用（costKnownUsd）と、費用が確定したか（costComplete）。確定していない記録の costUsd は null（0 と読ませない）
-        const costs = calls.map(c => priced ? usageCostUsd(price, c) : null);
+        const costs = calls.map((c, i) => priced ? usageCostUsd(prices[i], c) : null);
         const knownCosts = costs.filter(c => c != null);
         const knownUsd = round6(knownCosts.reduce((sum, cost) => sum + cost, 0));
         e.costCachedUsd = null;
@@ -12465,7 +12504,7 @@
         e.costKnownUsd = knownUsd; e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? knownUsd : null;
         if (e.status === 'done') { e.reservedUsd = 0; e.reservedCalls = calls.length; }
         else if (e.status === 'partial-unknown') { e.reservedUsd = round6(Math.min(e.reservedUsd, nullN * (e.maxCallUsd || 0))); e.reservedCalls = calls.length; }
-        e.reason = knownCosts.length ? null : 'INCOMPLETE_USAGE';
+        e.reason = knownCosts.length ? null : prices.some(p => !p) ? 'INCOMPLETE_SERVICE_TIER' : 'INCOMPLETE_USAGE';
         if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
       });
       /** 失敗で精算: AI を呼ぶ前に止まったものだけ解放し、それ以外（中断・時間切れ・切断・AI を呼んだ後のエラー）は終了不明（確保を残す） */
