@@ -31,7 +31,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
         recheckRollback: async run => { calls.rollbackRead++; return { ...run.rollback, status: 'complete', message: '復元結果を確認しました' }; },
         recheckApply: async run => { calls.read++; await new Promise(resolve => { window.finishRead = resolve; }); return { ...run.result, status: 'complete', written: true, recoveryState: 'applied', message: '読み戻した設定は反映する内容と一致しました。' }; }
       } });
-      window.view = KTReleaseView.create(document.querySelector('#host'), { controller });
+      window.view = KTReleaseView.create(document.querySelector('#host'), { controller, onDocuments: ({request}) => request('今の作業を資料にまとめて') });
     });
     const send = async text => { await page.locator('#kt-release-input').fill(text); await page.locator('[data-release-action="send"]').click(); };
     await send('承認待ちの一覧を追加してください');
@@ -85,17 +85,16 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     assert.equal(await page.getByRole('heading', { name: '検証できない内容があります', exact: true }).isVisible(), true);
     assert.equal(await page.locator('[data-release-action="resume"]').count(), 0);
     assert.equal(await page.locator('[data-release-action="apply"]').count(), 0);
-    await page.locator('[data-release-purpose]').selectOption('document');
-    await send('今の作業を資料にまとめて');
+    await page.locator('[data-release-action="documents"]').click();
     await page.waitForFunction(() => controller.getState().explanations.length === 1);
     await page.locator('[data-release-action="show-changes"]').click();
-    assert.equal(await page.locator('[data-release-purpose]').inputValue(), 'document');
+    assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'), 'document');
     const stopped = await page.evaluate(() => ({ ...calls }));
     await page.locator('#kt-release-input').fill('対象を変えたいです');
-    await page.locator('[data-release-action="focus-consultation"]').click();
+    await page.locator('[data-release-action="focus-consultation"]').first().click();
     assert.equal(await page.locator('#kt-release-input').evaluate(el => el === document.activeElement), true);
     assert.equal(await page.locator('#kt-release-input').inputValue(), '対象を変えたいです');
-    assert.equal(await page.locator('[data-release-purpose]').inputValue(), 'consultation');
+    assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'), 'consultation');
     assert.deepEqual(await page.evaluate(() => calls), stopped);
     await page.screenshot({ path: path.join(out, 'unverified-consultation.png') });
     await page.locator('[data-release-action="send"]').click();

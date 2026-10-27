@@ -37,7 +37,7 @@ const textOf = value => JSON.stringify(value);
 
 test('proposal and adopted plan reuse existing preview Deps with confidence and provenance', async () => {
   const { base } = await baseOf();
-  for (const make of [proposal, plan]) {
+  for (const make of [proposal, plan, (b, extra) => C.proposal({ text: '資料にまとめて', requestPurpose: 'document', base: b }, tools(extra)), (b, extra) => C.proposal({ text: 'アイディアを考えて', requestPurpose: 'ideation', base: b }, tools(extra))]) {
     let count = 0;
     const ctx = make(base, { analyze: b => { count++; return T.KTDevBase.analyze(b); } });
     assert.equal(count, 1); assert.equal(ctx.coverage.dependencies, true);

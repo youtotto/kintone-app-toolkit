@@ -58,6 +58,8 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   const countPaid=()=>calls.filter(c=>c.name!=='getHealth').length;
 
   await page.waitForFunction(()=>work.capability().available===true);
+  assert.equal(await page.locator('.ktr-composer select').count(),0,'利用者に用途やモデルの選択を求めない');
+  assert.equal(await page.getByRole('button',{name:'改善案を考える',exact:true}).count(),0,'比較準備のLunaを通常画面へ追加しない');
   const docs=()=>page.locator('dialog:has([data-document-create])');
   const create=()=>docs().locator('[data-document-create]');
   const closeDocs=()=>docs().locator('[data-close]').click();
@@ -82,7 +84,7 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   await page.screenshot({path:path.join(out,'templates-wide.png'),fullPage:true});
   await closeDocs();
   assert.equal(countPaid(),0,'選択して閉じるだけでは送信しない');
-  assert.equal(await page.locator('[data-release-purpose]').inputValue(),'consultation');
+  assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'),'consultation');
   assert.equal(await page.locator('#kt-release-input').inputValue(),draft);
 
   await action('documents').click();await create().click();
@@ -107,7 +109,7 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
    assert.equal(await docs().count(),0,'開始したダイアログは閉じる');
    const request=calls.filter(c=>c.name==='propose').at(-1).ctx;
    assert.equal(request.requestPurpose,'document');
-   assert.equal(await page.locator('[data-release-purpose]').inputValue(),'document');
+   assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'),'document');
    assert.ok(request.question.startsWith(prefix),title+'の依頼を送る');
    assert.ok(request.question.includes('資料の作成だけを依頼しています。'));
    if(extra)assert.ok(request.question.endsWith('追加の希望：'+extra));
@@ -162,7 +164,7 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   // A free-form follow-up edits the document until the user explicitly changes purpose.
   await send('確認事項を短くして');await docsCount(7);
   assert.equal(calls.filter(c=>c.name==='propose').at(-1).ctx.requestPurpose,'document');
-  assert.equal(await page.locator('[data-release-purpose]').inputValue(),'document');
+  assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'),'document');
   const afterFollowup=await page.evaluate(()=>{const s=work.controller.getState();return{adopted:s.adopted,plan:s.plan,prepared:s.prepared,answers:s.answers,runs:s.runs};});
   assert.deepEqual(afterFollowup,adopted);
   await page.screenshot({path:path.join(out,'document-purpose-wide.png'),fullPage:true});
@@ -172,11 +174,11 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   await page.setViewportSize({width:1440,height:900});
   const beforePurpose=countPaid();
   await page.locator('#kt-release-input').fill(draft);
-  await page.locator('[data-release-purpose]').selectOption('consultation');
+  await action('focus-consultation').click();
   assert.equal(countPaid(),beforePurpose);assert.equal(await page.locator('#kt-release-input').inputValue(),draft);
   await action('show-changes').click();await action('show-explanation').click();
   await action('copy-explanation').click();await action('download-explanation').click();
-  assert.equal(await page.locator('[data-release-purpose]').inputValue(),'consultation');
+  assert.equal(await page.locator('[data-release-purpose]').getAttribute('data-release-purpose'),'consultation');
   assert.equal(countPaid(),beforePurpose,'閲覧・コピー・保存は用途を変えずAIも呼ばない');
 
   await action('connect').click();await page.locator('dialog [data-disconnect]').click();

@@ -11967,6 +11967,7 @@
     /** OpenAI Standard単価（2026-10-27、米ドル/100万token）。予約は読取割引に頼らず書込の最大単価を使う。 */
     const PRICES = Object.freeze({
       'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1, cacheWrite30m: 2.5, cacheWrite12h: 5, longThreshold: 272000 }),
+      'gpt-6-luna': Object.freeze({ input: 0.1, output: 0.5, cachedInput: 0.01, cacheWrite30m: 0.125, cacheWrite12h: 0.25, longThreshold: 272000 }),
       'gpt-6.1-terra': Object.freeze({ input: 1, output: 5, cachedInput: 0.05, cacheWrite30m: 1.25, cacheWrite12h: 2.5, longThreshold: 272000 }),
     });
     /** 送る要求の種類 → Gateway の feature（表に無い種類は送らない） */
@@ -12021,7 +12022,7 @@
      * @returns {{ ok:true, kind, feature, mode, model, price, maxOutputTokens, ctxBytes, calls:Array<{kind,input,output,usd}>, maxCalls, maxUsd, maxCallUsd } | { ok:false, reason, ... }}
      */
     function requestModelOf(feature, lf, ctx) {
-      const purpose = feature === 'assistant-qa' && ['consultation', 'document'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
+      const purpose = feature === 'assistant-qa' && ['consultation', 'document', 'ideation'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
       const model = purpose && lf?.modelsByPurpose?.[purpose] || lf?.model;
       return typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_MODEL[feature];
     }
@@ -13550,7 +13551,8 @@
       const set = values => { Object.assign(state, values); emit(); };
       const available = () => !busyPhases.has(state.phase);
       const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
-      const requestTargets = () => state.messages.filter(m => m.role === 'user').map(m => ({ text: m.text, target: clone(m.consultationTarget || null) }));
+      const changeRequests = () => state.messages.filter(m => m.role === 'user' && (!m.requestPurpose || m.requestPurpose === 'consultation'));
+      const requestTargets = () => changeRequests().map(m => ({ text: m.text, target: clone(m.consultationTarget || null) }));
       const invalidate = () => { state.prepared = null; state.rollback = null; };
       async function getBase(reason) {
         const fresh = await loadBase({ reason });
@@ -13590,7 +13592,7 @@
           if (old?.result?.artifactOutcome?.state === 'ready') continue;
           set({ progress: c.requirement || 'JavaScriptを作成しています。' });
           try {
-            const result = await services.generate({ customization: clone(c), plan: clone(state.plan), proposal: clone(state.adopted), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal,
+            const result = await services.generate({ customization: clone(c), plan: clone(state.plan), proposal: clone(state.adopted), answers: clone(state.answers), requests: changeRequests().map(m => m.text), version: state.version, base, signal,
               onProgress: p => { if (live() && p?.stage) set({ progress: p.stage === 'repair' ? 'JavaScriptを修正しています。' : p.stage === 'verify' ? 'JavaScriptを確認しています。' : c.requirement }); } });
             if (!live()) return;
             const artifact = await validateArtifact(result, c);
@@ -13644,51 +13646,68 @@
       async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
-        if (!['consultation', 'document'].includes(requestPurpose)) return false;
+        if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
         const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
-        const documentOnly = requestPurpose === 'document';
+        const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
+        const operationLabel = ideation ? 'アイディア出し' : '資料の作成';
         state.requestPurpose = requestPurpose;
-        let resolvedTarget = null, userMessage = null;
+        let resolvedTarget = null, userMessage = null, baseScopeMatched = false;
         const unresolved = state.proposalPending;
         // Suspend actions before any consultation. Restore only when the service
         // explicitly reports no proposal change; failed revisions stay retired.
-        const previousWork = clone({ phase: !documentOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
+        const previousWork = clone({ phase: !readOnly && state.phase === 'rollback-confirm' ? 'result' : state.phase, plan: state.plan,
           adopted: state.adopted, adoptedTarget: state.adoptedTarget, artifacts: state.artifacts, prepared: state.prepared, error: state.error, progress: state.progress });
         const previousBase = base;
-        const discussion = state.messages.map(m => ({ role: m.role, text: m.text,
+        const discussion = state.messages.map(m => ({ role: m.role, text: m.text, requestPurpose: m.requestPurpose || 'consultation',
+          ...(m.explanationId ? { accepted: false } : {}),
           explanation: m.explanationId ? explanationBody(state.explanations.find(e => e.id === m.explanationId)) : null }));
-        const currentPlanSummary = state.plan ? JSON.stringify({ status: state.phase, goal: state.plan.goal, steps: state.plan.steps.map(s => ({ title: s.title, actionType: s.actionType, targetRef: s.targetRef })),
-          customizations: state.plan.customizations?.map(c => ({ requirement: c.requirement, platform: c.platform })), questions: state.plan.questions, artifacts: state.artifacts.map(a => ({ title: a.title, state: a.result?.artifactOutcome?.state || 'failed', message: a.result?.artifactOutcome?.message || a.error?.message })), preparation: state.prepared ? { ok: state.prepared.ok, reasons: state.prepared.reasons, confirmations: state.prepared.confirmations } : null }) : null;
+        const originalRequestHistory = state.goal ? { initialRequest: state.goal, status: 'history-only' } : null;
+        // The plan goal is historical input, not the adopted specification. Keep typed
+        // placement/conditions and source provenance; never recover them from prose.
+        const currentPlanSummaryOf = fresh => previousWork.plan ? JSON.stringify({ status: previousWork.phase,
+          source: { appId: String(previousBase?.appId ?? previousBase?.data?.appId ?? ''), environment: previousBase?.env || null,
+            revision: previousBase?.revision?.preview ?? null, baseStamp: stampOf(previousBase), matchesCurrentBase: stampOf(previousBase) === stampOf(fresh) },
+          steps: clone(previousWork.plan.steps), proposedFields: clone(previousWork.plan.proposedFields || []),
+          customizations: clone(previousWork.plan.customizations || []), questions: clone(previousWork.plan.questions || []), unknowns: clone(previousWork.plan.unknowns || []),
+          artifacts: previousWork.artifacts.map(a => ({ title: a.title, state: a.result?.artifactOutcome?.state || 'failed', message: a.result?.artifactOutcome?.message || a.error?.message })),
+          preparation: previousWork.prepared ? { ok: previousWork.prepared.ok, changes: clone(previousWork.prepared.changes), reasons: clone(previousWork.prepared.reasons), confirmations: clone(previousWork.prepared.confirmations) } : null }) : null;
         const run = state.runs.findLast(r => r.taskId === state.taskId);
-        const currentResultSummary = run ? JSON.stringify({ status: run.status, goal: run.goal, version: run.approval?.version,
+        const currentResultSummary = run ? JSON.stringify({ status: run.status, version: run.approval?.version,
           message: run.result?.message, written: run.result?.written, plannedChanges: run.prepared?.changes, rows: run.result?.rows, reasons: run.result?.reasons,
           rollback: run.rollback ? { status: run.rollback.status, message: run.rollback.message, reasons: run.rollback.reasons,
             settings: run.rollback.settings ? { status: run.rollback.settings.status, steps: run.rollback.settings.steps?.map(s => ({ title: s.title, status: s.status, message: s.message })) } : null,
             files: run.rollback.files ? { status: run.rollback.files.status, steps: run.rollback.files.steps?.map(s => ({ title: s.name, status: s.status, message: s.message })) } : null } : null }) : null;
         const requestProposal = (signal, fresh) => {
+          const oldApp = previousBase?.appId ?? previousBase?.data?.appId, newApp = fresh.appId ?? fresh.data?.appId;
+          if (previousBase && ((oldApp != null && newApp != null && String(oldApp) !== String(newApp)) ||
+              (previousBase.env && fresh.env && previousBase.env !== fresh.env))) {
+            throw Object.assign(new Error('会話の対象と取得したアプリ・環境が一致しません。元のアプリで続けるか、新しい会話を始めてください。'), { code: 'CONSULTATION_ENVIRONMENT' });
+          }
+          baseScopeMatched = true;
           resolvedTarget = resolveConsultationTarget(selectedTarget, fresh);
           const currentTarget = state.consultationTarget;
           if (resolvedTarget?.type === 'field' && currentTarget?.type === 'field'
               && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
               && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
           userMessage.consultationTarget = clone(resolvedTarget);
-          return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, acceptedProposal: previousWork.adopted, currentPlanSummary, currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), base: fresh, signal });
+          return services.propose({ text: value, requestPurpose, consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
         };
-        if (documentOnly) {
-          // The explicit document action cannot revise a plan, even if its AI request fails.
+        if (readOnly) {
+          // Document and ideation actions cannot revise a plan, even if their AI request fails.
           // Keep normal chat's failed-revision guard separate from this read-only operation.
           const previous = { ...previousWork, rollback: clone(state.rollback), proposalPending: unresolved };
           let fresh = null, completed = false;
           const restore = (error = null) => {
             const activePlan = previous.plan && previous.phase !== 'result' && previous.phase !== 'rollback-confirm';
-            const changedBase = activePlan && fresh && stampOf(fresh) !== stampOf(previousBase);
-            base = activePlan ? previousBase : fresh || previousBase;
-            set({ ...previous, error: error || (previous.error?.operation === 'document' ? null : previous.error), ...(changedBase ? { phase: 'blocked', prepared: null,
-              error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + '資料を確認している間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
+            const changedBase = activePlan && baseScopeMatched && fresh && stampOf(fresh) !== stampOf(previousBase);
+            // A retained plan keeps its own baseline, including after application.
+            base = previous.plan || !baseScopeMatched ? previousBase : fresh || previousBase;
+            set({ ...previous, error: error || (['document', 'ideation'].includes(previous.error?.operation) ? null : previous.error), ...(changedBase ? { phase: 'blocked', prepared: null,
+              error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + operationLabel + 'の間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
           };
-          const stop = () => restore({ code: 'CANCELLED', operation: 'document', message: '資料の作成を中断しました。変更案はそのまま残っています。' });
+          const stop = () => restore({ code: 'CANCELLED', operation: requestPurpose, message: operationLabel + 'を中断しました。変更案はそのまま残っています。' });
           cancelDocument = stop;
-          userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
+          userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
           try {
             await activity('consulting', async (signal, live) => {
               try {
@@ -13698,23 +13717,23 @@
                 if (!live()) return;
                 if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
                     !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
-                  throw Object.assign(new Error('AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: 'DOCUMENT_RESPONSE_INVALID' });
+                  throw Object.assign(new Error(ideation ? 'AIサービスからアイディアを受け取れませんでした。もう一度依頼してください。' : 'AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: ideation ? 'IDEATION_RESPONSE_INVALID' : 'DOCUMENT_RESPONSE_INVALID' });
                 }
-                const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+                const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
                 state.explanations.push(explanation);
-                message('assistant', response.reply, response.facts);
+                message('assistant', response.reply, response.facts); state.messages.at(-1).requestPurpose = requestPurpose;
                 state.messages.at(-1).explanationId = explanation.id;
                 state.explanationId = explanation.id;
                 completed = true;
                 restore();
               } catch (error) {
-                if (live()) { const failure = errorOf(error); failure.operation = 'document'; failure.message = '資料を作成できませんでした。' + failure.message; restore(failure); }
+                if (live()) { const failure = errorOf(error); failure.operation = requestPurpose; failure.message = (ideation ? 'アイディアを作成できませんでした。' : '資料を作成できませんでした。') + failure.message; restore(failure); }
               }
             }, previous.phase);
           } finally { if (cancelDocument === stop) cancelDocument = null; }
           return completed;
         }
-        invalidate(); userMessage = message('user', value); userMessage.consultationTarget = clone(selectedTarget);
+        invalidate(); userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
         Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
@@ -13724,17 +13743,17 @@
           const response = await requestProposal(signal, fresh);
           if (!live()) return;
           if (!response || typeof response.reply !== 'string') throw new Error('AIサービスの返答を受け取れませんでした。');
-          message('assistant', response.reply, response.facts);
+          message('assistant', response.reply, response.facts); state.messages.at(-1).requestPurpose = requestPurpose;
           if (response.proposalUnchanged === true && ['question', 'smalltalk', 'unclear'].includes(response.intent)) {
             let explanationId = state.explanationId;
             if (response.explanation) {
-              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version };
+              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
               state.explanations.push(explanation); explanationId = explanation.id;
               state.messages.at(-1).explanationId = explanation.id;
             }
             const activePlan = previousWork.plan && previousWork.phase !== 'result';
             const changedBase = activePlan && stampOf(fresh) !== stampOf(previousBase);
-            base = activePlan ? previousBase : fresh;
+            base = previousWork.plan ? previousBase : fresh;
             set({ ...previousWork, proposalPending: unresolved || requireProposalUpdate, explanationId, ...(changedBase ? { phase: 'blocked', prepared: null,
               error: { code: 'BASE_CHANGED', message: '説明を確認している間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
             return;
@@ -13766,7 +13785,7 @@
           base = fresh;
           set({ progress: '変更の計画を作成しています。' });
           const adoptedTarget = resolveConsultationTarget(state.adoptedTarget, fresh);
-          const response = await services.plan({ proposal: clone(state.adopted), consultationTarget: adoptedTarget, requestTargets: requestTargets(), goal: state.goal, answers: clone(state.answers), requests: state.messages.filter(m => m.role === 'user').map(m => m.text), version: state.version, base, signal });
+          const response = await services.plan({ proposal: clone(state.adopted), consultationTarget: adoptedTarget, requestTargets: requestTargets(), goal: state.goal, answers: clone(state.answers), requests: changeRequests().map(m => m.text), version: state.version, base, signal });
           if (!live()) return;
           const plan = response?.plan;
           if (!plan || !Array.isArray(plan.steps) || !Array.isArray(plan.customizations || [])) throw new Error('変更の計画を受け取れませんでした。');
@@ -13853,7 +13872,7 @@
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
         send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
-        setRequestPurpose(value) { if (!available() || !['consultation', 'document'].includes(value)) return false; set({ requestPurpose: value }); return true; },
+        setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
         setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
         showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { set({ explanationId: null }); return true; },
@@ -14005,14 +14024,14 @@
         reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
         reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
     }
-    function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
+    function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base }, dependencyTools = null) {
       const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
       const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
         ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
         : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
       return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
         focus, facts: factsOf(base, dependencies, requestTargets, consultationTarget), coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
-        conversation: { mode: 'proposal', discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
+        conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
     }
     // Proposal answers retain Q identifiers. The planner/generator contract uses D
@@ -14599,9 +14618,9 @@
     }
     function composer(state, options = {}) {
       const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
-      const document = state.requestPurpose === 'document';
-      const purpose = `<div class="ktr-request-purpose"><select data-release-purpose aria-label="送信する内容"${disabled ? ' disabled' : ''}><option value="consultation"${!document ? ' selected' : ''}>アプリの相談</option><option value="document"${document ? ' selected' : ''}>資料の作成・修正</option></select>${document ? '<span class="ktr-note">資料への依頼を送ります。変更案はそのまま残ります。</span>' : ''}</div>`;
-      return `<form class="ktr-composer" data-release-form="consult">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
+      const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
+      const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
+      return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}<label for="kt-release-input">変更したいこと、質問、修正内容</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : 'Enterで送信・Shift＋Enterで改行'}</span>${button('send', '送信', { primary: true, disabled })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -14931,7 +14950,6 @@
       }
       function suggestionChanged(event) {
         const target = event.target;
-        if (target?.hasAttribute?.('data-release-purpose') && !target.disabled && !disposed && !sending && !selectedRunId) { controller.setRequestPurpose(target.value); return; }
         if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || selectedRunId) return;
         controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
       }
@@ -14956,7 +14974,7 @@
       .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
       .ktr-actions,.ktr-compose-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0 8px}.ktr-compose-actions{justify-content:space-between}.ktr-workspace button,.kt-release-dialog button{font:inherit;line-height:1.4;padding:7px 12px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;background:var(--ktr-paper);color:var(--ktr-text);max-width:100%;overflow-wrap:anywhere}.ktr-workspace button.ktr-primary,.kt-release-dialog button.ktr-primary{color:#fff;background:var(--ktr-primary);border-color:var(--ktr-primary);font-weight:600}.ktr-workspace button:disabled,.kt-release-dialog button:disabled{opacity:.5;cursor:default}.ktr-workspace button:focus-visible,.ktr-workspace textarea:focus-visible,.ktr-workspace summary:focus-visible,.kt-release-dialog :is(button,textarea,select,summary):focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-workspace button:hover:not(:disabled),.kt-release-dialog button:hover:not(:disabled){background:var(--ktr-soft)}.ktr-workspace button.ktr-primary:hover:not(:disabled),.kt-release-dialog button.ktr-primary:hover:not(:disabled),.kt-release-dialog [data-document-create]:hover:not(:disabled){background:#204e9c}.ktr-composer:focus-within{border-color:var(--ktr-accent)}
-      .ktr-request-purpose{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px}.ktr-request-purpose select{max-width:100%;font:inherit;font-size:13px;padding:5px 8px;border:1px solid var(--ktr-line);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-request-purpose select:focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
+      .ktr-request-purpose{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px}
       .ktr-composer{flex:none;margin:12px 0 0;padding:10px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid var(--ktr-danger);background:color-mix(in srgb,var(--ktr-danger) 9%,var(--ktr-paper));color:var(--ktr-danger)}.ktr-reasons{color:var(--ktr-danger)}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:color-mix(in srgb,var(--ktr-accent) 9%,var(--ktr-paper));border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}

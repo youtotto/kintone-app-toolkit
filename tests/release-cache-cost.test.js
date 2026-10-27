@@ -15,7 +15,7 @@ async function settle(response, { kind = 'ask', gateway = false, failure = false
   const budget = B.create({ storage: store, session: storage(), host: 'cache.test', locks: null, sessionId: 'offline' });
   await budget.configure({ limitUsd: 20, maxCalls: 20 });
   const limits = { features: { [B.FEATURE_OF[kind]]: { model } },
-    ...(gateway ? { budgetAllowance: { version: 1, models: ['gpt-6.1-sol', 'gpt-6.1-terra'] } } : {}) };
+    ...(gateway ? { budgetAllowance: { version: 1, models: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'] } } : {}) };
   const client = budget.wrap({ [kind]: async () => {
     if (failure) throw Object.assign(new Error('upstream'), { code: 'UPSTREAM_ERROR', details: { error: { budget: response.budgetMeta } } });
     return response;
@@ -65,11 +65,11 @@ for (const failure of [false, true]) test((failure ? '失敗' : '成功') + 'で
   assert.equal(entry.gatewayCalls[0].model, 'gpt-6.1-sol');
 });
 
-test('SolとTerraでGatewayとToolkitが同じusageを同じ金額・未確定として扱う', async () => {
+test('Sol・Terra・LunaでGatewayとToolkitが同じusageを同じ金額・未確定として扱う', async () => {
   const path = require('node:path'), { pathToFileURL } = require('node:url');
   const aiRoot = process.env.KT_AI_REPO || path.resolve(__dirname, '../../AI');
   const { costMicroOf, priceOf } = await import(pathToFileURL(path.join(aiRoot, 'worker/src/v2/budget.mjs')).href);
-  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-terra-2026-10-27']) for (const usage of [complete, raw(272000, 100), raw(272001, 100), raw(800, 10, 200, 500, 500, 0),
+  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-terra-2026-10-27', 'gpt-6-luna', 'gpt-6-luna-2026-10-27']) for (const usage of [complete, raw(272000, 100), raw(272001, 100), raw(800, 10, 200, 500, 500, 0),
     { input_tokens: 1000, output_tokens: 100 }, raw(1000, 100, 900, 200, 200, 0),
     { ...raw(1000, 100), output_tokens_details: { reasoning_tokens: 101 } },
     { ...raw(1000, 100), input_tokens: '1000' },
@@ -88,7 +88,7 @@ test('予約はキャッシュ命中の割引を当てにしない', () => {
 
 test('healthのTerra設定を相談・仮案の見積もりと上限強制に使い、計画・生成と既定はSolのまま', () => {
   const limits = { features: { 'assistant-qa': { model: 'gpt-6.1-terra', maxOutputTokens: 4000, maxAiCalls: 1 } },
-    budgetAllowance: { version: 1, models: ['gpt-6.1-sol', 'gpt-6.1-terra'] } };
+    budgetAllowance: { version: 1, models: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'] } };
   for (const kind of ['ask', 'propose']) {
     const base = B.estimate({ kind, ctxBytes: 0 }), terra = B.estimate({ kind, ctxBytes: 0, limits });
     assert.equal(base.model, 'gpt-6.1-sol'); assert.equal(terra.model, 'gpt-6.1-terra'); assert.equal(terra.ok, true);
@@ -128,12 +128,12 @@ test('Terraは通常・読取・保持期間別書込の単価と長文境界で
 
 test('明示した相談・資料の用途をhealthから選び、見積もりと上限強制を同じモデルにそろえる', async () => {
   const { KTAiClient: Client } = require('./helpers/load-toolkit.js').loadToolkit();
-  const advertised = { model: 'gpt-6.1-sol', modelsByPurpose: { consultation: 'gpt-6.1-terra', document: 'gpt-6.1-sol' }, maxOutputTokens: 4000, maxAiCalls: 1 };
+  const advertised = { model: 'gpt-6.1-sol', modelsByPurpose: { consultation: 'gpt-6.1-terra', document: 'gpt-6.1-sol', ideation: 'gpt-6-luna' }, maxOutputTokens: 4000, maxAiCalls: 1 };
   const limits = Client.limitsFromHealth({ limits: { version: 1, features: { 'toolkit.assistant-qa': advertised },
-    deadlineMs: { 'toolkit.assistant-qa': 30000 }, budgetAllowance: { version: 1, models: ['gpt-6.1-terra', 'gpt-6.1-sol'] } } });
+    deadlineMs: { 'toolkit.assistant-qa': 30000 }, budgetAllowance: { version: 1, models: ['gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-luna'] } } });
   const ctx = requestPurpose => ({ question: '同じ依頼文', requestPurpose });
   for (const kind of ['ask', 'propose']) {
-    for (const [purpose, model] of [['consultation', 'gpt-6.1-terra'], ['document', 'gpt-6.1-sol'], [undefined, 'gpt-6.1-sol']]) {
+    for (const [purpose, model] of [['consultation', 'gpt-6.1-terra'], ['document', 'gpt-6.1-sol'], ['ideation', 'gpt-6-luna'], [undefined, 'gpt-6.1-sol']]) {
       assert.equal(B.estimate({ kind, ctx: ctx(purpose), ctxBytes: 0, limits }).model, model);
       assert.equal(B.gatewayBound({ kind, ctx: ctx(purpose), bodyBytes: 0, limits }).model, model);
       assert.equal(B.enforcementOf(limits, kind, ctx(purpose)), 'gateway');
@@ -164,4 +164,19 @@ for (const failure of [false, true]) test('Terraの' + (failure ? '失敗' : '�
 test('Terraを見積もった後に高いモデルが返れば、従来どおり追加送信を止める', async () => {
   const { entry, summary } = await settle({ ai: { model: 'gpt-6.1-sol', usage: complete } }, { model: 'gpt-6.1-terra' });
   assert.equal(summary.stopped.reason, 'model'); assert.equal(entry.costUsd, null); assert.ok(entry.reservedUsd > 0);
+});
+
+test('Lunaも通常・cache保持期間・長文料金を内訳どおり精算する', async () => {
+ for(const [usage,cost] of [[raw(1000,100),0.00015],[complete,0.000162],[raw(272000,100),0.02725],[raw(272001,100),0.054476]]){
+  const {entry,summary}=await settle({ai:{model:'gpt-6-luna',usage}},{model:'gpt-6-luna'});
+  assert.equal(entry.costUsd,cost);assert.equal(entry.costComplete,true);assert.equal(entry.reservedUsd,0);assert.equal(summary.stopped,null);
+ }
+ const {entry}=await settle({ai:{model:'gpt-6-luna',usage:{input_tokens:1000,output_tokens:100}}},{model:'gpt-6-luna'});
+ assert.equal(entry.costUsd,null);assert.ok(entry.reservedUsd>0);
+});
+test('Lunaの実費・推論token・cache内訳を記録し、モデル変更の費用をごまかさない',async()=>{
+ const usage={inputTokens:1000,outputTokens:100,cachedTokens:400,cacheWriteTokens:400,cacheWriteTokens30m:100,cacheWriteTokens12h:300,reasoningTokens:40};
+ const {entry}=await settle({budgetMeta:{spentUsd:0.000162,complete:true,calls:[{kind:'qa',model:'gpt-6-luna',boundUsd:0.1,costUsd:0.000162,usage}]}},{model:'gpt-6-luna',gateway:true});
+ assert.equal(entry.costUsd,0.000162);assert.equal(entry.gatewayCalls[0].model,'gpt-6-luna');assert.equal(entry.calls[0].reasoning,40);assert.equal(entry.calls[0].cacheWrite12h,300);
+ const changed=await settle({ai:{model:'gpt-6.1-terra',usage:complete}},{model:'gpt-6-luna'});assert.equal(changed.summary.stopped.reason,'model');
 });
