@@ -1,4 +1,4 @@
-/* Saved settings -> one current environment. Structural comparison stays in
+/* Current production settings -> saved settings. Structural comparison stays in
  * Config Lens; imported files never become execution plans or AI requests. */
 'use strict';
 const KTReleaseSettingsCompare = (() => {
@@ -93,21 +93,21 @@ const KTReleaseSettingsCompare = (() => {
     return copies;
   }
   function compare(document, base, options = {}) {
-    const current = Export.create(base, { environment: options.environment, domain: options.domain }).document;
+    const current = Export.create(base, { environment: 'production', domain: options.domain }).document;
     const crossApp = document.source.domain.toLowerCase() !== current.source.domain.toLowerCase() || document.source.appId !== current.source.appId;
     const source = { comparisonType: 'saved-settings', appId: current.source.appId, loadedAt: current.source.capturedAt,
-      before: { ...document.source }, after: { ...current.source }, savedAt: document.savedAt, crossApp,
-      beforeLabel: '保存ファイル（' + LABELS[document.source.environment] + '）',
-      afterLabel: '現在のアプリ（' + LABELS[current.source.environment] + '）' };
+      before: { ...current.source }, after: { ...document.source }, savedAt: document.savedAt, crossApp,
+      beforeLabel: '現在の運用環境',
+      afterLabel: '保存ファイル（' + LABELS[document.source.environment] + '）' };
     const categories = Lens.CATEGORIES.map(category => {
       const key = Diff.SOURCE_KEYS[category.id];
-      const beforeCoverage = document.coverage.find(row => row.id === category.id);
-      const afterCoverage = current.coverage.find(row => row.id === category.id);
-      const before = document.settings[key], after = current.settings[key];
+      const beforeCoverage = current.coverage.find(row => row.id === category.id);
+      const afterCoverage = document.coverage.find(row => row.id === category.id);
+      const before = current.settings[key], after = document.settings[key];
       const unavailable = warnings => ({ id: category.id, label: category.label, status: 'unavailable', warnings, entries: [] });
       const missing = [];
-      if (!beforeCoverage || beforeCoverage.status === 'unavailable' || !before) missing.push('保存ファイルに「' + category.label + '」の取得済み設定がないため比較していません。');
-      if (!afterCoverage || afterCoverage.status === 'unavailable' || !after) missing.push('現在のアプリの「' + category.label + '」を取得できていないため比較していません。');
+      if (!beforeCoverage || beforeCoverage.status === 'unavailable' || !before) missing.push('現在の運用環境の「' + category.label + '」を取得できていないため比較していません。');
+      if (!afterCoverage || afterCoverage.status === 'unavailable' || !after) missing.push('保存ファイルに「' + category.label + '」の取得済み設定がないため比較していません。');
       if (missing.length) return unavailable(missing);
       try {
         Lens.validateResponse(category, before); Lens.validateResponse(category, after);
@@ -142,7 +142,7 @@ const KTReleaseSettingsCompare = (() => {
       categoryId: category.id, label: category.label, status: category.status, reasons: category.warnings
     }));
     const limitations = [
-      '保存ファイルを左、現在のアプリの取得済み設定を右に表示します。設定の変更や復元は行いません。',
+      '現在の運用環境の取得済み設定を左、保存ファイルを右に表示します。設定の変更や復元は行いません。',
       'フィールドはフィールドコードで比較します。コードが変わった項目は削除・追加として表示し、同じ項目かどうかは推定しません。',
       'JavaScript・CSS・アイコンは登録情報だけが対象です。ファイル本体やURL先の内容、プラグイン内部の設定は比較していません。',
       'カテゴリー、言語別の名称、Webhook、APIトークン、レコードの内容と実際の動作は比較していません。',

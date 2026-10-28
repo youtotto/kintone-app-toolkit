@@ -6,7 +6,7 @@ const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
 const { KTReleaseSettingsExport: Export } = require('../src/release-settings-export.js');
 const root = path.resolve(__dirname, '..'), clone = value => JSON.parse(JSON.stringify(value));
 
-test('保存→ファイル比較→環境切替・再読込を無料で行い、別アプリ・未取得・競合を混ぜない', { timeout: 120000 }, async () => {
+test('運用環境を左に固定し、同じ画面で動作テストと保存ファイルを選んで比較する', { timeout: 120000 }, async () => {
   let pw; try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
   catch { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
   const prod = { appId: '398', appName: '現在の運用アプリ', settings: { name: '現在の運用アプリ', description: '' },
@@ -17,10 +17,10 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
   const prev = clone(prod);
   prev.appName = '現在の動作テストアプリ'; prev.settings.name = '現在の動作テストアプリ';
   const T = loadToolkit(), calls = [], unexpected = [], errors = [], downloads = [];
-  let revision = '2', hold = false, releaseRead, failCurrent = false;
+  let revision = '2', productionRevision = '1', hold = false, releaseRead, failCurrent = false;
   const load = async () => {
-    const get = makeEnvGetter({ production: prod, preview: prev, revisions: { production: '1', preview: revision },
-      fail: failCurrent ? { 'preview:app/views': new Error('fixture unavailable') } : {} });
+    const get = makeEnvGetter({ production: prod, preview: prev, revisions: { production: productionRevision, preview: revision },
+      fail: failCurrent ? { 'production:app/views': new Error('fixture unavailable') } : {} });
     const result = await T.KTDevBase.loadForRelease({ appId: '398', ...get });
     calls.push(...get.calls);
     if (hold) { hold = false; await new Promise(resolve => { releaseRead = resolve; }); }
@@ -30,6 +30,8 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
   original.document.settings.settings.name = '保存時のアプリ';
   original.document.source.capturedAt = '2026-10-01T02:03:04.000Z';
   original.document.savedAt = '2026-10-02T03:04:05.000Z';
+  original.document.settings.fields.properties.memo.required = true;
+  original.document.settings.fields.properties.archived = { type: 'SINGLE_LINE_TEXT', code: 'archived', label: '保存ファイルだけの項目', required: false };
   original.text = JSON.stringify(original.document);
   prev.fields.memo.required = true;
   prev.fields.deadline = { type: 'DATE', code: 'deadline', label: '確認期限', required: false };
@@ -77,17 +79,27 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
     };
     const category = async id => { await pane().locator('[data-cl-category="' + id + '"]').click(); return pane().locator('[data-cl-result-category="' + id + '"]'); };
 
-    assert.match(await visibleOrigin('before'), /左：運用環境/);
+
+    const target = () => origin('after').locator('[data-cl-target]');
+    assert.deepEqual(await target().locator('option').evaluateAll(nodes => nodes.map(el => el.value)), ['preview', 'file'], '比較相手は動作テストと保存ファイルの2種類だけ');
+    assert.equal(await pane().locator('[data-cl-environment],[data-cl-action="environment-mode"]').count(), 0, '別画面へ戻る操作や保存ファイル対動作テストの選択を置かない');
+    assert.match(await visibleOrigin('before'), /左.*運用環境/);
     assert.match(await origin('before').innerText(), /現在の運用アプリ/);
-    assert.match(await visibleOrigin('after'), /右：動作テスト環境/);
-    assert.match(await origin('after').innerText(), /現在の動作テストアプリ/);
+    assert.match(await visibleOrigin('after'), /現在の動作テストアプリ/);
     await action('save-production').click(); await ready();
     assert.equal(downloads.length, 1);
     assert.equal(downloads[0].document.source.appId, '398');
     const readCount = calls.length;
+    await target().selectOption('file');
+    assert.equal(await pane().locator('[data-cl-category]').count(), 0, 'ファイル未選択の結果に環境間の差を残さない');
+    assert.match(await visibleOrigin('before'), /現在の運用アプリ/);
+    assert.match(await visibleOrigin('after'), /ファイル/);
+    assert.equal(await origin('after').locator('[data-cl-action="open-file"]').isVisible(), true);
+    assert.equal(await action('explain').isDisabled(), true);
+    await upload(downloads[0].document, 'fresh-production.json');
+    assert.match(await pane().locator('[data-cl-summary]').innerText(), /変更はありません/, '保存した運用設定を運用と比較すれば差はない');
     await upload(original.document);
-    const savedOrigin = await visibleOrigin('before');
-    assert.match(savedOrigin, /左：保存した設定/);
+    const savedOrigin = await visibleOrigin('after');
     assert.match(savedOrigin, /保存時のアプリ/);
     assert.match(savedOrigin, /fixture.cybozu.com/);
     assert.match(savedOrigin, /アプリ 398/);
@@ -95,30 +107,39 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
     assert.match(savedOrigin, /old-settings.json/);
     assert.match(savedOrigin, /取得[\s\S]*2026[/-]10[/-]0?1/);
     assert.match(savedOrigin, /保存[\s\S]*2026[/-]10[/-]0?2/);
-    assert.deepEqual(await origin('before').locator('time').evaluateAll(nodes => nodes.map(el => el.getAttribute('datetime'))), ['2026-10-01T02:03:04.000Z', '2026-10-02T03:04:05.000Z'], '設定取得とファイル保存の日時を取り違えない');
-    const currentOrigin = await visibleOrigin('after');
-    assert.match(currentOrigin, /右：現在のアプリ設定/);
-    assert.match(currentOrigin, /現在の動作テストアプリ/);
+    assert.deepEqual(await origin('after').locator('time').evaluateAll(nodes => nodes.map(el => el.getAttribute('datetime'))), ['2026-10-01T02:03:04.000Z', '2026-10-02T03:04:05.000Z'], '設定取得とファイル保存の日時を取り違えない');
+    const currentOrigin = await visibleOrigin('before');
+    assert.match(currentOrigin, /左.*運用環境/);
+    assert.match(currentOrigin, /現在の運用アプリ/);
     assert.match(currentOrigin, /fixture.cybozu.com/);
     assert.match(currentOrigin, /アプリ 398/);
     assert.match(currentOrigin, /取得/);
-    assert.equal(await origin('after').locator('[data-cl-environment]').count(), 1, '比較先の選択は右側の設定に属する');
     assert.equal(calls.length, readCount, '取得済み設定とファイルの比較は再取得を伴わない');
     assert.equal(await action('explain').isDisabled(), true, '保存ファイルを通常のAI比較へ流さない');
     let fields = await category('fields');
     assert.equal(await fields.locator('.ktcl-entry').count(), 2);
     await fields.locator('.ktcl-entry > summary').first().click();
-    assert.match(await fields.innerText(), /左：保存した設定（運用環境）/);
-    assert.match(await fields.innerText(), /右：現在のアプリ設定（動作テスト環境）/);
-    await pane().locator('[data-cl-environment]').selectOption('production');
-    assert.match(await visibleOrigin('after'), /現在の運用アプリ/);
-    assert.doesNotMatch(await origin('after').innerText(), /現在の動作テストアプリ/);
-    assert.match(await visibleOrigin('before'), /保存時のアプリ/);
-    fields = await category('fields');
-    assert.equal(await fields.locator('.ktcl-entry').count(), 0);
-    assert.match(await fields.innerText(), /変更はありません/);
-    await pane().locator('[data-cl-environment]').selectOption('preview');
+    const table = fields.locator('table').first();
+    assert.match(await table.locator('thead').innerText(), /左.*運用環境[\s\S]*右.*保存/);
+    assert.deepEqual(await table.locator('tbody tr').first().locator('td').allTextContents(), ['いいえ', 'はい'], '運用が左、保存ファイルが右で値を逆転させない');
+    await pane().locator('[data-cl-kind="added"]').click();
+    assert.match(await pane().locator('[data-cl-result-category="fields"]').innerText(), /保存ファイルだけの項目/);
+    assert.doesNotMatch(await pane().locator('[data-cl-result-category="fields"]').innerText(), /確認期限/);
+    const beforeSwitch = calls.length;
+    await target().selectOption('preview');
+    assert.equal(await pane().locator('[data-cl-category="fields"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await pane().locator('[data-cl-kind="added"]').getAttribute('aria-pressed'), 'true');
+    assert.match(await visibleOrigin('before'), /現在の運用アプリ/);
     assert.match(await visibleOrigin('after'), /現在の動作テストアプリ/);
+    assert.match(await pane().locator('[data-cl-result-category="fields"]').innerText(), /確認期限/);
+    assert.equal(await action('explain').isDisabled(), false);
+    await target().selectOption('file');
+    assert.equal(await pane().locator('[data-cl-category="fields"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await pane().locator('[data-cl-kind="added"]').getAttribute('aria-pressed'), 'true');
+    assert.match(await visibleOrigin('after'), /old-settings.json/);
+    assert.match(await pane().locator('[data-cl-result-category="fields"]').innerText(), /保存ファイルだけの項目/);
+    assert.equal(calls.length, beforeSwitch, '比較相手の切替だけでは再取得しない');
+    await pane().locator('[data-cl-kind="all"]').click();
     await action('save-preview').click(); await ready();
     assert.equal(downloads[1].document.source.environment, 'preview');
     assert.equal(downloads[1].document.settings.fields.properties.memo.required, true, '保存ファイルではなく現在設定を再保存する');
@@ -131,11 +152,11 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
     other.coverage.find(row => row.id === 'layout').status = 'unavailable';
     await upload(other, '<saved>.json');
     assert.equal(await pane().locator('[data-cl-cross-app]').count(), 1);
-    assert.match(await visibleOrigin('before'), /別アプリの保存設定/);
-    assert.match(await origin('before').innerText(), /other.cybozu.com/);
-    assert.match(await origin('before').innerText(), /アプリ 900/);
-    assert.match(await visibleOrigin('after'), /現在の動作テストアプリ/);
-    assert.match(await origin('after').innerText(), /アプリ 398/);
+    assert.match(await visibleOrigin('after'), /別アプリの保存設定/);
+    assert.match(await origin('after').innerText(), /other.cybozu.com/);
+    assert.match(await origin('after').innerText(), /アプリ 900/);
+    assert.match(await visibleOrigin('before'), /現在の運用アプリ/);
+    assert.match(await origin('before').innerText(), /アプリ 398/);
     assert.match(await (await category('views')).innerText(), /変更はありません/);
     assert.match(await (await category('layout')).innerText(), /比較できていません/);
     const notes = await category('notes'); await notes.locator('summary').click();
@@ -164,36 +185,37 @@ test('保存→ファイル比較→環境切替・再読込を無料で行い�
     await upload(original.document);
     assert.equal(await pane().locator('[data-cl-cross-app]').count(), 0);
     failCurrent = true; await action('refresh').click(); await ready();
-    assert.match(await (await category('views')).innerText(), /現在のアプリ.*取得できていない/);
+    assert.match(await (await category('views')).innerText(), /現在.*取得できていない/);
     assert.equal(await pane().locator('.ktcl-filename').innerText(), 'old-settings.json');
 
     // An invalidated delayed acquisition must not be published after a tab
     // switch. The selected file survives and compares against the next read.
-    const previousCapturedAt = await origin('after').locator('time').getAttribute('datetime');
+
+    const previousCapturedAt = await origin('before').locator('time').getAttribute('datetime');
     failCurrent = false; hold = true; releaseRead = null;
     await action('refresh').click();
     while (!releaseRead) await new Promise(resolve => setTimeout(resolve, 10));
-    assert.match(await visibleOrigin('before'), /保存時のアプリ/);
-    assert.doesNotMatch(await visibleOrigin('after'), /現在の動作テストアプリ/, '再取得中に前の取得情報を現在の情報として表示しない');
-    assert.equal(await origin('after').locator('time[datetime="' + previousCapturedAt + '"]').count(), 0);
+    assert.match(await visibleOrigin('after'), /保存時のアプリ/);
+    assert.doesNotMatch(await visibleOrigin('before'), /現在の運用アプリ/, '再取得中に前の取得情報を現在の情報として表示しない');
+    assert.equal(await origin('before').locator('time[datetime="' + previousCapturedAt + '"]').count(), 0);
     await page.evaluate(() => { visible = false; lens.markStale(); });
-    revision = '3'; releaseRead(); await ready();
+    productionRevision = '3'; releaseRead(); await ready();
     assert.equal(await pane().locator('[data-cl-category]').count(), 0);
-    assert.doesNotMatch(await visibleOrigin('after'), /現在の動作テストアプリ/);
-    assert.equal(await origin('after').locator('time[datetime="' + previousCapturedAt + '"]').count(), 0);
+    assert.doesNotMatch(await visibleOrigin('before'), /現在の運用アプリ/);
+    assert.equal(await origin('before').locator('time[datetime="' + previousCapturedAt + '"]').count(), 0);
     await page.evaluate(() => { visible = true; return lens.onVisible(); }); await ready();
-    assert.match(await visibleOrigin('after'), /現在の動作テストアプリ/);
+    assert.match(await visibleOrigin('before'), /現在の運用アプリ/);
     await pane().locator('.ktcl-provenance > summary').click();
-    assert.match(await pane().locator('.ktcl-provenance').innerText(), /設定の版：左 1 ／ 右 3/);
+    assert.match(await pane().locator('.ktcl-provenance').innerText(), /設定の版：左 3 ／ 右 1/);
     await pane().locator('.ktcl-provenance > summary').click();
     assert.equal(await pane().locator('.ktcl-filename').innerText(), 'old-settings.json');
-    await action('environment-mode').click();
+    await target().selectOption('preview');
     assert.equal(await pane().locator('[data-cl-file-comparison]').count(), 0);
     assert.equal(await action('explain').isDisabled(), false);
-    assert.match(await visibleOrigin('before'), /左：運用環境/);
-    assert.match(await origin('before').innerText(), /現在の運用アプリ/);
-    assert.match(await visibleOrigin('after'), /右：動作テスト環境/);
-    assert.match(await origin('after').innerText(), /現在の動作テストアプリ/);
+    assert.match(await visibleOrigin('before'), /現在の運用アプリ/);
+    assert.match(await visibleOrigin('after'), /現在の動作テストアプリ/);
+    await target().selectOption('file');
+    assert.match(await visibleOrigin('after'), /old-settings.json/, '別の比較相手を選んでも保存ファイルを保持');
 
     // Late file text must not restore a selection invalidated during reading.
     await page.evaluate(() => {

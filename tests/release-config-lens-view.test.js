@@ -19,6 +19,7 @@ function comparison() {
 }
 const render = (extra = {}) => View.render({result:comparison(),localEdits:{available:true,files:[]},canSaveProduction:true,canSavePreview:true,...extra});
 const tagOf = (html,selector) => html.match(new RegExp('<button[^>]*'+selector+'[^>]*>'))?.[0];
+const originOf = (html, side) => html.match(new RegExp('<section[^>]*data-cl-origin="' + side + '"[\\s\\S]*?<\/section>'))?.[0];
 
 test('独立タブは比較・AI説明・環境別保存を分け、運用から動作テストへの左右を表示する', () => {
   const html = render();
@@ -31,8 +32,12 @@ test('独立タブは比較・AI説明・環境別保存を分け、運用から
   assert.match(html,/確認できた変更 4件/);
   assert.match(html,/2分類に変更/);
   assert.match(html,/1分類に未確認の範囲/);
-  assert.match(html,/<th scope="col">設定項目<\/th><th scope="col">左：運用環境<\/th><th scope="col">右：動作テスト環境<\/th>/);
+  assert.match(html,/<th scope="col">設定項目<\/th><th scope="col">左：現在の運用環境<\/th><th scope="col">右：動作テスト環境<\/th>/);
   assert.match(html,/設定の版：左 1 ／ 右 2/);
+  assert.match(originOf(html,'after'),/data-cl-target/);
+  assert.match(originOf(html,'after'),/value="preview" selected/);
+  assert.match(originOf(html,'after'),/value="file"/);
+  assert.doesNotMatch(html,/data-cl-environment|data-cl-action="environment-mode"/);
   assert.doesNotMatch(html,/data-release-action="send"|data-cl-action="apply"|data-cl-action="restore"/);
 });
 
@@ -160,30 +165,32 @@ function savedComparison(crossApp = false) {
   const result = comparison();
   result.source = {
     comparisonType: 'saved-settings', crossApp,
-    beforeLabel: '保存ファイル（運用環境）', afterLabel: '現在のアプリ（運用環境）',
-    before: { domain: 'saved.cybozu.com', appId: '398', environment: 'production', revision: '7', capturedAt: '2026-10-20T01:00:00Z' },
-    after: { domain: crossApp ? 'current.cybozu.com' : 'saved.cybozu.com', appId: crossApp ? '399' : '398', environment: 'production', revision: '12', capturedAt: '2026-10-28T01:00:00Z' }
+    beforeLabel: '現在の運用環境', afterLabel: '保存ファイル（運用環境）',
+    before: { domain: crossApp ? 'current.cybozu.com' : 'saved.cybozu.com', appId: crossApp ? '399' : '398', environment: 'production', revision: '12', capturedAt: '2026-10-28T01:00:00Z' },
+    after: { domain: 'saved.cybozu.com', appId: '398', environment: 'production', revision: '7', capturedAt: '2026-10-20T01:00:00Z' }
   };
   return result;
 }
 
 test('保存ファイルと現在アプリの比較は左右の出所・日時・保存対象を区別する', () => {
-  const result = savedComparison(), savedFile = { filename: 'settings-old.json', source: result.source.before };
+  const result = savedComparison(), savedFile = { filename: 'settings-old.json', source: result.source.after };
   const before = clone({ result, savedFile });
-  const html = render({ result, savedFile, targetEnvironment: 'production' });
+  const html = render({ result, savedFile, comparisonTarget: 'file' });
   assert.match(html, /data-cl-action="open-file"/);
   assert.match(html, /<input type="file" data-cl-file accept="\.json,application\/json"[^>]* hidden/);
   assert.match(html, /data-cl-file-comparison/);
   assert.match(html, /settings-old\.json/);
-  assert.match(html, /value="production" selected/);
-  assert.match(html, /data-cl-action="environment-mode"/);
-  assert.match(html, /<th scope="col">左：保存した設定（運用環境）<\/th><th scope="col">右：現在のアプリ設定（運用環境）<\/th>/);
+  assert.match(originOf(html,'after'), /value="file" selected/);
+  assert.match(originOf(html,'after'), /data-cl-action="open-file"/);
+  assert.doesNotMatch(originOf(html,'before'), /settings-old\.json|data-cl-action="open-file"/);
+  assert.doesNotMatch(html, /data-cl-environment|data-cl-action="environment-mode"/);
+  assert.match(html, /<th scope="col">左：現在の運用環境<\/th><th scope="col">右：保存した設定（運用環境）<\/th>/);
   assert.match(html, /アプリ 398 ・ saved\.cybozu\.com/);
-  assert.match(html, /設定の版：左 7 ／ 右 12/);
+  assert.match(html, /設定の版：左 12 ／ 右 7/);
   assert.match(html, /datetime="2026-10-20T01:00:00Z"/);
   assert.match(html, /datetime="2026-10-28T01:00:00Z"/);
-  assert.match(html, /現在の運用環境を保存/);
-  assert.match(html, /現在の動作テスト環境を保存/);
+  assert.match(html, /data-cl-action="save-production"[^>]*>運用環境を保存<\/button>/);
+  assert.match(html, /data-cl-action="save-preview"[^>]*>動作テスト環境を保存<\/button>/);
   assert.match(html, /追加・変更・削除は左から右への違い/);
   assert.doesNotMatch(html, /data-cl-cross-app|data-cl-action="restore"|data-cl-action="apply"/);
   assert.deepEqual({ result, savedFile }, before);
@@ -191,7 +198,7 @@ test('保存ファイルと現在アプリの比較は左右の出所・日時�
 
 test('別アプリの比較は履歴と区別し、同名項目の照合と両方のアプリを示す', () => {
   const result = savedComparison(true);
-  const html = render({ result, savedFile: { filename: 'other-app.json', source: result.source.before }, targetEnvironment: 'production' });
+  const html = render({ result, savedFile: { filename: 'other-app.json', source: result.source.after }, comparisonTarget: 'file' });
   assert.match(html, /data-cl-cross-app/);
   assert.match(html, /変更履歴ではありません/);
   assert.match(html, /一覧・グラフ・アプリアクションは同じ名前で照合/);
@@ -205,11 +212,11 @@ test('別アプリの比較は履歴と区別し、同名項目の照合と両�
 
 test('保存ファイルの読込中は比較・保存・環境選択を止め、選択したファイルは表示する', () => {
   const result = savedComparison();
-  const html = render({ result, savedFile: { filename: 'loading.json', source: result.source.before }, importing: true });
-  for (const action of ['refresh','explain','open-file','save-production','save-preview','environment-mode']) {
+  const html = render({ result, savedFile: { filename: 'loading.json', source: result.source.after }, importing: true });
+  for (const action of ['refresh','explain','open-file','save-production','save-preview']) {
     assert.match(tagOf(html, 'data-cl-action="' + action + '"'), / disabled/);
   }
-  assert.match(html, /<select data-cl-environment disabled/);
+  assert.match(html, /<select[^>]*data-cl-target[^>]* disabled/);
   assert.match(html, /<input type="file"[^>]* disabled/);
   assert.match(html, /保存ファイルを読み込んでいます…/);
   assert.match(html, /loading\.json/);
@@ -224,30 +231,32 @@ test('保存ファイル名・取得元・環境の表示でファイル内のHT
   for (const value of [result.source.before, result.source.after]) {
     value.domain = attack; value.appId = attack; value.capturedAt = attack; value.revision = attack;
   }
-  const html = render({ result, savedFile: { filename: attack, source: result.source.before } });
+  const html = render({ result, savedFile: { filename: attack, source: result.source.after } });
   assert.doesNotMatch(html, /<img|onerror="alert/);
   assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
 });
 
 test('保存したアプリと現在のアプリは個別の名前・環境・取得日時を示し、保存日時と混ぜない', () => {
   const result = savedComparison(true), savedFile = {
-    filename: 'before.json', source: result.source.before, appName: '保存時の見積管理', savedAt: '2026-10-21T02:00:00Z'
+    filename: 'before.json', source: result.source.after, appName: '保存時の見積管理', savedAt: '2026-10-21T02:00:00Z'
   };
-  const currentSources = { production: { ...result.source.after, appName: '今の請求管理' } };
-  const html = render({ result, savedFile, currentSources, targetEnvironment:'production' });
-  const left = html.match(/<section[^>]*data-cl-origin="before"[\s\S]*?<\/section>/)[0];
-  const right = html.match(/<section[^>]*data-cl-origin="after"[\s\S]*?<\/section>/)[0];
-  assert.match(left, /保存時の見積管理/);
-  assert.match(left, /アプリ 398 ・ saved\.cybozu\.com/);
-  assert.match(left, /設定の取得：[\s\S]*datetime="2026-10-20T01:00:00Z"/);
-  assert.match(left, /ファイル保存：[\s\S]*datetime="2026-10-21T02:00:00Z"/);
-  assert.match(right, /今の請求管理/);
-  assert.match(right, /アプリ 399 ・ current\.cybozu\.com/);
-  assert.match(right, /datetime="2026-10-28T01:00:00Z"/);
-  assert.doesNotMatch(left, /今の請求管理/); assert.doesNotMatch(right, /保存時の見積管理|ファイル保存/);
-  assert.ok(html.indexOf(left) < html.indexOf('<details'), '比較元は詳細を開かずに確認できる配置');
-  assert.doesNotMatch(render({result:null,savedFile,reading:true}),/今の請求管理/);
-  assert.match(render({result:null,savedFile,reading:true}),/アプリ情報は未取得/);
+  const currentSources = { production: { ...result.source.before, appName: '今の請求管理' } };
+  const html = render({ result, savedFile, currentSources, comparisonTarget:'file' });
+  const left = originOf(html,'before'), right = originOf(html,'after');
+  assert.match(left, /今の請求管理/);
+  assert.match(left, /アプリ 399 ・ current\.cybozu\.com/);
+  assert.match(left, /datetime="2026-10-28T01:00:00Z"/);
+  assert.match(right, /保存時の見積管理/);
+  assert.match(right, /アプリ 398 ・ saved\.cybozu\.com/);
+  assert.match(right, /設定の取得：[\s\S]*datetime="2026-10-20T01:00:00Z"/);
+  assert.match(right, /ファイル保存：[\s\S]*datetime="2026-10-21T02:00:00Z"/);
+  assert.doesNotMatch(left, /保存時の見積管理|ファイル保存/); assert.doesNotMatch(right, /今の請求管理/);
+  assert.ok(html.indexOf(left) < html.indexOf('<details'), '現在側は詳細を開かずに確認できる配置');
+  assert.ok(html.indexOf(right) < html.indexOf('<details'), '保存側も詳細を開かずに確認できる配置');
+  const reading = render({result:null,savedFile,comparisonTarget:'file',reading:true});
+  assert.doesNotMatch(reading,/今の請求管理/);
+  assert.match(originOf(reading,'before'),/アプリ情報は未取得/);
+  assert.match(originOf(reading,'after'),/保存時の見積管理/);
 });
 
 test('環境間のアプリ名を混ぜず、未取得の名前をファイル名や他環境から推測しない', () => {
@@ -256,14 +265,41 @@ test('環境間のアプリ名を混ぜず、未取得の名前をファイル�
     preview: {appId:'398', domain:'test.cybozu.com', environment:'preview', appName:'変更予定の名前'}
   };
   const html = render({currentSources});
-  assert.match(html, /左：運用環境[\s\S]*公開中の名前[\s\S]*右：動作テスト環境[\s\S]*変更予定の名前/);
-  assert.match(render({savedFile:{filename:'アプリ名ではない.json',source:savedComparison().source.before},result:null}), /アプリ名は未取得/);
+  assert.match(html, /左：現在の運用環境[\s\S]*公開中の名前[\s\S]*右：比較する設定[\s\S]*変更予定の名前/);
+  assert.match(render({savedFile:{filename:'アプリ名ではない.json',source:savedComparison().source.after},result:null,comparisonTarget:'file'}), /アプリ名は未取得/);
 });
 
 test('常時表示するアプリ名と保存日時もHTMLとして解釈しない', () => {
   const attack='<img src=x onerror="alert(1)">',result=savedComparison();
-  const html=render({result,savedFile:{filename:attack,source:result.source.before,appName:attack,savedAt:attack},
-    currentSources:{preview:{...result.source.after,appName:attack}}});
+  const html=render({result,savedFile:{filename:attack,source:result.source.after,appName:attack,savedAt:attack},
+    currentSources:{production:{...result.source.before,appName:attack}}});
   assert.doesNotMatch(html,/<img|onerror="alert/);
   assert.match(html,/&lt;img/);
+});
+
+
+test('保存ファイルを保持していても比較先が動作テスト環境なら保存側を混ぜない', () => {
+  const fileResult=savedComparison(),savedFile={filename:'held.json',source:fileResult.source.after,appName:'保存時の名前'};
+  const currentSources={
+    production:{...fileResult.source.before,appName:'公開中の名前'},
+    preview:{...fileResult.source.before,environment:'preview',appName:'動作テストの名前'}
+  };
+  const html=render({savedFile,currentSources,comparisonTarget:'preview'});
+  const left=originOf(html,'before'),right=originOf(html,'after');
+  assert.match(left,/左：現在の運用環境[\s\S]*公開中の名前/);
+  assert.match(right,/右：比較する設定[\s\S]*動作テストの名前/);
+  assert.match(right,/value="preview" selected/);
+  assert.doesNotMatch(html,/held\.json|保存時の名前|data-cl-file-comparison/);
+  assert.doesNotMatch(tagOf(html,'data-cl-action="explain"'),/ disabled/);
+});
+
+test('保存ファイルが未選択なら比較前と表示し、変更なしの結果や古いファイルにしない', () => {
+  const currentSources={production:{domain:'current.cybozu.com',appId:'399',environment:'production',appName:'今のアプリ'}};
+  const html=View.render({result:null,comparisonTarget:'file',currentSources,localEdits:{available:true,files:[]}});
+  assert.match(originOf(html,'before'),/左：現在の運用環境[\s\S]*今のアプリ/);
+  assert.match(originOf(html,'after'),/保存した設定ファイルを選んでください。/);
+  assert.match(originOf(html,'after'),/value="file" selected/);
+  assert.match(originOf(html,'after'),/data-cl-action="open-file"/);
+  assert.doesNotMatch(html,/比較できた範囲に変更はありません|data-cl-result-category|data-cl-entry/);
+  assert.match(tagOf(html,'data-cl-action="explain"'),/ disabled/);
 });

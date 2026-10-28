@@ -13930,7 +13930,7 @@
     return { create, NOT_INCLUDED };
   })();
 
-  /* Saved settings -> one current environment. Structural comparison stays in
+  /* Current production settings -> saved settings. Structural comparison stays in
    * Config Lens; imported files never become execution plans or AI requests. */
   'use strict';
   const KTReleaseSettingsCompare = (() => {
@@ -14025,21 +14025,21 @@
       return copies;
     }
     function compare(document, base, options = {}) {
-      const current = Export.create(base, { environment: options.environment, domain: options.domain }).document;
+      const current = Export.create(base, { environment: 'production', domain: options.domain }).document;
       const crossApp = document.source.domain.toLowerCase() !== current.source.domain.toLowerCase() || document.source.appId !== current.source.appId;
       const source = { comparisonType: 'saved-settings', appId: current.source.appId, loadedAt: current.source.capturedAt,
-        before: { ...document.source }, after: { ...current.source }, savedAt: document.savedAt, crossApp,
-        beforeLabel: '保存ファイル（' + LABELS[document.source.environment] + '）',
-        afterLabel: '現在のアプリ（' + LABELS[current.source.environment] + '）' };
+        before: { ...current.source }, after: { ...document.source }, savedAt: document.savedAt, crossApp,
+        beforeLabel: '現在の運用環境',
+        afterLabel: '保存ファイル（' + LABELS[document.source.environment] + '）' };
       const categories = Lens.CATEGORIES.map(category => {
         const key = Diff.SOURCE_KEYS[category.id];
-        const beforeCoverage = document.coverage.find(row => row.id === category.id);
-        const afterCoverage = current.coverage.find(row => row.id === category.id);
-        const before = document.settings[key], after = current.settings[key];
+        const beforeCoverage = current.coverage.find(row => row.id === category.id);
+        const afterCoverage = document.coverage.find(row => row.id === category.id);
+        const before = current.settings[key], after = document.settings[key];
         const unavailable = warnings => ({ id: category.id, label: category.label, status: 'unavailable', warnings, entries: [] });
         const missing = [];
-        if (!beforeCoverage || beforeCoverage.status === 'unavailable' || !before) missing.push('保存ファイルに「' + category.label + '」の取得済み設定がないため比較していません。');
-        if (!afterCoverage || afterCoverage.status === 'unavailable' || !after) missing.push('現在のアプリの「' + category.label + '」を取得できていないため比較していません。');
+        if (!beforeCoverage || beforeCoverage.status === 'unavailable' || !before) missing.push('現在の運用環境の「' + category.label + '」を取得できていないため比較していません。');
+        if (!afterCoverage || afterCoverage.status === 'unavailable' || !after) missing.push('保存ファイルに「' + category.label + '」の取得済み設定がないため比較していません。');
         if (missing.length) return unavailable(missing);
         try {
           Lens.validateResponse(category, before); Lens.validateResponse(category, after);
@@ -14074,7 +14074,7 @@
         categoryId: category.id, label: category.label, status: category.status, reasons: category.warnings
       }));
       const limitations = [
-        '保存ファイルを左、現在のアプリの取得済み設定を右に表示します。設定の変更や復元は行いません。',
+        '現在の運用環境の取得済み設定を左、保存ファイルを右に表示します。設定の変更や復元は行いません。',
         'フィールドはフィールドコードで比較します。コードが変わった項目は削除・追加として表示し、同じ項目かどうかは推定しません。',
         'JavaScript・CSS・アイコンは登録情報だけが対象です。ファイル本体やURL先の内容、プラグイン内部の設定は比較していません。',
         'カテゴリー、言語別の名称、Webhook、APIトークン、レコードの内容と実際の動作は比較していません。',
@@ -14136,19 +14136,18 @@
       const {result, reading = false, sending = false, saving = false, importing = false, error = '', exportStatus = ''} = options;
       const busy = !!(options.busy || reading || sending || saving || importing);
       const categories = result?.categories || [], entries = result?.entries || [], source = result?.source || {};
-      const fileMode = !!options.savedFile || source.comparisonType === 'saved-settings';
-      const targetEnvironment = options.targetEnvironment === 'production' ? 'production' : 'preview';
+      const fileMode = options.comparisonTarget === 'file' || source.comparisonType === 'saved-settings';
       const environmentLabel = value => ({ production: '運用環境', preview: '動作テスト環境' }[value] || '環境不明');
-      const before = fileMode
-        ? { ...(source.before || options.savedFile?.source), appName: options.savedFile?.appName, savedAt: options.savedFile?.savedAt || source.savedAt }
-        : options.currentSources?.production || { appId: source.appId, environment: 'production', revision: source.productionRevision, capturedAt: source.loadedAt };
-      const after = options.currentSources?.[fileMode ? targetEnvironment : 'preview'] || (fileMode ? source.after : {
-        appId: source.appId, environment: 'preview', revision: source.previewRevision, capturedAt: source.loadedAt
+      const before = options.currentSources?.production || (fileMode ? source.before : {
+        appId: source.appId, environment: 'production', revision: source.productionRevision, capturedAt: source.loadedAt
       });
-      const labels = fileMode ? {
-        before: '左：保存した設定（' + environmentLabel(before.environment) + '）',
-        after: '右：現在のアプリ設定（' + environmentLabel(targetEnvironment) + '）'
-      } : { before: '左：運用環境', after: '右：動作テスト環境' };
+      const after = fileMode ? (options.savedFile ? {
+        ...options.savedFile.source, appName: options.savedFile.appName, savedAt: options.savedFile.savedAt
+      } : source.after) : options.currentSources?.preview || {
+        appId: source.appId, environment: 'preview', revision: source.previewRevision, capturedAt: source.loadedAt
+      };
+      const labels = { before: '左：現在の運用環境',
+        after: fileMode ? '右：保存した設定（' + environmentLabel(after?.environment) + '）' : '右：動作テスト環境' };
       const timestamp = value => {
         if (!value) return '未取得';
         const date = new Date(value);
@@ -14157,36 +14156,38 @@
       };
       const origin = (side, title, value, control = '') => '<section class="ktcl-origin" data-cl-origin="' + side + '" aria-label="' + esc(title) + '">' +
         '<div class="ktcl-origin-heading"><strong>' + esc(title) + '</strong>' + control + '</div>' +
-        '<div class="ktcl-origin-app"><b>' + esc(value?.appName || (value?.appId ? 'アプリ名は未取得' : 'アプリ情報は未取得')) + '</b>' +
-          (value?.appId ? '<span>アプリ ' + esc(value.appId) + ' ・ ' + esc(value.domain || '取得元不明') + '</span>' : '') + '</div>' +
-        '<div class="ktcl-origin-time">設定の取得：' + timestamp(value?.capturedAt) +
-          (side === 'before' && fileMode ? ' ／ ファイル保存：' + timestamp(value?.savedAt) : '') + '</div>' +
-        (side === 'before' && fileMode ? '<div class="ktcl-filename" title="' + esc(options.savedFile?.filename || '保存設定ファイル') + '">' + esc(options.savedFile?.filename || '保存設定ファイル') + '</div>' : '') +
+        (side === 'after' && fileMode && !value ? '<p>保存した設定ファイルを選んでください。</p>' :
+          '<div class="ktcl-origin-app"><b>' + esc(value?.appName || (value?.appId ? 'アプリ名は未取得' : 'アプリ情報は未取得')) + '</b>' +
+            (value?.appId ? '<span>アプリ ' + esc(value.appId) + ' ・ ' + esc(value.domain || '取得元不明') + '</span>' : '') + '</div>' +
+          '<div class="ktcl-origin-time">' + (side === 'after' && fileMode ? '保存元：' + esc(environmentLabel(value?.environment)) + ' ／ ' : '') +
+            '設定の取得：' + timestamp(value?.capturedAt) +
+            (side === 'after' && fileMode ? ' ／ ファイル保存：' + timestamp(value?.savedAt) : '') + '</div>') +
+        (side === 'after' && fileMode ? '<div class="ktcl-file-choice">' +
+          button(options.savedFile ? '別のファイルを選ぶ' : 'ファイルを選ぶ', 'data-cl-action="open-file"', busy) +
+          '<input type="file" data-cl-file accept=".json,application/json" aria-label="比較する保存設定ファイル" hidden' + (busy ? ' disabled' : '') + '>' +
+          (options.savedFile ? '<span class="ktcl-filename" title="' + esc(options.savedFile.filename) + '">' + esc(options.savedFile.filename) + '</span>' : '') + '</div>' : '') +
         '</section>';
-      const targetSelect = '<label class="ktcl-target">比較する環境 <select data-cl-environment' + (busy ? ' disabled' : '') + '><option value="preview"' +
-        (targetEnvironment === 'preview' ? ' selected' : '') + '>動作テスト環境</option><option value="production"' +
-        (targetEnvironment === 'production' ? ' selected' : '') + '>運用環境</option></select></label>';
+      const targetSelect = '<label class="ktcl-target">比較相手 <select data-cl-target' + (busy ? ' disabled' : '') + '><option value="preview"' +
+        (!fileMode ? ' selected' : '') + '>動作テスト環境</option><option value="file"' +
+        (fileMode ? ' selected' : '') + '>保存ファイル</option></select></label>';
       const origins = '<div class="ktcl-origins"' + (fileMode ? ' data-cl-file-comparison' : '') + '>' +
         origin('before', labels.before, before) +
-        origin('after', fileMode ? '右：現在のアプリ設定' : labels.after, after, fileMode ? targetSelect : '') + '</div>';
+        origin('after', '右：比較する設定', after, targetSelect) + '</div>';
       const selectedCategory = categories.some(c => c.id === options.selectedCategory) ? options.selectedCategory : 'all';
       const filter = Object.hasOwn(KINDS, options.filter) ? options.filter : 'all';
       const selected = selectedCategory === 'all' ? categories : categories.filter(c => c.id === selectedCategory);
       const categoryEntries = selected.flatMap(c => c.entries), counts = countsOf(categoryEntries);
       const groups = selectedCategory === 'all' ? selected.filter(category => category.status !== 'ok' || category.entries.some(entry => filter === 'all' || entry.kind === filter)) : selected;
       const canExplain = !fileMode && !!result && Environment.canExplain(result) && options.canExplain !== false && !busy;
-      const totalLabel = !result ? '設定を読み込むと差分を表示します。' : !Environment.canExplain(result) ? '設定を比較できていません。' :
+      const totalLabel = !result ? (fileMode && !options.savedFile ? '保存ファイルを選ぶと、現在の運用環境との差を表示します。' : '設定を読み込むと差分を表示します。') : !Environment.canExplain(result) ? '設定を比較できていません。' :
         entries.length ? '確認できた変更 ' + entries.length + '件' : '比較できた範囲に変更はありません。';
       const overview = categories.filter(c => c.entries.length).length;
       return '<section class="ktcl-view" data-config-lens-view aria-label="Config Lens">' + styles() +
         '<header class="ktcl-header"><div class="ktcl-title"><h2>Config Lens</h2></div><div class="ktcl-actions" role="group" aria-label="比較と設定保存">' +
         button(reading ? '設定を読み込んでいます…' : result ? '設定を取り直す' : '設定を読み込む', 'data-cl-action="refresh"', busy) +
         button(sending ? 'AI説明を準備しています…' : 'AIに変更点を説明してもらう', 'data-cl-action="explain"', !canExplain) +
-        button('保存ファイルと比較', 'data-cl-action="open-file"', busy) +
-        (fileMode ? button('環境どうしを比較', 'data-cl-action="environment-mode"', busy) : '') +
-        '<input type="file" data-cl-file accept=".json,application/json" aria-label="比較する保存設定ファイル" hidden' + (busy ? ' disabled' : '') + '>' +
-        button(fileMode ? '現在の運用環境を保存' : '運用環境を保存', 'data-cl-action="save-production"', busy || !options.canSaveProduction) +
-        button(fileMode ? '現在の動作テスト環境を保存' : '動作テスト環境を保存', 'data-cl-action="save-preview"', busy || !options.canSavePreview) + '</div></header>' +
+        button('運用環境を保存', 'data-cl-action="save-production"', busy || !options.canSaveProduction) +
+        button('動作テスト環境を保存', 'data-cl-action="save-preview"', busy || !options.canSavePreview) + '</div></header>' +
         origins +
         (exportStatus ? '<p class="ktcl-status" role="status" data-cl-export-status>' + esc(exportStatus) + '</p>' : '') +
         (error ? '<p class="ktcl-warning" role="alert" data-cl-error>' + esc(typeof error === 'string' ? error : error.message || '設定を取得できませんでした。') + '</p>' : '') +
@@ -14204,7 +14205,7 @@
         '</div>' + (groups.length ? groups.map(category => categoryHtml(category, filter, labels)).join('') : '<p class="ktcl-empty">この種類の変更はありません。</p>') + '</div></div>' :
         '<div class="ktcl-empty-page"><p>保存済みの設定を読み込み、変更した項目を左右に並べて確認できます。</p><p>一覧を見る操作ではAIを呼びません。</p></div>') +
         '<footer class="ktcl-footer">' + editsHtml(options.localEdits) +
-        '<details class="ktcl-notes"><summary>比較と保存の範囲</summary><p>' + (fileMode ? '保存ファイルを左側、現在のアプリの取得済み設定を右側に表示します。追加・変更・削除は左から右への違いです。' : '運用環境と動作テスト環境の設定を比較します。設定画面で保存した内容が対象で、この会話以外で変更した内容も含みます。') + '</p><p>現在のアプリの取得済み設定をファイルで保存します。設定の変更や復元は行いません。</p>' +
+        '<details class="ktcl-notes"><summary>比較と保存の範囲</summary><p>' + (fileMode ? '現在の運用環境を左側、保存ファイルを右側に表示します。追加・変更・削除は左から右への違いです。' : '運用環境と動作テスト環境の設定を比較します。設定画面で保存した内容が対象で、この会話以外で変更した内容も含みます。') + '</p><p>現在のアプリの取得済み設定をファイルで保存します。設定の変更や復元は行いません。</p>' +
         list(result?.limitations || ['未取得の設定や、手元で編集してまだ登録していないコードは比較しません。']) +
         '<p>設定の保存範囲は、保存したファイルにも記載します。アプリ全体のバックアップではありません。</p></details></footer></section>';
     }
@@ -14213,7 +14214,7 @@
         '.ktcl-view{color:var(--kt-text,#253247);background:var(--kt-paper,#fff);font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;overflow-wrap:anywhere;min-width:0;padding:12px 20px 20px;box-sizing:border-box}' +
         '.ktcl-view *{box-sizing:border-box}.ktcl-view h2,.ktcl-view h3,.ktcl-view p{margin:0}.ktcl-view button{font:inherit;line-height:1.4;color:inherit;background:var(--kt-paper,#fff);border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;padding:8px 12px;cursor:pointer;min-height:36px}.ktcl-view button:hover{background:var(--kt-soft,#f5f7fb)}.ktcl-view button:disabled{opacity:.55;cursor:default}.ktcl-view button:focus-visible,.ktcl-view summary:focus-visible{outline:2px solid var(--kt-accent,#285fbd);outline-offset:2px}.ktcl-view button[aria-pressed="true"]{border-color:var(--kt-accent,#285fbd);color:var(--kt-accent,#285fbd);background:var(--kt-soft,#f5f7fb);font-weight:600}' +
         '.ktcl-header{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap}.ktcl-title{min-width:0}.ktcl-header h2{font-size:20px;line-height:1.4}.ktcl-source,.ktcl-empty,.ktcl-empty-page,.ktcl-notes p{color:var(--kt-muted,#58677d)}.ktcl-actions,.ktcl-filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}.ktcl-actions button{font-size:12px;min-height:32px;padding:6px 10px;max-width:100%}.ktcl-meta{display:flex;gap:3px 16px;align-items:baseline;flex-wrap:wrap;margin:8px 0 12px;min-width:0;font-size:12px}.ktcl-meta strong{font-size:14px}.ktcl-meta>*{min-width:0;max-width:100%}.ktcl-status{margin:8px 0!important}.ktcl-warning{padding:10px 12px;margin:10px 0;color:var(--kt-warning,#805c15);background:var(--kt-soft,#f5f7fb);border-left:3px solid currentColor}.ktcl-warning ul{margin:0;padding-left:18px}' +
-        '.ktcl-origins{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:10px 0}.ktcl-origin{border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;padding:10px 12px;min-width:0;font-size:12px;background:var(--kt-soft,#f5f7fb)}.ktcl-origin-heading{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap;margin-bottom:5px}.ktcl-origin-heading strong{font-size:13px}.ktcl-origin-app{display:flex;align-items:baseline;gap:3px 10px;flex-wrap:wrap}.ktcl-origin-app b{font-size:14px}.ktcl-origin-app span,.ktcl-origin-time,.ktcl-filename{color:var(--kt-muted,#58677d)}.ktcl-origin-time{margin-top:3px}.ktcl-filename{max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ktcl-target{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}.ktcl-target select{max-width:100%;font:inherit;color:inherit;background:var(--kt-paper,#fff);border:1px solid var(--kt-line,#dbe2ec);border-radius:5px;padding:3px 6px;min-height:28px}.ktcl-provenance{font-size:12px;margin:6px 0 10px;color:var(--kt-muted,#58677d)}.ktcl-provenance summary{cursor:pointer}.ktcl-comparison-note{font-size:12px;color:var(--kt-muted,#58677d);margin:8px 0!important}.ktcl-view select:focus-visible{outline:2px solid var(--kt-accent,#285fbd);outline-offset:2px}' +
+        '.ktcl-origins{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:10px 0}.ktcl-origin{border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;padding:10px 12px;min-width:0;font-size:12px;background:var(--kt-soft,#f5f7fb)}.ktcl-origin-heading{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap;margin-bottom:5px}.ktcl-origin-heading strong{font-size:13px}.ktcl-origin-app{display:flex;align-items:baseline;gap:3px 10px;flex-wrap:wrap}.ktcl-origin-app b{font-size:14px}.ktcl-origin-app span,.ktcl-origin-time,.ktcl-filename{color:var(--kt-muted,#58677d)}.ktcl-origin-time{margin-top:3px}.ktcl-file-choice{display:flex;align-items:center;gap:8px;margin-top:5px;min-width:0}.ktcl-file-choice button{font-size:12px;min-height:28px;padding:4px 8px;flex-shrink:0}.ktcl-filename{min-width:0;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ktcl-target{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}.ktcl-target select{max-width:100%;font:inherit;color:inherit;background:var(--kt-paper,#fff);border:1px solid var(--kt-line,#dbe2ec);border-radius:5px;padding:3px 6px;min-height:28px}.ktcl-provenance{font-size:12px;margin:6px 0 10px;color:var(--kt-muted,#58677d)}.ktcl-provenance summary{cursor:pointer}.ktcl-comparison-note{font-size:12px;color:var(--kt-muted,#58677d);margin:8px 0!important}.ktcl-view select:focus-visible{outline:2px solid var(--kt-accent,#285fbd);outline-offset:2px}' +
         '.ktcl-shell{display:grid;grid-template-columns:210px minmax(0,1fr);gap:24px}.ktcl-navigation{display:flex;flex-direction:column;gap:5px;align-self:start;max-height:min(55vh,640px);overflow:auto;scrollbar-gutter:stable;padding-right:4px}.ktcl-navigation button{flex-shrink:0}.ktcl-navigation button{text-align:left;display:flex;flex-direction:column;align-items:flex-start;padding:9px 12px}.ktcl-navigation small{font-size:11px;color:var(--kt-muted,#58677d);font-weight:400}.ktcl-navigation .ktcl-attention{color:var(--kt-warning,#805c15)}.ktcl-results{min-width:0}.ktcl-filters{padding-bottom:12px;border-bottom:1px solid var(--kt-line,#dbe2ec)}.ktcl-filters button{font-size:12px;padding:5px 10px;min-height:30px}.ktcl-category{margin:18px 0 24px}.ktcl-category h3{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:16px}.ktcl-category h3 small{font-size:12px;font-weight:400;color:var(--kt-muted,#58677d)}.ktcl-empty{margin:10px 0!important}' +
         '.ktcl-entry{margin-top:8px;border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;overflow:hidden}.ktcl-entry summary{padding:11px 12px;cursor:pointer;overflow-wrap:anywhere;background:var(--kt-soft,#f5f7fb)}.ktcl-entry summary strong{font-weight:600}.ktcl-entry summary small{font-size:12px;margin-left:8px;color:var(--kt-muted,#58677d)}.ktcl-kind{display:inline-block;padding:1px 7px;border:1px solid currentColor;border-radius:4px;font-size:11px;margin-right:10px;line-height:1.5}.ktcl-kind-added{color:var(--kt-success,#24634f)}.ktcl-kind-changed{color:var(--kt-warning,#805c15)}.ktcl-kind-deleted{color:var(--kt-danger,#9d3d22)}.ktcl-table-scroll{max-width:100%;overflow:auto}.ktcl-view table{width:100%;table-layout:fixed;border-collapse:collapse}.ktcl-view th,.ktcl-view td{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--kt-line,#dbe2ec);overflow-wrap:anywhere}.ktcl-view thead th{background:var(--kt-soft,#f5f7fb);font-size:12px}.ktcl-view th:first-child{width:24%}.ktcl-view tbody th{font-weight:500;font-size:12px}.ktcl-view pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0;max-height:320px;overflow:auto}.ktcl-empty-page{padding:32px 0}.ktcl-empty-page p+p{margin-top:8px}' +
         '.ktcl-footer{border-top:1px solid var(--kt-line,#dbe2ec);margin-top:20px;padding-top:8px}.ktcl-notes{margin:10px 0}.ktcl-notes summary{cursor:pointer;font-weight:600}.ktcl-notes p{margin:6px 0}.ktcl-notes ul{margin:6px 0;padding-left:20px}.ktcl-notes li{margin:4px 0}' +
@@ -14229,17 +14230,17 @@
   function mountReleaseConfigLens(host, d) {
     let base = null, result = null, reading = false, sending = false, saving = false, importing = false;
     let disposed = false, generation = 0, stale = false, error = '', notice = '';
-    let selectedCategory = 'all', filter = 'all', savedFile = null, targetEnvironment = 'preview';
+    let selectedCategory = 'all', filter = 'all', savedFile = null, comparisonTarget = 'preview';
     const isVisible = () => !disposed && d.isVisible?.() !== false;
     const canRead = () => !disposed && d.canRead?.() !== false;
     const busy = () => reading || sending || saving || importing;
     const editsOf = () => KTReleaseEnvironmentView.localEdits(d.localEdits?.());
     function compare() {
       result = null;
-      if (!base) return;
+      if (!base || comparisonTarget === 'file' && !savedFile) return;
       try {
-        result = savedFile
-          ? KTReleaseSettingsCompare.compare(savedFile.document, base, { environment: targetEnvironment, domain: d.domain })
+        result = comparisonTarget === 'file'
+          ? KTReleaseSettingsCompare.compare(savedFile.document, base, { domain: d.domain })
           : KTReleaseEnvironmentDiff.compare(base);
       } catch (e) { error = e?.message || '設定を比較できませんでした。'; }
     }
@@ -14249,27 +14250,27 @@
       const active = host.ownerDocument?.activeElement;
       const focus = active && host.contains(active) ? {
         action: active.getAttribute('data-cl-action'), category: active.getAttribute('data-cl-category'),
-        kind: active.getAttribute('data-cl-kind'), environment: active.hasAttribute('data-cl-environment')
+        kind: active.getAttribute('data-cl-kind'), target: active.hasAttribute('data-cl-target')
       } : null;
       const openEntries = new Set(Array.from(host.querySelectorAll('details[open][data-cl-entry]')).map(e => e.getAttribute('data-cl-entry')));
       host.innerHTML = KTReleaseConfigLensView.render({ result, localEdits: editsOf(), busy: busy(), reading, sending, saving, importing,
         error, exportStatus: notice, selectedCategory, filter,
         savedFile: savedFile && { filename: savedFile.filename, source: savedFile.document.source,
-          appName: savedFile.document.settings.settings?.name, savedAt: savedFile.document.savedAt }, targetEnvironment,
+          appName: savedFile.document.settings.settings?.name, savedAt: savedFile.document.savedAt }, comparisonTarget,
         currentSources: Object.fromEntries(['production', 'preview'].map(environment => [environment, base?.comparisonInputs?.[environment] ? {
           domain: d.domain, appId: base.appId, environment, appName: base.comparisonInputs[environment].settings?.name,
           revision: base.revision?.[environment], capturedAt: base.loadedAt
         } : null])),
-        canExplain: !savedFile && !!base?.ok && KTReleaseEnvironmentView.canExplain(result) && canRead(),
+        canExplain: comparisonTarget !== 'file' && !!base?.ok && KTReleaseEnvironmentView.canExplain(result) && canRead(),
         canSaveProduction: !!base?.comparisonInputs?.production && canRead(),
         canSavePreview: !!base?.comparisonInputs?.preview && canRead() });
       for (const el of host.querySelectorAll('details[data-cl-entry]')) if (openEntries.has(el.getAttribute('data-cl-entry'))) el.open = true;
       const navigation = host.querySelector('.ktcl-navigation');
       if (navigation) navigation.scrollTop = navigationTop;
       if (focus) {
-        const found = Array.from(host.querySelectorAll('[data-cl-action],[data-cl-category],[data-cl-kind],[data-cl-environment]')).find(el =>
+        const found = Array.from(host.querySelectorAll('[data-cl-action],[data-cl-category],[data-cl-kind],[data-cl-target]')).find(el =>
           focus.action ? el.getAttribute('data-cl-action') === focus.action : focus.category ? el.getAttribute('data-cl-category') === focus.category :
-            focus.kind ? el.getAttribute('data-cl-kind') === focus.kind : focus.environment && el.hasAttribute('data-cl-environment'));
+            focus.kind ? el.getAttribute('data-cl-kind') === focus.kind : focus.target && el.hasAttribute('data-cl-target'));
         found?.focus?.({ preventScroll: true });
       }
     }
@@ -14293,16 +14294,16 @@
     async function changed(event) {
       const input = event.target;
       if (!host.contains(input) || busy() || !canRead()) return;
-      if (input.hasAttribute('data-cl-environment')) {
-        if (!savedFile || !['preview', 'production'].includes(input.value)) return;
-        targetEnvironment = input.value; error = ''; notice = ''; selectedCategory = 'all'; filter = 'all';
+      if (input.hasAttribute('data-cl-target')) {
+        if (!['preview', 'file'].includes(input.value)) return;
+        comparisonTarget = input.value; error = ''; notice = '';
         compare(); draw(); if (!base) await read();
         return;
       }
-      if (!input.hasAttribute('data-cl-file') || !input.files?.[0]) return;
+      if (comparisonTarget !== 'file' || !input.hasAttribute('data-cl-file') || !input.files?.[0]) return;
       const file = input.files[0], ticket = ++generation;
       importing = true; error = ''; notice = ''; result = null; savedFile = null;
-      selectedCategory = 'all'; filter = 'all'; draw();
+      draw();
       try {
         if (file.size > KTReleaseSettingsCompare.MAX_BYTES) throw new Error('設定ファイルは10MB以下のJSONを選んでください。');
         const text = await file.text();
@@ -14328,14 +14329,9 @@
       const action = button.getAttribute('data-cl-action');
       if (action === 'refresh') return read();
       if (!canRead()) return;
-      if (action === 'open-file') {
+      if (action === 'open-file' && comparisonTarget === 'file') {
         const input = host.querySelector('[data-cl-file]');
         if (input) { input.value = ''; input.click(); }
-        return;
-      }
-      if (action === 'environment-mode') {
-        generation++; savedFile = null; result = null; error = ''; notice = ''; selectedCategory = 'all'; filter = 'all';
-        compare(); draw(); if (!base) await read();
         return;
       }
       if (!base) return;
@@ -14351,7 +14347,7 @@
         finally { saving = false; draw(); }
       }
       if (action === 'explain') {
-        if (savedFile || !base.ok || !KTReleaseEnvironmentView.canExplain(result) || typeof d.explain !== 'function') return;
+        if (comparisonTarget === 'file' || !base.ok || !KTReleaseEnvironmentView.canExplain(result) || typeof d.explain !== 'function') return;
         sending = true; error = ''; notice = ''; draw();
         try {
           const answer = await d.explain(result, editsOf());
