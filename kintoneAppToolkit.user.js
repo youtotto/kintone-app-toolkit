@@ -14470,13 +14470,16 @@
         if (opening) return opening;
         opening = new Promise((resolve, reject) => {
           let request;
-          try { request = indexedDB.open(dbName, 1); } catch (error) { reject(storageFailure(error)); return; }
+          try { request = indexedDB.open(dbName, 2); } catch (error) { reject(storageFailure(error)); return; }
           request.onupgradeneeded = () => {
             const db = request.result;
-            const entries = db.createObjectStore('entries', { keyPath: 'key' });
-            entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
-            db.createObjectStore('payloads', { keyPath: 'key' });
-            db.createObjectStore('owners', { keyPath: 'owner' });
+            if (!db.objectStoreNames.contains('entries')) {
+              const entries = db.createObjectStore('entries', { keyPath: 'key' });
+              entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
+            }
+            if (!db.objectStoreNames.contains('payloads')) db.createObjectStore('payloads', { keyPath: 'key' });
+            if (!db.objectStoreNames.contains('owners')) db.createObjectStore('owners', { keyPath: 'owner' });
+            if (!db.objectStoreNames.contains('selections')) db.createObjectStore('selections', { keyPath: 'scope' });
           };
           request.onerror = () => reject(storageFailure(request.error));
           request.onblocked = () => reject(failure('HISTORY_UNAVAILABLE', '履歴を開けません。他の Toolkit 画面を閉じてから開き直してください。'));
@@ -14506,6 +14509,8 @@
           try { operation({ tx, request, done: value => { result = value; }, abort }); } catch (error) { abort(error); }
         });
       }
+      // Keep selection pointers after expiry/deletion so missing current work never
+      // becomes a legacy scope that could fall back to an unrelated history item.
       const purge = (tx, entries, at) => {
         const keep = [];
         for (const entry of entries) {
@@ -14530,13 +14535,33 @@
           });
         });
       }
-      async function save(input) {
+      function getSelection() {
+        return transaction('readonly', ['selections'], ({ tx, request, done }) => {
+          request(tx.objectStore('selections').get(scopeKey), selection => {
+            if (selection && selection.id !== null && !validId(selection.id)) throw invalid();
+            done(selection ? { id: selection.id } : null);
+          });
+        });
+      }
+      function select(id) {
+        if (id !== null && !validId(id)) return Promise.reject(invalid());
         const at = time();
-        if (!input || !validId(input.id) || !(input.revision === null || validRevision(input.revision)) || typeof input.title !== 'string' || input.title.length > 500 || typeof input.pinned !== 'boolean' || !(input.completedAt === null || Number.isSafeInteger(input.completedAt) && input.completedAt >= 0 && input.completedAt <= at)) throw invalid();
+        return transaction('readwrite', ['entries', 'selections'], ({ tx, request, done }) => {
+          const selected = () => { tx.objectStore('selections').put({ scope: scopeKey, id }); done({ id }); };
+          if (id === null) { selected(); return; }
+          request(tx.objectStore('entries').get([scopeKey, id]), entry => {
+            if (!entry || expired(entry, at)) throw invalid();
+            selected();
+          });
+        });
+      }
+      async function save(input, { activate = true } = {}) {
+        const at = time();
+        if (typeof activate !== 'boolean' || !input || !validId(input.id) || !(input.revision === null || validRevision(input.revision)) || typeof input.title !== 'string' || input.title.length > 500 || typeof input.pinned !== 'boolean' || !(input.completedAt === null || Number.isSafeInteger(input.completedAt) && input.completedAt >= 0 && input.completedAt <= at)) throw invalid();
         // Snapshot the caller's values before opening the asynchronous transaction.
         const { id, revision, title, completedAt, pinned } = input;
         const body = encode(input.payload), key = [scopeKey, id];
-        return transaction('readwrite', ['entries', 'payloads', 'owners'], ({ tx, request, done }) => {
+        return transaction('readwrite', ['entries', 'payloads', 'owners', 'selections'], ({ tx, request, done }) => {
           // One owner budget across all apps/environments. Index lookups never read
           // another user's records. Capacity cleanup only removes expired records.
           request(tx.objectStore('entries').index('owner').getAll(ownerKey), rows => {
@@ -14559,6 +14584,7 @@
               // and recreation of the same id (without retaining deleted payloads).
               tx.objectStore('owners').put({ owner: ownerKey, revision: entry.revision });
               tx.objectStore('entries').put(entry); tx.objectStore('payloads').put(payload);
+              if (activate) tx.objectStore('selections').put({ scope: scopeKey, id });
               done(metadata(entry));
             });
           });
@@ -14590,7 +14616,7 @@
         });
       }
       function close() { closed = true; connection?.close(); connection = null; }
-      return { list, load, save, remove, prune, usage, close };
+      return { list, load, getSelection, select, save, remove, prune, usage, close };
     }
     return { create, TTL, DEFAULT_MAX_BYTES };
   })();
@@ -14612,7 +14638,8 @@
       return !!(payload?.draft || editedFiles(payload).length || s.messages?.length || s.explanations?.length || s.runs?.length || s.proposal || s.plan);
     }
     function create({ store, capture, restore, verifyAccess, canSwitch = () => true, onStatus = () => {}, now = () => Date.now(), makeId = () => globalThis.crypto.randomUUID(), debounceMs = 450 } = {}) {
-      let current = null, lastSignature = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;
+      let current = null, lastSignature = '', lastSnapshot = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;
+      let initialization = null, initializing = false, editEpoch = 0, selectionDirty = false;
       let queue = Promise.resolve(), status = { state: 'saved', message: '' };
       const notify = (state, message = '') => { status = { state, message, completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
       const serial = work => { const next = queue.catch(() => {}).then(work); queue = next; return next; };
@@ -14629,7 +14656,10 @@
         const payload = snapshot || clone(capture()), nextSignature = signature(payload);
         if (!current && !hasContent(payload)) { lastSignature = nextSignature; dirty = false; notify('saved'); return current; }
         const changed = nextSignature !== lastSignature;
-        if (!changed && completedAt === undefined && pinned === undefined && current) { dirty = false; notify('saved', 'このブラウザーに保存済み'); return current; }
+        if (!changed && JSON.stringify(payload) === lastSnapshot && completedAt === undefined && pinned === undefined && current) {
+          if (selectionDirty) { await verifyAccess(false); await store.select(current.id); selectionDirty = false; }
+          dirty = false; notify('saved', 'このブラウザーに保存済み'); return current;
+        }
         await verifyAccess(false);
         const s = payload.session.state;
         const title = s.goal || s.messages?.find(m => m.role === 'user')?.text || s.explanations?.[0]?.title || '作業中の会話';
@@ -14637,22 +14667,25 @@
         const saved = await store.save({ id: prior?.id || makeId(), revision: prior?.revision ?? null,
           title: String(title).slice(0, 120), payload, completedAt: completedAt !== undefined ? completedAt : changed ? null : current?.completedAt ?? null,
           pinned: pinned !== undefined ? pinned : !!current?.pinned });
-        current = saved; lastSignature = nextSignature;
-        dirty = signature(capture()) !== nextSignature;
+        current = saved; lastSignature = nextSignature; lastSnapshot = JSON.stringify(payload); selectionDirty = false;
+        dirty = JSON.stringify(capture()) !== lastSnapshot;
         notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : 'このブラウザーに保存済み');
         if (dirty && !disposed) schedule();
         return current;
       }
       function schedule() { clearTimeout(timer); timer = setTimeout(() => { timer = null; flush().catch(() => {}); }, debounceMs); }
       function changed() {
-        if (suppress || disposed) return;
-        dirty = true; notify('saving', '保存しています…'); schedule();
+        if (disposed) return;
+        editEpoch++; dirty = true;
+        if (suppress) return;
+        notify('saving', '保存しています…'); schedule();
       }
       function flush() {
         clearTimeout(timer); timer = null;
         return serial(async () => { try { return await saveCurrent(); } catch (error) { report(error); throw error; } });
       }
       async function list() {
+        if (initialization) await initialization;
         await verifyAccess(true);
         const entries = await store.list(), usage = await store.usage();
         await verifyAccess(false);
@@ -14660,6 +14693,7 @@
       }
       async function open(id) {
         if (switching || !canSwitch()) return false;
+        const epoch = editEpoch;
         switching = true;
         try {
           await flush(); requireUnchanged(lastSignature);
@@ -14670,20 +14704,31 @@
           if (!saved) throw failure('HISTORY_MISSING', '保存期間を過ぎたか、別のタブで削除された会話です。');
           if (!canSwitch()) return false;
           suppress = true;
-          const ok = await restore(clone(saved.payload));
+          const openingEpoch = editEpoch;
+          const ok = await restore(clone(saved.payload), { shouldContinue: () => !disposed && editEpoch === openingEpoch });
           if (!ok) throw failure('HISTORY_OPEN_FAILED', '現在のアプリと保存内容を確認できません。開いていた会話と編集は残しています。');
           current = Object.fromEntries(Object.entries(saved).filter(([key]) => key !== 'payload'));
-          lastSignature = signature(capture()); dirty = false;
-          notify('saved', current.completedAt != null ? '保存した会話を表示しています' : 'このブラウザーに保存済み');
+          lastSignature = signature(capture()); lastSnapshot = JSON.stringify(capture()); dirty = false;
+          selectionDirty = true; await store.select(current.id); selectionDirty = false;
+          notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : current.completedAt != null ? '保存した会話を表示しています' : 'このブラウザーに保存済み');
           return true;
         } catch (error) { report(error); return false; }
-        finally { suppress = false; switching = false; }
+        finally { suppress = false; switching = false; if (!disposed && editEpoch !== epoch && dirty) schedule(); }
       }
       async function beforeNewTask() {
         if (switching || !canSwitch()) return false;
+        const epoch = editEpoch;
         switching = true;
-        try { await flush(); requireUnchanged(lastSignature); current = null; lastSignature = ''; dirty = false; notify('saved'); return true; }
-        catch (error) { report(error); return false; } finally { switching = false; }
+        try {
+          await flush(); requireUnchanged(lastSignature);
+          const before = signature(capture()), switchEpoch = editEpoch;
+          await verifyAccess(false); await store.select(null); selectionDirty = !!current;
+          requireUnchanged(before);
+          if (editEpoch !== switchEpoch) throw failure('HISTORY_EDITED', '入力した内容を優先し、新しい会話への切り替えを止めました。');
+          current = null; lastSignature = ''; lastSnapshot = ''; selectionDirty = false; dirty = false; notify('saved'); return true;
+        }
+        catch (error) { report(error); return false; }
+        finally { switching = false; if (!disposed && editEpoch !== epoch && dirty) schedule(); }
       }
       async function markComplete() {
         if (switching || !canSwitch()) return false;
@@ -14699,14 +14744,55 @@
         const saved = await store.load(entry.id);
         await verifyAccess(false);
         if (!saved || saved.revision !== entry.revision) throw failure('HISTORY_CONFLICT', '別のタブで保存内容が変わりました。一覧を取り直してください。');
-        await store.save({ ...saved, pinned: value, completedAt: !value && saved.completedAt != null ? now() : saved.completedAt }); return true;
+        await store.save({ ...saved, pinned: value, completedAt: !value && saved.completedAt != null ? now() : saved.completedAt }, { activate: false }); return true;
       }
       async function remove(entry) {
         if (entry.id === current?.id) throw failure('HISTORY_ACTIVE', '開いている会話は削除できません。別の会話へ移動してから削除してください。');
         await verifyAccess(true); return store.remove(entry.id, entry.revision);
       }
+      // Opening the workspace resumes only its last selected conversation. Never save
+      // the initial blank screen over it, and let newer user input take precedence.
+      function initialize() {
+        if (initialization) return initialization;
+        const before = signature(capture()), epoch = editEpoch;
+        initializing = true; switching = true; notify('loading', '前の続きを開いています…');
+        initialization = serial(async () => {
+          try {
+            await store.prune(); await verifyAccess(false);
+            let selected = await store.getSelection();
+            if (!selected) { const entries = await store.list(); selected = entries.length ? { id: entries[0].id } : null; }
+            await verifyAccess(false);
+            if (disposed) return false;
+            if (current || editEpoch !== epoch || signature(capture()) !== before || hasContent(capture()) || !canSwitch()) {
+              dirty = hasContent(capture()) && JSON.stringify(capture()) !== lastSnapshot;
+              notify(dirty ? 'saving' : 'saved'); if (dirty) schedule(); return false;
+            }
+            if (!selected?.id) { lastSignature = before; lastSnapshot = JSON.stringify(capture()); dirty = false; notify('saved'); return false; }
+            const saved = await store.load(selected.id);
+            await verifyAccess(false);
+            if (disposed) return false;
+            if (editEpoch !== epoch) throw failure('HISTORY_EDITED', '入力した内容を優先しました。前の会話は「保存した会話」から開けます。');
+            requireUnchanged(before);
+            if (!saved) { lastSignature = before; lastSnapshot = JSON.stringify(capture()); notify('saved'); return false; }
+            if (!canSwitch()) return false;
+            suppress = true;
+            const openingEpoch = editEpoch;
+            const ok = await restore(clone(saved.payload), { shouldContinue: () => !disposed && editEpoch === openingEpoch });
+            if (!ok) throw failure('HISTORY_OPEN_FAILED', '前の続きを自動で開けませんでした。保存した内容は残っています。「保存した会話」から開き直せます。');
+            current = Object.fromEntries(Object.entries(saved).filter(([key]) => key !== 'payload'));
+            lastSignature = signature(capture()); lastSnapshot = JSON.stringify(capture()); dirty = false;
+            selectionDirty = true; await store.select(current.id); selectionDirty = false;
+            notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : '前の続きを自動で開きました'); return true;
+          } catch (error) { if (!disposed) report(error); return false; }
+          finally {
+            suppress = false; switching = false; initializing = false;
+            if (!disposed && editEpoch !== epoch && dirty) schedule();
+          }
+        });
+        return initialization;
+      }
       function dispose() { const snapshot = clone(capture()); disposed = true; clearTimeout(timer); timer = null; return serial(() => saveCurrent({ snapshot })).catch(error => { report(error); }).finally(() => store.close()); }
-      return { changed, flush, list, open, beforeNewTask, markComplete, setPinned, remove, dispose, initialize: () => store.prune().catch(error => { report(error); }),
+      return { changed, flush, list, open, beforeNewTask, markComplete, setPinned, remove, dispose, initialize, ready: () => initialization || Promise.resolve(false), isInitializing: () => initializing,
         getStatus: () => ({ ...status }), getCurrent: () => clone(current), isDirty: () => dirty, exportCurrent: () => clone(capture()), isSwitching: () => switching };
     }
     return { create, signature, hasContent };
@@ -17353,7 +17439,8 @@
       return user?.id && d.appId != null ? { domain: location.origin, appId: String(d.appId), userId: String(user.id), environment: 'preview' } : null;
     };
     const sameScope = (a, b) => !!a && !!b && ['domain', 'appId', 'userId', 'environment'].every(key => String(a[key]) === String(b[key]));
-    function editingSnapshot() { return codePanel?.exportDrafts?.() || pendingEditor; }
+    function editingSnapshot() { return pendingEditor || codePanel?.exportDrafts?.() || null; }
+    const editorContent = () => { const value = editingSnapshot(); return value?.files?.length ? JSON.stringify(value) : null; };
     function validEditor(value) {
       return value == null || value.version === 1 && Array.isArray(value.files) && value.files.length <= 200 &&
         (value.active == null || typeof value.active === 'string') &&
@@ -17362,17 +17449,19 @@
           (file.registeredText == null || typeof file.registeredText === 'string'));
     }
     function initializeHistory() {
+      if (history) return;
       const scope = historyScope();
       if (!scope || typeof KTReleaseHistory === 'undefined' || !globalThis.indexedDB) { historyInitError = 'この環境では会話の自動保存を利用できません。必要な内容をファイルで保存してください。'; return; }
       try {
+        historyInitError = '';
         const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
         history = KTReleaseHistorySession.create({ store,
           capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', editor: editingSnapshot() }),
-          restore: async payload => {
+          restore: async (payload, { shouldContinue: continueOpening = () => true } = {}) => {
             if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor)) return false;
             if (codePanel?.canRestoreDrafts?.() === false) return false;
-            const draftBefore = view.getDraft(), editorBefore = JSON.stringify(editingSnapshot());
-            const shouldContinue = () => sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === JSON.stringify(editingSnapshot()) && codePanel?.canRestoreDrafts?.() !== false;
+            const draftBefore = view.getDraft(), editorBefore = editorContent();
+            const shouldContinue = () => continueOpening() && sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === editorContent() && codePanel?.canRestoreDrafts?.() !== false;
             if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
             pendingEditor = payload.editor || { version: 1, files: [], active: null };
             if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;
@@ -17390,7 +17479,7 @@
           canSwitch: () => view?.canSwitchSession?.() === true && codePanel?.canRestoreDrafts?.() !== false,
           onStatus: () => view?.updateHistoryStatus?.(), ...(d.historySessionOptions || {})
         });
-        history.initialize();
+        if (d.canAutoFetch?.() !== false) history.initialize();
         stateUnsubscribe = controller.subscribe(() => history.changed());
         draftUnsubscribe = view.subscribeDraft(() => history.changed());
         if (codePanel) attachHistoryEditor();
@@ -17403,13 +17492,14 @@
       editorUnsubscribe = codePanel.subscribeDrafts?.(() => history.changed());
     }
     async function historyDialog() {
-      const el = dialog('保存した会話', '<p>この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-save>今の会話を保存</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
+      const el = dialog('保存した会話', '<p>入力や編集は自動保存され、次に開くと前の続きが表示されます。この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-retry hidden>保存をやり直す</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
       let busy = false;
       el.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
       const note = text => { if (el.open) el.querySelector('[data-history-note]').textContent = text; };
       const renderList = async () => {
-        if (!history) { note(historyInitError); el.querySelector('[data-history-save]').disabled = true; el.querySelector('[data-history-complete]').disabled = true; return; }
+        if (!history) { note(historyInitError); el.querySelector('[data-history-retry]').hidden = true; el.querySelector('[data-history-complete]').disabled = true; return; }
         const result = await history.list(); if (!el.open) return;
+        el.querySelector('[data-history-retry]').hidden = history.getStatus().state !== 'error';
         const mb = value => (value / 1024 / 1024).toFixed(2);
         note('保存容量 ' + mb(result.usage.bytes) + ' / ' + mb(result.usage.maxBytes) + ' MB（同じ利用者の全アプリ）');
         el.querySelector('[data-history-list]').innerHTML = result.entries.length ? result.entries.map(entry => '<article style="padding:12px 0;border-bottom:1px solid var(--kt-line)"><strong>' + esc(entry.title) + '</strong><p class="ktr-note">' +
@@ -17434,7 +17524,7 @@
             if (!await history.setPinned({ id: data.historyPin, revision: Number(data.historyRevision) }, data.historyPinned !== 'true')) throw new Error(history.getStatus().message);
           } else if (button.hasAttribute('data-history-complete')) {
             if (!await history.markComplete()) throw new Error(history.getStatus().message || '会話がないか、処理中のため完了にできません。');
-          } else if (button.hasAttribute('data-history-save')) await history.flush();
+          } else if (button.hasAttribute('data-history-retry')) await history.flush();
           await renderList();
         } catch (error) { note(error.message || '保存した会話を確認できませんでした。'); }
         finally { busy = false; if (el.open) el.querySelector('[data-close]').disabled = false; }
@@ -17462,7 +17552,7 @@
     };
     window.addEventListener('beforeunload', warnBeforeLeave);
     return { controller, view, history: () => history, capability: () => capability, refreshCapability,
-      onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
+      onVisible() { initializeHistory(); if (d.canAutoFetch?.() !== false) history?.initialize(); view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
       invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
       attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
       async explainEnvironmentComparison(result, localEdits) {

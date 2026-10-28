@@ -103,13 +103,16 @@ const KTReleaseHistory = (() => {
       if (opening) return opening;
       opening = new Promise((resolve, reject) => {
         let request;
-        try { request = indexedDB.open(dbName, 1); } catch (error) { reject(storageFailure(error)); return; }
+        try { request = indexedDB.open(dbName, 2); } catch (error) { reject(storageFailure(error)); return; }
         request.onupgradeneeded = () => {
           const db = request.result;
-          const entries = db.createObjectStore('entries', { keyPath: 'key' });
-          entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
-          db.createObjectStore('payloads', { keyPath: 'key' });
-          db.createObjectStore('owners', { keyPath: 'owner' });
+          if (!db.objectStoreNames.contains('entries')) {
+            const entries = db.createObjectStore('entries', { keyPath: 'key' });
+            entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
+          }
+          if (!db.objectStoreNames.contains('payloads')) db.createObjectStore('payloads', { keyPath: 'key' });
+          if (!db.objectStoreNames.contains('owners')) db.createObjectStore('owners', { keyPath: 'owner' });
+          if (!db.objectStoreNames.contains('selections')) db.createObjectStore('selections', { keyPath: 'scope' });
         };
         request.onerror = () => reject(storageFailure(request.error));
         request.onblocked = () => reject(failure('HISTORY_UNAVAILABLE', '履歴を開けません。他の Toolkit 画面を閉じてから開き直してください。'));
@@ -139,6 +142,8 @@ const KTReleaseHistory = (() => {
         try { operation({ tx, request, done: value => { result = value; }, abort }); } catch (error) { abort(error); }
       });
     }
+    // Keep selection pointers after expiry/deletion so missing current work never
+    // becomes a legacy scope that could fall back to an unrelated history item.
     const purge = (tx, entries, at) => {
       const keep = [];
       for (const entry of entries) {
@@ -163,13 +168,33 @@ const KTReleaseHistory = (() => {
         });
       });
     }
-    async function save(input) {
+    function getSelection() {
+      return transaction('readonly', ['selections'], ({ tx, request, done }) => {
+        request(tx.objectStore('selections').get(scopeKey), selection => {
+          if (selection && selection.id !== null && !validId(selection.id)) throw invalid();
+          done(selection ? { id: selection.id } : null);
+        });
+      });
+    }
+    function select(id) {
+      if (id !== null && !validId(id)) return Promise.reject(invalid());
       const at = time();
-      if (!input || !validId(input.id) || !(input.revision === null || validRevision(input.revision)) || typeof input.title !== 'string' || input.title.length > 500 || typeof input.pinned !== 'boolean' || !(input.completedAt === null || Number.isSafeInteger(input.completedAt) && input.completedAt >= 0 && input.completedAt <= at)) throw invalid();
+      return transaction('readwrite', ['entries', 'selections'], ({ tx, request, done }) => {
+        const selected = () => { tx.objectStore('selections').put({ scope: scopeKey, id }); done({ id }); };
+        if (id === null) { selected(); return; }
+        request(tx.objectStore('entries').get([scopeKey, id]), entry => {
+          if (!entry || expired(entry, at)) throw invalid();
+          selected();
+        });
+      });
+    }
+    async function save(input, { activate = true } = {}) {
+      const at = time();
+      if (typeof activate !== 'boolean' || !input || !validId(input.id) || !(input.revision === null || validRevision(input.revision)) || typeof input.title !== 'string' || input.title.length > 500 || typeof input.pinned !== 'boolean' || !(input.completedAt === null || Number.isSafeInteger(input.completedAt) && input.completedAt >= 0 && input.completedAt <= at)) throw invalid();
       // Snapshot the caller's values before opening the asynchronous transaction.
       const { id, revision, title, completedAt, pinned } = input;
       const body = encode(input.payload), key = [scopeKey, id];
-      return transaction('readwrite', ['entries', 'payloads', 'owners'], ({ tx, request, done }) => {
+      return transaction('readwrite', ['entries', 'payloads', 'owners', 'selections'], ({ tx, request, done }) => {
         // One owner budget across all apps/environments. Index lookups never read
         // another user's records. Capacity cleanup only removes expired records.
         request(tx.objectStore('entries').index('owner').getAll(ownerKey), rows => {
@@ -192,6 +217,7 @@ const KTReleaseHistory = (() => {
             // and recreation of the same id (without retaining deleted payloads).
             tx.objectStore('owners').put({ owner: ownerKey, revision: entry.revision });
             tx.objectStore('entries').put(entry); tx.objectStore('payloads').put(payload);
+            if (activate) tx.objectStore('selections').put({ scope: scopeKey, id });
             done(metadata(entry));
           });
         });
@@ -223,7 +249,7 @@ const KTReleaseHistory = (() => {
       });
     }
     function close() { closed = true; connection?.close(); connection = null; }
-    return { list, load, save, remove, prune, usage, close };
+    return { list, load, getSelection, select, save, remove, prune, usage, close };
   }
   return { create, TTL, DEFAULT_MAX_BYTES };
 })();

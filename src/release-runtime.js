@@ -388,7 +388,8 @@ function mountReleaseWorkspace(host, d) {
     return user?.id && d.appId != null ? { domain: location.origin, appId: String(d.appId), userId: String(user.id), environment: 'preview' } : null;
   };
   const sameScope = (a, b) => !!a && !!b && ['domain', 'appId', 'userId', 'environment'].every(key => String(a[key]) === String(b[key]));
-  function editingSnapshot() { return codePanel?.exportDrafts?.() || pendingEditor; }
+  function editingSnapshot() { return pendingEditor || codePanel?.exportDrafts?.() || null; }
+  const editorContent = () => { const value = editingSnapshot(); return value?.files?.length ? JSON.stringify(value) : null; };
   function validEditor(value) {
     return value == null || value.version === 1 && Array.isArray(value.files) && value.files.length <= 200 &&
       (value.active == null || typeof value.active === 'string') &&
@@ -397,17 +398,19 @@ function mountReleaseWorkspace(host, d) {
         (file.registeredText == null || typeof file.registeredText === 'string'));
   }
   function initializeHistory() {
+    if (history) return;
     const scope = historyScope();
     if (!scope || typeof KTReleaseHistory === 'undefined' || !globalThis.indexedDB) { historyInitError = 'この環境では会話の自動保存を利用できません。必要な内容をファイルで保存してください。'; return; }
     try {
+      historyInitError = '';
       const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
       history = KTReleaseHistorySession.create({ store,
         capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', editor: editingSnapshot() }),
-        restore: async payload => {
+        restore: async (payload, { shouldContinue: continueOpening = () => true } = {}) => {
           if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor)) return false;
           if (codePanel?.canRestoreDrafts?.() === false) return false;
-          const draftBefore = view.getDraft(), editorBefore = JSON.stringify(editingSnapshot());
-          const shouldContinue = () => sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === JSON.stringify(editingSnapshot()) && codePanel?.canRestoreDrafts?.() !== false;
+          const draftBefore = view.getDraft(), editorBefore = editorContent();
+          const shouldContinue = () => continueOpening() && sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === editorContent() && codePanel?.canRestoreDrafts?.() !== false;
           if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
           pendingEditor = payload.editor || { version: 1, files: [], active: null };
           if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;
@@ -425,7 +428,7 @@ function mountReleaseWorkspace(host, d) {
         canSwitch: () => view?.canSwitchSession?.() === true && codePanel?.canRestoreDrafts?.() !== false,
         onStatus: () => view?.updateHistoryStatus?.(), ...(d.historySessionOptions || {})
       });
-      history.initialize();
+      if (d.canAutoFetch?.() !== false) history.initialize();
       stateUnsubscribe = controller.subscribe(() => history.changed());
       draftUnsubscribe = view.subscribeDraft(() => history.changed());
       if (codePanel) attachHistoryEditor();
@@ -438,13 +441,14 @@ function mountReleaseWorkspace(host, d) {
     editorUnsubscribe = codePanel.subscribeDrafts?.(() => history.changed());
   }
   async function historyDialog() {
-    const el = dialog('保存した会話', '<p>この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-save>今の会話を保存</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
+    const el = dialog('保存した会話', '<p>入力や編集は自動保存され、次に開くと前の続きが表示されます。この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-retry hidden>保存をやり直す</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
     let busy = false;
     el.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
     const note = text => { if (el.open) el.querySelector('[data-history-note]').textContent = text; };
     const renderList = async () => {
-      if (!history) { note(historyInitError); el.querySelector('[data-history-save]').disabled = true; el.querySelector('[data-history-complete]').disabled = true; return; }
+      if (!history) { note(historyInitError); el.querySelector('[data-history-retry]').hidden = true; el.querySelector('[data-history-complete]').disabled = true; return; }
       const result = await history.list(); if (!el.open) return;
+      el.querySelector('[data-history-retry]').hidden = history.getStatus().state !== 'error';
       const mb = value => (value / 1024 / 1024).toFixed(2);
       note('保存容量 ' + mb(result.usage.bytes) + ' / ' + mb(result.usage.maxBytes) + ' MB（同じ利用者の全アプリ）');
       el.querySelector('[data-history-list]').innerHTML = result.entries.length ? result.entries.map(entry => '<article style="padding:12px 0;border-bottom:1px solid var(--kt-line)"><strong>' + esc(entry.title) + '</strong><p class="ktr-note">' +
@@ -469,7 +473,7 @@ function mountReleaseWorkspace(host, d) {
           if (!await history.setPinned({ id: data.historyPin, revision: Number(data.historyRevision) }, data.historyPinned !== 'true')) throw new Error(history.getStatus().message);
         } else if (button.hasAttribute('data-history-complete')) {
           if (!await history.markComplete()) throw new Error(history.getStatus().message || '会話がないか、処理中のため完了にできません。');
-        } else if (button.hasAttribute('data-history-save')) await history.flush();
+        } else if (button.hasAttribute('data-history-retry')) await history.flush();
         await renderList();
       } catch (error) { note(error.message || '保存した会話を確認できませんでした。'); }
       finally { busy = false; if (el.open) el.querySelector('[data-close]').disabled = false; }
@@ -497,7 +501,7 @@ function mountReleaseWorkspace(host, d) {
   };
   window.addEventListener('beforeunload', warnBeforeLeave);
   return { controller, view, history: () => history, capability: () => capability, refreshCapability,
-    onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
+    onVisible() { initializeHistory(); if (d.canAutoFetch?.() !== false) history?.initialize(); view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
     attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
     async explainEnvironmentComparison(result, localEdits) {

@@ -31,10 +31,128 @@ test('実際の IndexedDB で履歴・失敗時の保持・容量を検証する
       window.item = (id, payload = { messages: [{ text: '会話' }] }) => ({ id, revision: null, title: '履歴 ' + id, payload, completedAt: null, pinned: false });
       window.codeOf = promise => promise.then(() => null, error => error.code);
       window.records = async name => {
-        const db = await new Promise((resolve, reject) => { const r = indexedDB.open(name, 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
-        try { return await new Promise((resolve, reject) => { const tx = db.transaction(['entries', 'payloads']); const out = {}; for (const key of ['entries', 'payloads']) { const r = tx.objectStore(key).getAll(); r.onsuccess = () => { out[key] = r.result; }; } tx.oncomplete = () => resolve(out); tx.onerror = () => reject(tx.error); }); } finally { db.close(); }
+        const db = await new Promise((resolve, reject) => { const r = indexedDB.open(name); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+        try { return await new Promise((resolve, reject) => { const names = [...db.objectStoreNames], tx = db.transaction(names); const out = { version: db.version }; for (const key of names) { const r = tx.objectStore(key).getAll(); r.onsuccess = () => { out[key] = r.result; }; } tx.oncomplete = () => resolve(out); tx.onerror = () => reject(tx.error); }); } finally { db.close(); }
       };
     }, scope);
+
+    await t.test('v1 の履歴・本文・容量とrevisionを保持してv2へ移行する', async () => {
+      const result = await page.evaluate(async () => {
+        clock = 1800000000000;
+        const name = 'history-upgrade', scopeKey = JSON.stringify([scope.domain, scope.appId, scope.userId, scope.environment]), ownerKey = JSON.stringify([scope.domain, scope.userId]);
+        const entry = { key: [scopeKey, 'legacy'], scope: scopeKey, owner: ownerKey, id: 'legacy', revision: 4, title: '移行前の履歴', updatedAt: clock, completedAt: null, pinned: false, expiresAt: null, bytes: 321 };
+        const payload = { key: entry.key, body: { format: 1, strings: [], tree: [2, 'text', 'v1 の本文'] } }, owner = { owner: ownerKey, revision: 9 };
+        const db = await new Promise((resolve, reject) => {
+          const r = indexedDB.open(name, 1);
+          r.onupgradeneeded = () => {
+            const entries = r.result.createObjectStore('entries', { keyPath: 'key' }); entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
+            r.result.createObjectStore('payloads', { keyPath: 'key' }); r.result.createObjectStore('owners', { keyPath: 'owner' });
+          };
+          r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+        });
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(['entries', 'payloads', 'owners'], 'readwrite');
+          tx.objectStore('entries').put(entry); tx.objectStore('payloads').put(payload); tx.objectStore('owners').put(owner);
+          tx.oncomplete = resolve; tx.onabort = () => reject(tx.error);
+        }); db.close();
+        const store = make(name), selection = await store.getSelection(), loaded = await store.load('legacy'), usage = await store.usage(), disk = await records(name);
+        const saved = await store.save({ ...item('legacy', loaded.payload), revision: loaded.revision });
+        return { entry, payload, owner, selection, loaded, usage, disk, saved, selected: await store.getSelection() };
+      });
+      assert.equal(result.selection, null); assert.equal(result.disk.version, 2); assert.deepEqual(result.disk.selections, []);
+      assert.deepEqual(result.disk.entries, [result.entry]); assert.deepEqual(result.disk.payloads, [result.payload]); assert.deepEqual(result.disk.owners, [result.owner]);
+      assert.deepEqual(result.loaded.payload, { text: 'v1 の本文' }); assert.equal(result.usage.bytes, 321); assert.equal(result.usage.count, 1);
+      assert.equal(result.saved.revision, 10); assert.deepEqual(result.selected, { id: 'legacy' });
+    });
+
+    await t.test('最終選択と明示的な新規作業を本文なしで保存し、再接続後も区別する', async () => {
+      const result = await page.evaluate(async () => {
+        clock = 1800000000000; const store = make('history-selection'), initial = await store.getSelection();
+        const first = await store.save(item('first')); clock++; await store.save(item('second'));
+        const afterSave = await store.getSelection(), beforeSelect = await store.list();
+        const selected = await store.select('first'), reads = [], originalGet = IDBObjectStore.prototype.get;
+        IDBObjectStore.prototype.get = function (...args) { reads.push(this.name); return originalGet.apply(this, args); };
+        let current; try { current = await store.getSelection(); } finally { IDBObjectStore.prototype.get = originalGet; }
+        const afterSelect = await store.list(); store.close(); const again = make('history-selection'), reopened = await again.getSelection();
+        const empty = await again.select(null); again.close(); const last = make('history-selection');
+        return { initial, first, afterSave, selected, current, reads, beforeSelect, afterSelect, reopened, empty, reopenedEmpty: await last.getSelection(), disk: await records('history-selection') };
+      });
+      assert.equal(result.initial, null); assert.deepEqual(result.afterSave, { id: 'second' });
+      for (const value of [result.selected, result.current, result.reopened]) assert.deepEqual(value, { id: 'first' });
+      assert.deepEqual(result.reads, ['selections']); assert.deepEqual(result.beforeSelect, result.afterSelect);
+      assert.deepEqual(result.empty, { id: null }); assert.deepEqual(result.reopenedEmpty, { id: null });
+      assert.equal(result.disk.entries.length, 2); assert.deepEqual(result.disk.selections, [{ scope: JSON.stringify([scope.domain, scope.appId, scope.userId, scope.environment]), id: null }]);
+    });
+
+    await t.test('非選択の履歴の固定や保存はactivate:falseで最終選択を変えない', async () => {
+      const result = await page.evaluate(async () => {
+        const store = make('history-inactive-save');
+        const first = await store.save(item('first')); let second = await store.save(item('second'));
+        await store.select('first');
+        second = await store.save({ ...item('second'), revision: second.revision, pinned: true }, { activate: false });
+        const afterPin = await store.getSelection(); await store.select(null);
+        second = await store.save({ ...item('second'), revision: second.revision, pinned: false }, { activate: false });
+        const afterEmpty = await store.getSelection();
+        const invalidOption = await codeOf(store.save({ ...item('first'), revision: first.revision }, { activate: 'yes' }));
+        const afterInvalid = await store.getSelection();
+        await store.save({ ...item('first'), revision: first.revision });
+        return { afterPin, afterEmpty, invalidOption, afterInvalid, final: await store.getSelection(), second };
+      });
+      assert.deepEqual(result.afterPin, { id: 'first' }); assert.deepEqual(result.afterEmpty, { id: null });
+      assert.equal(result.invalidOption, 'HISTORY_INVALID'); assert.deepEqual(result.afterInvalid, { id: null });
+      assert.deepEqual(result.final, { id: 'first' }); assert.equal(result.second.pinned, false);
+    });
+
+    await t.test('選択はdomain・app・user・environmentの完全一致で分離し不明なIDを拒否する', async () => {
+      const result = await page.evaluate(async () => {
+        const variants = [scope, { ...scope, domain: 'other.cybozu.com' }, { ...scope, appId: '311' }, { ...scope, userId: 'user-b' }, { ...scope, environment: 'preview' }];
+        const current = variants.map(scope => make('history-selection-scope', { scope }));
+        for (let i = 0; i < current.length; i++) await current[i].save(item('private-' + i));
+        const before = await Promise.all(current.map(store => store.getSelection()));
+        const denied = await Promise.all(current.slice(1).map(store => codeOf(store.select('private-0'))));
+        const invalid = []; for (const id of [undefined, '', 'x'.repeat(201), 42, 'missing']) invalid.push(await codeOf(current[0].select(id)));
+        await current[1].select(null);
+        return { before, denied, invalid, after: await Promise.all(current.map(store => store.getSelection())), disk: await records('history-selection-scope') };
+      });
+      assert.deepEqual(result.before, Array.from({ length: 5 }, (_, i) => ({ id: 'private-' + i })));
+      assert.deepEqual(result.denied, Array(4).fill('HISTORY_INVALID')); assert.deepEqual(result.invalid, Array(5).fill('HISTORY_INVALID'));
+      assert.deepEqual(result.after, [{ id: 'private-0' }, { id: null }, { id: 'private-2' }, { id: 'private-3' }, { id: 'private-4' }]);
+      assert.equal(result.disk.selections.length, 5); for (const selected of result.disk.selections) assert.deepEqual(Object.keys(selected).sort(), ['id', 'scope']);
+    });
+
+    await t.test('選択中の履歴を削除・期限切れで除去しても他の履歴への復帰を許さない', async () => {
+      const result = await page.evaluate(async () => {
+        clock = 1800000000000; const store = make('history-selection-removal');
+        await store.save(item('other')); await store.save({ ...item('expired'), completedAt: clock }); clock += H.TTL;
+        const unavailable = await store.load('expired'), rejected = await codeOf(store.select('expired')), pruned = await store.prune(), afterPrune = await store.getSelection();
+        const removed = await store.save(item('removed')); await store.remove('removed', removed.revision);
+        const afterRemove = await store.getSelection();
+        const sibling = make('history-selection-removal', { scope: { ...scope, appId: '311' } });
+        await sibling.save({ ...item('expired-sibling'), completedAt: clock }); clock += H.TTL;
+        await store.save(item('new'));
+        return { unavailable, rejected, pruned, afterPrune, afterRemove, list: (await store.list()).map(entry => entry.id), sibling: await sibling.getSelection(), siblingList: await sibling.list() };
+      });
+      assert.equal(result.unavailable, null); assert.equal(result.rejected, 'HISTORY_INVALID'); assert.equal(result.pruned.removed, 1);
+      assert.deepEqual(result.afterPrune, { id: 'expired' }); assert.deepEqual(result.afterRemove, { id: 'removed' });
+      assert.deepEqual(result.list.sort(), ['new', 'other']); assert.deepEqual(result.sibling, { id: 'expired-sibling' }); assert.deepEqual(result.siblingList, []);
+    });
+
+    await t.test('選択の保存が失敗すると本文・メタデータ・revisionも原子的に戻す', async () => {
+      const result = await page.evaluate(async () => {
+        const store = make('history-selection-failure'); await store.save(item('chosen'));
+        const target = await store.save(item('target', { text: '前回保存' }), { activate: false }), before = await records('history-selection-failure');
+        const original = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (...args) { if (this.name === 'selections') throw new DOMException('quota test', 'QuotaExceededError'); return original.apply(this, args); };
+        let failed, failedEmpty;
+        try {
+          failed = await codeOf(store.save({ ...item('target', { text: '未保存' }), revision: target.revision }));
+          failedEmpty = await codeOf(store.select(null));
+        } finally { IDBObjectStore.prototype.put = original; }
+        return { failed, failedEmpty, before, after: await records('history-selection-failure'), selected: await store.getSelection(), target: await store.load('target') };
+      });
+      assert.equal(result.failed, 'HISTORY_LIMIT'); assert.equal(result.failedEmpty, 'HISTORY_LIMIT'); assert.deepEqual(result.before, result.after);
+      assert.deepEqual(result.selected, { id: 'chosen' }); assert.deepEqual(result.target.payload, { text: '前回保存' });
+    });
 
     await t.test('一覧はメタデータのみ、選択時だけ本文を読み、再接続後も復元する', async () => {
       const result = await page.evaluate(async () => {

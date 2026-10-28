@@ -5,9 +5,10 @@ const clone = x => JSON.parse(JSON.stringify(x));
 const deferred = () => { let resolve; const promise = new Promise(r => resolve = r); return {promise,resolve}; };
 function fixture() {
   let payload = {version:1,session:{state:{messages:[{role:'user',text:'元の依頼'}],explanations:[],goal:'依頼'}},draft:'入力中',editor:null};
-  let time = 1000, id=0, gate=null, fail=false, access=true, restores=0; const saved=new Map(), statuses=[];
+  let time = 1000, id=0, gate=null, fail=false, access=true, restores=0; const saved=new Map(), statuses=[]; let selected=null;
   const store={
-    async save(value){if(gate){const g=gate;gate=null;await g.promise;}if(fail)throw Object.assign(Error('capacity'),{code:'HISTORY_LIMIT'});const old=saved.get(value.id);if((old?.revision??null)!==value.revision)throw Object.assign(Error('conflict'),{code:'HISTORY_CONFLICT'});const entry={...clone(value),revision:(old?.revision||0)+1,updatedAt:time};saved.set(value.id,entry);const{payload,...meta}=entry;return meta;},
+    async prune(){}, async getSelection(){return selected;}, async select(id){selected={id};},
+    async save(value,options={}){if(gate){const g=gate;gate=null;await g.promise;}if(fail)throw Object.assign(Error('capacity'),{code:'HISTORY_LIMIT'});const old=saved.get(value.id);if((old?.revision??null)!==value.revision)throw Object.assign(Error('conflict'),{code:'HISTORY_CONFLICT'});const entry={...clone(value),revision:(old?.revision||0)+1,updatedAt:time};saved.set(value.id,entry);if(options.activate!==false)selected={id:entry.id};const{payload,...meta}=entry;return meta;},
     async load(id){return saved.has(id)?clone(saved.get(id)):null;},
     async list(){return [...saved.values()].map(({payload,...meta})=>clone(meta));},async usage(){return {bytes:0,maxBytes:100000,count:saved.size};},
     async remove(id,revision){if(saved.get(id)?.revision!==revision)throw Object.assign(Error('conflict'),{code:'HISTORY_CONFLICT'});saved.delete(id);return true;},close(){}
