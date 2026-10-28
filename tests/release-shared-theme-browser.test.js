@@ -218,7 +218,12 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
           assert.equal(await button.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true, action + 'の文を切らず折り返す');
         }
         assert.match(await page.locator('#view-config-lens [data-cl-summary]').innerText(), /変更\s*1件/);
-        assert.match((await page.locator('#view-config-lens .ktcl-source').allTextContents()).join(' '), /運用環境.*1.*動作テスト環境.*2/);
+        // The current Config Lens keeps both comparison origins visible; revisions are in its details.
+        assert.match(await page.locator('#view-config-lens [data-cl-origin="before"]').innerText(), /現在の運用環境/);
+        assert.equal(await page.locator('#view-config-lens [data-cl-target]').inputValue(), 'preview');
+        await page.locator('#view-config-lens .ktcl-provenance > summary').click();
+        assert.match(await page.locator('#view-config-lens .ktcl-provenance').innerText(), /設定の版：左 1.*右 2/);
+        await page.locator('#view-config-lens .ktcl-provenance > summary').click();
         assert.match(await page.locator('#view-config-lens [data-cl-category="aclField"]').innerText(), /未確認/);
         await page.locator('.ktcl-view').evaluate(view => { for (let node = view; node && node !== document.body; node = node.parentElement) node.scrollTop = 0; });
         const lensOverview = await page.locator('.ktcl-view').evaluate(view => {
@@ -227,12 +232,12 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
             const rect = view.querySelector(selector)?.getBoundingClientRect();
             return rect ? { top: rect.top - top, bottom: rect.bottom - top, height: rect.height } : null;
           };
-          return { viewportWidth: innerWidth, viewWidth: view.clientWidth, headerHeight: box('.ktcl-shell')?.top, header: box('.ktcl-header'), source: box('.ktcl-source'), summary: box('[data-cl-summary]') };
+          return { viewportWidth: innerWidth, viewWidth: view.clientWidth, headerHeight: box('.ktcl-shell')?.top, header: box('.ktcl-header'), source: box('.ktcl-origins'), summary: box('[data-cl-summary]') };
         });
         await page.screenshot({ path: path.join(output, label + '-config-lens-overview.png'), fullPage: true });
         await page.locator('#view-config-lens [data-cl-category="fields"]').click();
         await page.locator('#view-config-lens .ktcl-entry > summary').click();
-        const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-source', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
+        const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-origin-time', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
         const lens = await inspect(page, lensSelectors), lensFailures = [];
         const shellSample = normal.samples.find(sample => sample.selector === '#kt-toolkit');
         const lensSample = lens.samples.find(sample => sample.selector === '.ktcl-view');

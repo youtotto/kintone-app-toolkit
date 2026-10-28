@@ -26,6 +26,20 @@ const KTReleaseView = (() => {
   const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>入力した内容を送信するか、消してから操作してください。</p>`;
   const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
   function connectionOf(options) { try { return (typeof options.connection === 'function' ? options.connection() : options.connection) || {}; } catch (_) { return { connected: false, message: '接続の状態を確認できません。' }; } }
+  function historyStatusHtml(options) {
+    let status;
+    try { status = typeof options.historyStatus === 'function' ? options.historyStatus() : options.historyStatus; }
+    catch (_) { status = { state: 'unavailable', message: '保存の状態を確認できません。' }; }
+    if (!status?.state) return '';
+    const labels = { saving: '保存中…', saved: '保存済み', error: '保存できません', unavailable: '保存を利用できません', loading: '読み込み中…' };
+    const label = labels[status.state];
+    if (!label) return '';
+    const detail = [label, status.completed ? '完了' : '', status.pinned ? '保護中' : ''].filter(Boolean).join('・');
+    const failed = status.state === 'error' || status.state === 'unavailable';
+    const message = status.message || (failed ? '保存した会話を開いて、保存の状態を確認してください。' : detail);
+    const indicator = '<span class="ktr-history-status" data-release-history-state="' + esc(status.state) + '" role="' + (failed ? 'alert' : 'status') + '">' + esc(detail) + '</span>';
+    return failed ? '<details class="ktr-history-status-detail" data-release-panel="history-status"><summary>' + indicator + '</summary><div class="ktr-history-status-message"><p>' + esc(message) + '</p></div></details>' : '<span title="' + esc(message) + '">' + indicator + '</span>';
+  }
   function usageHtml(value) {
     const usage = workspace.usageOf(value), count = n => n == null ? '未確認' : n + '回';
     if (!usage) return '<p class="ktr-note">利用状況は未確認です。［接続を更新］で確認できます。</p>';
@@ -101,7 +115,7 @@ const KTReleaseView = (() => {
     return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(consultationLabel(m.consultationTarget))}</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
   }
   function composer(state, options = {}) {
-    const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
+    const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical || !!options.switching;
     const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
     const quotaBlocked = document ? conn.canCreate === false : conn.canConsult === false;
     const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
@@ -231,23 +245,24 @@ const KTReleaseView = (() => {
     const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
       (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
       run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-    const canRestore = run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+    const canRestore = !run.archived && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
     const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
     const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
     const checkMobile = platforms.has('mobile');
     const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
     return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
-      ${list(result.reasons || [], 'ktr-reasons')}
+      ${run.archived ? '<p class="ktr-note">保存した反映結果です。現在の状態や、元に戻せることを保証するものではありません。</p>' : ''}${list(result.reasons || [], 'ktr-reasons')}
       ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
       ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
       ${!run.rollback && status === 'complete' && checkDesktop ? '<p>PCの動作は、動作テスト環境を開いて確認してください。</p>' : ''}
       ${!run.rollback && status === 'complete' && checkMobile ? '<p>モバイルの動作は、動作テスト環境では確認できません。モバイル画面での確認は別途必要です。</p>' : ''}
       ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
       ${status === 'unknown' ? `<p>${run.rollback ? 'もう一度戻す前に、現在の状態を確認してください。' : '同じ変更をもう一度反映せず、現在の設定を確認してください。'}</p>` : ''}
-      <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
+      <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.archived && !run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${!run.archived && run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
   }
   function rollbackHtml(state, options) {
     const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
+    if (run?.archived) return runHtml(run, options);
     return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
   }
   function diagnosticHtml(error) {
@@ -288,14 +303,14 @@ const KTReleaseView = (() => {
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
     const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
     const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</nav></div></header>
       <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
   }
   function create(host, options = {}) {
     if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
     const controller = options.controller;
-    let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false;
-    const expanded = new Set(), displayListeners = new Set();
+    let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false, switching = false;
+    const expanded = new Set(), displayListeners = new Set(), draftListeners = new Set();
     let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null;
     function draw(state = controller.getState()) {
       if (disposed) return;
@@ -314,7 +329,7 @@ const KTReleaseView = (() => {
       const codePanel = options.codePanelElement?.();
       const codeFocus = codePanel?.contains(host.ownerDocument?.activeElement) ? host.ownerDocument.activeElement : null;
       codePanel?.remove();
-      host.innerHTML = render(state, { ...options, draft, sending, selectedRunId, notice });
+      host.innerHTML = render(state, { ...options, draft, sending: sending || switching, switching, selectedRunId, notice });
       if (codePanel) host.querySelector('.ktr-layout').appendChild(codePanel);
       codeFocus?.focus?.({ preventScroll: true });
       const nextNotice = host.querySelector?.('[data-release-panel="header-notice"]'), sameNotice = nextNotice?.dataset.releaseNotice === previousNotice?.dataset.releaseNotice;
@@ -337,17 +352,44 @@ const KTReleaseView = (() => {
       for (const listener of displayListeners) listener();
       previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
     }
+    // Autosave status changes must not replace the composer during IME input.
+    function updateHistoryStatus() {
+      if (disposed) return;
+      const slot = host.querySelector?.('[data-release-history-status]');
+      if (!slot) return;
+      const markup = historyStatusHtml(options);
+      if (slot.innerHTML === markup) return;
+      const previous = slot.querySelector('details'), wasOpen = !!previous?.open;
+      const hadFocus = !!previous && previous.querySelector('summary') === host.ownerDocument?.activeElement;
+      const scrollTop = previous?.querySelector('.ktr-history-status-message')?.scrollTop || 0;
+      slot.innerHTML = markup;
+      const next = slot.querySelector('details');
+      if (next && wasOpen) { next.open = true; expanded.add('history-status'); }
+      else expanded.delete('history-status');
+      if (next && hadFocus) next.querySelector('summary')?.focus?.({ preventScroll: true });
+      if (next?.open) { const message = next.querySelector('.ktr-history-status-message'); if (message) message.scrollTop = scrollTop; }
+    }
     function updateDraftGuard() {
-      const pending = draftPending({ draft, sending });
+      const pending = draftPending({ draft, sending: sending || switching });
       host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { el.disabled = el.dataset.releaseBaseDisabled === 'true' || pending; });
       host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
       const state = controller.getState();
-      host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
+      host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || switching || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
     }
-    function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
+    function setDraft(value) {
+      if (disposed) return false;
+      const next = String(value ?? ''), changed = next !== draft;
+      draft = next;
+      const input = host.querySelector?.('#kt-release-input');
+      if (input && input.value !== draft) input.value = draft;
+      updateDraftGuard();
+      if (changed) for (const listener of draftListeners) listener(draft);
+      return changed;
+    }
+    function inputChanged(event) { if (event.target?.id === 'kt-release-input') setDraft(event.target.value); }
     function canSend(purpose = controller.getState().requestPurpose) {
       const state = controller.getState(), conn = connectionOf(options);
-      return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
+      return !disposed && !sending && !switching && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
     }
     async function send(request, onStart, suggestionReference = null, requestOptions = null) {
       const fromDocument = typeof request === 'string' && !suggestionReference;
@@ -360,8 +402,7 @@ const KTReleaseView = (() => {
       const restoreInput = () => {
         const activeInput = host.querySelector?.('#kt-release-input');
         if (!cleared || disposed || controller.getState().taskId !== sentTaskId || String(activeInput?.value ?? draft).trim()) return;
-        draft = value; if (activeInput) activeInput.value = value;
-        updateDraftGuard();
+        setDraft(value);
       };
       try {
         if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
@@ -369,7 +410,7 @@ const KTReleaseView = (() => {
         if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (fromTemplate ? conn.canCreate === false : controller.getState().requestPurpose === 'document' ? conn.canCreate === false : conn.canConsult === false)) return false;
         if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
         if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
-        if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
+        if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; setDraft(''); }
         selectedRunId = null; notice = '';
         onStart?.();
         const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: 'document' } : undefined);
@@ -378,6 +419,7 @@ const KTReleaseView = (() => {
       } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
     }
     async function act(action, id, target = {}) {
+      if (disposed || switching) return;
       const state = controller.getState();
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
       if (action === 'send') return send();
@@ -410,8 +452,22 @@ const KTReleaseView = (() => {
         }
         draw(); return;
       }
-      if (action === 'answer') { controller.setRequestPurpose('consultation'); draft = target.dataset?.releaseAnswer || ''; const input = host.querySelector?.('#kt-release-input'); if (input) { input.value = draft; input.focus?.(); } updateDraftGuard(); return; }
-      if (action === 'new-task') { draft = ''; const input = host.querySelector?.('#kt-release-input'); if (input) input.value = ''; selectedRunId = null; notice = ''; return controller.newTask(); }
+      if (action === 'answer') { controller.setRequestPurpose('consultation'); setDraft(target.dataset?.releaseAnswer || ''); host.querySelector?.('#kt-release-input')?.focus?.(); return; }
+      if (action === 'new-task') {
+        if (sending || busy.has(state.phase)) return;
+        try {
+          const pending = typeof options.onNewTask === 'function' ? options.onNewTask() : true;
+          switching = true; draw();
+          if (await pending === false) return false;
+          if (disposed || sending || busy.has(controller.getState().phase)) return false;
+          setDraft(''); selectedRunId = null; notice = '';
+          return controller.newTask();
+        } finally { switching = false; draw(); }
+      }
+      if (action === 'saved-history') {
+        if (sending || busy.has(state.phase)) return;
+        return options.onHistory?.();
+      }
       if (action === 'cancel-rollback') return controller.cancelRollback();
       if (action === 'request-rollback') { selectedRunId = null; return controller.requestRollback(id); }
       if (action === 'rollback') return controller.rollback(id);
@@ -445,7 +501,7 @@ const KTReleaseView = (() => {
     }
     function suggestionChanged(event) {
       const target = event.target;
-      if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || selectedRunId) return;
+      if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || switching || selectedRunId) return;
       controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
     }
     function keydown(event) { if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); send().catch(error => { notice = error.message; draw(); }); } }
@@ -457,13 +513,14 @@ const KTReleaseView = (() => {
     host.addEventListener('toggle', toggled, true);
     const unsubscribe = controller.subscribe(draw);
     draw();
-    return { canRequestDocument: () => canSend('document'), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { draft = text; input.value = draft; updateDraftGuard(); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+    return { updateHistoryStatus, newTask: () => act('new-task'), canSwitchSession() { return !disposed && !sending && !switching && !busy.has(controller.getState().phase); }, resetDisplay() { if (disposed) return; selectedRunId = null; notice = ''; expanded.clear(); draw(); }, getDraft: () => String(host.querySelector?.('#kt-release-input')?.value ?? draft), setDraft, subscribeDraft(fn) { draftListeners.add(fn); return () => draftListeners.delete(fn); }, canRequestDocument: () => canSend('document'), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !switching && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { setDraft(text); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); draftListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
   }
   const styles = `
     .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
     .ktr-consult-target{padding:8px;border:1px solid var(--ktr-line);border-radius:6px;margin:8px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.ktr-consult-target small{flex-basis:100%;color:var(--ktr-muted)}
     .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:clamp(14px,1.5%,20px);overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-current{border-top:1px solid var(--ktr-line);padding-top:24px;margin-top:24px;scrollbar-gutter:stable}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;gap:6px;flex-wrap:wrap}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
     .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:20px;line-height:1.4;margin:0 0 14px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
+    .ktr-heading-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-history-status{font-size:11px;color:var(--ktr-muted)}.ktr-history-status[data-release-history-state="error"],.ktr-history-status[data-release-history-state="unavailable"]{color:var(--ktr-danger)}.ktr-workspace .ktr-history-status-detail{margin:0;font-size:11px}.ktr-workspace .ktr-history-status-detail>summary{padding:0}.ktr-history-status-message{position:absolute;z-index:5;left:0;top:calc(100% - 8px);width:min(420px,100%);max-height:30dvh;overflow:auto;padding:12px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);box-shadow:0 6px 20px #0002}.ktr-history-status-message>p{margin:0;font-size:12px}
     .ktr-heading{min-width:0}.ktr-title-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-workspace .ktr-header-notice{margin:0;min-width:0;max-width:100%;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-header-notice>summary{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;list-style:none}.ktr-header-notice>summary::-webkit-details-marker{display:none}.ktr-header-notice>summary:after{content:'▾';color:var(--ktr-muted)}.ktr-header-notice[open]>summary:after{content:'▴'}.ktr-header-notice>summary [role="alert"]{color:var(--ktr-danger)}.ktr-header-notice>summary small{font-size:inherit;white-space:nowrap}
     .ktr-header-notice-body{position:absolute;z-index:5;top:calc(100% - 8px);left:0;width:min(520px,100%);max-height:35dvh;overflow:auto;padding:14px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);color:var(--ktr-text);box-shadow:0 6px 20px #0002;font-size:13px;overflow-wrap:anywhere}.ktr-header-notice-body section+section{border-top:1px solid var(--ktr-line);padding-top:8px}.ktr-header-notice-body .ktr-error{max-height:none;padding:0;border:0;background:transparent;margin:0 0 12px}.ktr-header-notice-body button{font-size:12px}
     .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}

@@ -53,6 +53,7 @@ function mountReleaseWorkspace(host, d) {
       codeSlot.setAttribute('aria-label', 'コードと差分');
     }
     codePanel = panel;
+    attachHistoryEditor();
     view?.render();
     if (codeOpen) codePanel.onVisible?.();
     return true;
@@ -151,7 +152,7 @@ function mountReleaseWorkspace(host, d) {
   controller.subscribe(state => {
     const run = state.runs.find(r => r.id === state.resultRunId);
     const key = run && run.id + ':' + (run.rollback?.status || 'applied');
-    if (state.phase === 'result' && run && (run.result?.written || run.result?.written === null || run.status === 'unknown') && !notifiedResults.has(key)) {
+    if (state.phase === 'result' && run && !run.archived && (run.result?.written || run.result?.written === null || run.status === 'unknown') && !notifiedResults.has(key)) {
       notifiedResults.add(key);
       latestBase = null;
       d.onSettingsChanged?.({ preview: true, production: false, source: 'ai' });
@@ -379,18 +380,123 @@ function mountReleaseWorkspace(host, d) {
     const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.available ? String(b.diff.items.length) + '件' + (b.diff.complete === false ? '（比較できた範囲）' : '') : '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
     if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
   }
+  // Only the current app/user may save or open local work. Authentication stays in its existing store.
+  let history = null, historyInitError = '', pendingEditor = null, editorUnsubscribe = null, draftUnsubscribe = null, stateUnsubscribe = null;
+  const historyScope = () => {
+    if (d.historyScope) return { ...d.historyScope };
+    let user; try { user = globalThis.kintone?.getLoginUser?.(); } catch (_) {}
+    return user?.id && d.appId != null ? { domain: location.origin, appId: String(d.appId), userId: String(user.id), environment: 'preview' } : null;
+  };
+  const sameScope = (a, b) => !!a && !!b && ['domain', 'appId', 'userId', 'environment'].every(key => String(a[key]) === String(b[key]));
+  function editingSnapshot() { return codePanel?.exportDrafts?.() || pendingEditor; }
+  function validEditor(value) {
+    return value == null || value.version === 1 && Array.isArray(value.files) && value.files.length <= 200 &&
+      (value.active == null || typeof value.active === 'string') &&
+      value.files.every(file => file && typeof file.name === 'string' && file.name.length <= 300 && typeof file.text === 'string' &&
+        ['preview', 'production'].includes(file.environment) && ['desktop', 'mobile'].includes(file.target) && ['js', 'css'].includes(file.kind) &&
+        (file.registeredText == null || typeof file.registeredText === 'string'));
+  }
+  function initializeHistory() {
+    const scope = historyScope();
+    if (!scope || typeof KTReleaseHistory === 'undefined' || !globalThis.indexedDB) { historyInitError = 'この環境では会話の自動保存を利用できません。必要な内容をファイルで保存してください。'; return; }
+    try {
+      const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
+      history = KTReleaseHistorySession.create({ store,
+        capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', editor: editingSnapshot() }),
+        restore: async payload => {
+          if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor)) return false;
+          if (codePanel?.canRestoreDrafts?.() === false) return false;
+          const draftBefore = view.getDraft(), editorBefore = JSON.stringify(editingSnapshot());
+          const shouldContinue = () => sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === JSON.stringify(editingSnapshot()) && codePanel?.canRestoreDrafts?.() !== false;
+          if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
+          pendingEditor = payload.editor || { version: 1, files: [], active: null };
+          if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;
+          view.setDraft(payload.draft); view.resetDisplay?.(); setCodeOpen(false); return true;
+        },
+        verifyAccess: async refresh => {
+          if (!sameScope(scope, historyScope())) throw new Error('利用者またはアプリが変わりました。画面を開き直してください。');
+          if (refresh) {
+            const base = await loadBase({ reason: 'history-list' });
+            if (!sameScope(scope, historyScope())) throw new Error('利用者またはアプリが変わりました。画面を開き直してください。');
+            if (!base?.ok || base.env !== scope.environment || String(base.appId) !== String(scope.appId))
+              throw new Error('現在のアプリを取得できないため、保存した会話を開けません。');
+          }
+        },
+        canSwitch: () => view?.canSwitchSession?.() === true && codePanel?.canRestoreDrafts?.() !== false,
+        onStatus: () => view?.updateHistoryStatus?.(), ...(d.historySessionOptions || {})
+      });
+      history.initialize();
+      stateUnsubscribe = controller.subscribe(() => history.changed());
+      draftUnsubscribe = view.subscribeDraft(() => history.changed());
+      if (codePanel) attachHistoryEditor();
+    } catch (_) { historyInitError = '会話の保存を開始できません。必要な内容をファイルで保存してください。'; }
+  }
+  function attachHistoryEditor() {
+    editorUnsubscribe?.(); editorUnsubscribe = null;
+    if (!history || !codePanel) return;
+    if (pendingEditor && codePanel.restoreDrafts?.(pendingEditor)) pendingEditor = null;
+    editorUnsubscribe = codePanel.subscribeDrafts?.(() => history.changed());
+  }
+  async function historyDialog() {
+    const el = dialog('保存した会話', '<p>この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-save>今の会話を保存</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
+    let busy = false;
+    el.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+    const note = text => { if (el.open) el.querySelector('[data-history-note]').textContent = text; };
+    const renderList = async () => {
+      if (!history) { note(historyInitError); el.querySelector('[data-history-save]').disabled = true; el.querySelector('[data-history-complete]').disabled = true; return; }
+      const result = await history.list(); if (!el.open) return;
+      const mb = value => (value / 1024 / 1024).toFixed(2);
+      note('保存容量 ' + mb(result.usage.bytes) + ' / ' + mb(result.usage.maxBytes) + ' MB（同じ利用者の全アプリ）');
+      el.querySelector('[data-history-list]').innerHTML = result.entries.length ? result.entries.map(entry => '<article style="padding:12px 0;border-bottom:1px solid var(--kt-line)"><strong>' + esc(entry.title) + '</strong><p class="ktr-note">' +
+        (entry.id === result.currentId ? '表示中 · ' : '') + (entry.pinned ? '残す · ' : '') + (entry.completedAt != null ? '完了' : '作業中') +
+        (entry.expiresAt ? ' · 整理予定 ' + esc(new Date(entry.expiresAt).toLocaleDateString('ja-JP')) : '') +
+        '</p><div class="ktr-actions"><button data-history-open="' + esc(entry.id) + '"' + (entry.id === result.currentId ? ' disabled' : '') + '>開く</button><button data-history-pin="' + esc(entry.id) + '" data-history-revision="' + entry.revision + '" data-history-pinned="' + entry.pinned + '">' + (entry.pinned ? '「残す」を解除' : '残す') + '</button><button data-history-delete="' + esc(entry.id) + '" data-history-revision="' + entry.revision + '"' + (entry.id === result.currentId ? ' disabled' : '') + '>削除</button></div></article>').join('') : '<p>保存した会話はありません。</p>';
+    };
+    el.addEventListener('click', async event => {
+      const button = event.target.closest('button'); if (!button || busy || button.hasAttribute('data-close')) return;
+      const data = button.dataset;
+      if (!Object.keys(data).some(key => key.startsWith('history'))) return;
+      busy = true; el.querySelector('[data-close]').disabled = true;
+      try {
+        if (button.hasAttribute('data-history-export')) { const payload = history?.exportCurrent() || { version: 1, session: controller.exportSession(), draft: view.getDraft(), editor: editingSnapshot() }; d.downloadText('toolkit-conversation-' + d.appId + '.json', JSON.stringify(payload, null, 2), 'application/json'); return; }
+        if (button.hasAttribute('data-history-new')) { if (await view.newTask()) el.close(); return; }
+        if (!history) return;
+        if (data.historyOpen) { if (await history.open(data.historyOpen)) { el.close(); return; } throw new Error(history.getStatus().message); }
+        if (data.historyDelete) {
+          if (!window.confirm('この端末の会話と成果物を削除します。kintoneの設定は変わりません。削除しますか？')) return;
+          await history.remove({ id: data.historyDelete, revision: Number(data.historyRevision) });
+        } else if (data.historyPin) {
+          if (!await history.setPinned({ id: data.historyPin, revision: Number(data.historyRevision) }, data.historyPinned !== 'true')) throw new Error(history.getStatus().message);
+        } else if (button.hasAttribute('data-history-complete')) {
+          if (!await history.markComplete()) throw new Error(history.getStatus().message || '会話がないか、処理中のため完了にできません。');
+        } else if (button.hasAttribute('data-history-save')) await history.flush();
+        await renderList();
+      } catch (error) { note(error.message || '保存した会話を確認できませんでした。'); }
+      finally { busy = false; if (el.open) el.querySelector('[data-close]').disabled = false; }
+    });
+    let saveError = '';
+    try { if (history) await history.flush(); } catch (error) { saveError = history.getStatus().message || error.message; }
+    try { await renderList(); if (saveError) note(saveError); } catch (error) { note(error.message); }
+  }
+
   view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: d.openConfigLens,
+    onHistory: historyDialog, historyStatus: () => history?.getStatus() || (historyInitError ? { state: 'unavailable', message: historyInitError } : null), onNewTask: () => history ? history.beforeNewTask() : true,
     codePanelElement: () => codeOpen ? codeSlot : null,
     codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
     onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
     appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
+  initializeHistory(); view.render();
+  const flushHistory = () => { if (history) history.flush().catch(() => {}); };
+  const onHistoryVisibility = () => { if (document.visibilityState === 'hidden') flushHistory(); };
+  document.addEventListener('visibilitychange', onHistoryVisibility);
   const warnBeforeLeave = event => {
     const state = controller.getState();
-    if (state.messages.length || state.runs.length) { event.preventDefault(); event.returnValue = ''; }
+    flushHistory();
+    if (history?.isDirty() || ['consulting','building','preparing','applying','rolling-back'].includes(state.phase) || (!history && (state.messages.length || state.runs.length))) { event.preventDefault(); event.returnValue = ''; }
   };
   window.addEventListener('beforeunload', warnBeforeLeave);
-  return { controller, view, capability: () => capability, refreshCapability,
+  return { controller, view, history: () => history, capability: () => capability, refreshCapability,
     onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
     attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
@@ -416,6 +522,8 @@ function mountReleaseWorkspace(host, d) {
     },
     dispose() {
       clearTimeout(usageResetTimer);
+      stateUnsubscribe?.(); draftUnsubscribe?.(); editorUnsubscribe?.(); history?.dispose();
+      document.removeEventListener('visibilitychange', onHistoryVisibility);
       flow?.cancel(); controller.cancel(); setCodeOpen(false);
       if (codePanel) codePanel.home.appendChild(codePanel.element);
       codeSlot?.remove();

@@ -14365,6 +14365,353 @@
     };
   }
 
+  /* Browser-local release history. IndexedDB is the only persistence boundary.
+   * Lists read metadata only; payloads are decoded only for the selected item.
+   * bytes measures serialized UTF-8 records, not browser implementation overhead.
+   */
+  'use strict';
+
+  const KTReleaseHistory = (() => {
+    const TTL = 30 * 24 * 60 * 60 * 1000;
+    const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
+    const MAX_NODES = 200000, MAX_DEPTH = 64, MAX_RAW_CHARS = 64 * 1024 * 1024;
+    const utf8 = value => new TextEncoder().encode(value).byteLength;
+    const failure = (code, message) => Object.assign(new Error(message), { code });
+    const invalid = () => failure('HISTORY_INVALID', '保存する履歴の形式を確認できません。');
+    const conflict = () => failure('HISTORY_CONFLICT', '別の画面で履歴が更新されています。最新の履歴を開き直してください。');
+    const storageFailure = error => error?.code?.startsWith?.('HISTORY_') ? error : failure(error?.name === 'QuotaExceededError' ? 'HISTORY_LIMIT' : 'HISTORY_SAVE_FAILED', error?.name === 'QuotaExceededError' ? 'ブラウザの保存容量が不足しています。前回の保存内容は残っています。' : '履歴を保存できませんでした。前回の保存内容は残っています。');
+    const validId = id => typeof id === 'string' && id.length > 0 && id.length <= 200;
+    const validRevision = revision => Number.isSafeInteger(revision) && revision > 0;
+    const expired = (entry, time) => !entry.pinned && entry.completedAt !== null && Number.isFinite(entry.expiresAt) && entry.expiresAt <= time;
+    const metadata = entry => entry ? Object.fromEntries(['id', 'revision', 'title', 'updatedAt', 'completedAt', 'pinned', 'expiresAt', 'bytes'].map(key => [key, entry[key]])) : null;
+
+    // Callers supply an allowlisted session snapshot without transport credentials.
+    // Field codes are opaque: a property name alone does not identify a secret.
+    // Tagged containers cannot collide with user JSON. Only repeated long strings
+    // enter the dictionary; code is opaque data and is never evaluated or inferred.
+    function encode(payload) {
+      let nodes = 0, chars = 0;
+      const ancestors = new Set(), counts = new Map();
+      function visit(value, depth) {
+        if (++nodes > MAX_NODES || depth > MAX_DEPTH) throw invalid();
+        if (typeof value === 'string') {
+          chars += value.length;
+          if (chars > MAX_RAW_CHARS) throw invalid();
+          if (value.length >= 256) counts.set(value, (counts.get(value) || 0) + 1);
+          return;
+        }
+        if (value === null || typeof value === 'boolean') return;
+        if (typeof value === 'number') { if (!Number.isFinite(value)) throw invalid(); return; }
+        if (!value || typeof value !== 'object' || ancestors.has(value)) throw invalid();
+        const array = Array.isArray(value), proto = Object.getPrototypeOf(value);
+        if (!array && proto !== Object.prototype && proto !== null) throw invalid();
+        ancestors.add(value);
+        const descriptors = Object.getOwnPropertyDescriptors(value);
+        if (Reflect.ownKeys(value).some(key => typeof key === 'symbol')) throw invalid();
+        if (array) {
+          if (value.length > MAX_NODES || Object.keys(value).length !== value.length) throw invalid();
+          for (let i = 0; i < value.length; i++) {
+            const descriptor = descriptors[i];
+            if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw invalid();
+            visit(descriptor.value, depth + 1);
+          }
+        } else {
+          for (const [key, descriptor] of Object.entries(descriptors)) {
+            if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) throw invalid();
+            chars += key.length;
+            if (chars > MAX_RAW_CHARS) throw invalid();
+            visit(descriptor.value, depth + 1);
+          }
+        }
+        ancestors.delete(value);
+      }
+      visit(payload, 0);
+      const strings = [...counts].filter(([, count]) => count > 1).map(([value]) => value), refs = new Map(strings.map((value, index) => [value, index]));
+      function pack(value) {
+        if (typeof value === 'string') return refs.has(value) ? [0, refs.get(value)] : value;
+        if (Array.isArray(value)) return [1, ...value.map(pack)];
+        if (value && typeof value === 'object') { const out = [2]; for (const key of Object.keys(value)) out.push(key, pack(value[key])); return out; }
+        return value;
+      }
+      return { format: 1, strings, tree: pack(payload) };
+    }
+    function decode(encoded) {
+      if (encoded?.format !== 1 || !Array.isArray(encoded.strings)) throw invalid();
+      let nodes = 0;
+      function unpack(value, depth) {
+        if (++nodes > MAX_NODES || depth > MAX_DEPTH) throw invalid();
+        if (!Array.isArray(value)) {
+          if (value === null || ['string', 'boolean'].includes(typeof value) || typeof value === 'number' && Number.isFinite(value)) return value;
+          throw invalid();
+        }
+        if (value[0] === 0 && value.length === 2 && Number.isSafeInteger(value[1]) && typeof encoded.strings[value[1]] === 'string') return encoded.strings[value[1]];
+        if (value[0] === 1) return value.slice(1).map(child => unpack(child, depth + 1));
+        if (value[0] === 2 && value.length % 2 === 1) {
+          const out = {};
+          for (let i = 1; i < value.length; i += 2) {
+            if (typeof value[i] !== 'string') throw invalid();
+            Object.defineProperty(out, value[i], { value: unpack(value[i + 1], depth + 1), enumerable: true, configurable: true, writable: true });
+          }
+          return out;
+        }
+        throw invalid();
+      }
+      return unpack(encoded.tree, 0);
+    }
+    function create({ indexedDB = globalThis.indexedDB, scope, now = Date.now, maxBytes = DEFAULT_MAX_BYTES, dbName = 'kt-release-history-v1' } = {}) {
+      if (!scope || ['domain', 'appId', 'userId', 'environment'].some(key => typeof scope[key] !== 'string' || !scope[key] || scope[key].length > 512) || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || typeof dbName !== 'string' || !dbName) throw invalid();
+      const scopeKey = JSON.stringify([scope.domain, scope.appId, scope.userId, scope.environment]);
+      const ownerKey = JSON.stringify([scope.domain, scope.userId]);
+      let connection = null, opening = null, closed = false;
+      const time = () => { const value = now(); if (!Number.isSafeInteger(value) || value < 0) throw invalid(); return value; };
+      function open() {
+        if (closed || !indexedDB?.open) return Promise.reject(failure('HISTORY_UNAVAILABLE', 'このブラウザでは履歴を保存できません。'));
+        if (connection) return Promise.resolve(connection);
+        if (opening) return opening;
+        opening = new Promise((resolve, reject) => {
+          let request;
+          try { request = indexedDB.open(dbName, 1); } catch (error) { reject(storageFailure(error)); return; }
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            const entries = db.createObjectStore('entries', { keyPath: 'key' });
+            entries.createIndex('scope', 'scope'); entries.createIndex('owner', 'owner');
+            db.createObjectStore('payloads', { keyPath: 'key' });
+            db.createObjectStore('owners', { keyPath: 'owner' });
+          };
+          request.onerror = () => reject(storageFailure(request.error));
+          request.onblocked = () => reject(failure('HISTORY_UNAVAILABLE', '履歴を開けません。他の Toolkit 画面を閉じてから開き直してください。'));
+          request.onsuccess = () => {
+            const db = request.result;
+            if (closed) { db.close(); reject(failure('HISTORY_UNAVAILABLE', '履歴の保存は終了しています。')); return; }
+            connection = db;
+            db.onversionchange = () => { db.close(); connection = null; opening = null; };
+            resolve(db);
+          };
+        }).catch(error => { opening = null; throw error; });
+        return opening;
+      }
+      async function transaction(mode, stores, operation) {
+        const db = await open();
+        return new Promise((resolve, reject) => {
+          let tx, result, problem;
+          try { tx = db.transaction(stores, mode); } catch (error) { reject(storageFailure(error)); return; }
+          const abort = error => { problem = storageFailure(error); try { tx.abort(); } catch { reject(problem); } };
+          tx.oncomplete = () => resolve(result);
+          tx.onabort = () => reject(problem || storageFailure(tx.error));
+          tx.onerror = () => { if (!problem) problem = storageFailure(tx.error); };
+          const request = (req, done) => {
+            req.onerror = () => { problem = storageFailure(req.error); };
+            req.onsuccess = () => { try { done(req.result); } catch (error) { abort(error); } };
+          };
+          try { operation({ tx, request, done: value => { result = value; }, abort }); } catch (error) { abort(error); }
+        });
+      }
+      const purge = (tx, entries, at) => {
+        const keep = [];
+        for (const entry of entries) {
+          if (expired(entry, at)) { tx.objectStore('entries').delete(entry.key); tx.objectStore('payloads').delete(entry.key); }
+          else keep.push(entry);
+        }
+        return keep;
+      };
+      function list() {
+        const at = time();
+        return transaction('readwrite', ['entries', 'payloads'], ({ tx, request, done }) => {
+          request(tx.objectStore('entries').index('scope').getAll(scopeKey), entries => done(purge(tx, entries, at).sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)).map(metadata)));
+        });
+      }
+      function load(id) {
+        if (!validId(id)) return Promise.reject(invalid());
+        const at = time(), key = [scopeKey, id];
+        return transaction('readonly', ['entries', 'payloads'], ({ tx, request, done }) => {
+          request(tx.objectStore('entries').get(key), entry => {
+            if (!entry || expired(entry, at)) { done(null); return; }
+            request(tx.objectStore('payloads').get(key), payload => { if (!payload) throw invalid(); done({ ...metadata(entry), payload: decode(payload.body) }); });
+          });
+        });
+      }
+      async function save(input) {
+        const at = time();
+        if (!input || !validId(input.id) || !(input.revision === null || validRevision(input.revision)) || typeof input.title !== 'string' || input.title.length > 500 || typeof input.pinned !== 'boolean' || !(input.completedAt === null || Number.isSafeInteger(input.completedAt) && input.completedAt >= 0 && input.completedAt <= at)) throw invalid();
+        // Snapshot the caller's values before opening the asynchronous transaction.
+        const { id, revision, title, completedAt, pinned } = input;
+        const body = encode(input.payload), key = [scopeKey, id];
+        return transaction('readwrite', ['entries', 'payloads', 'owners'], ({ tx, request, done }) => {
+          // One owner budget across all apps/environments. Index lookups never read
+          // another user's records. Capacity cleanup only removes expired records.
+          request(tx.objectStore('entries').index('owner').getAll(ownerKey), rows => {
+            const entries = purge(tx, rows, at), previous = entries.find(row => row.scope === scopeKey && row.id === id);
+            if (previous ? previous.revision !== revision : revision !== null) throw conflict();
+            request(tx.objectStore('owners').get(ownerKey), owner => {
+              let expiresAt = null;
+              if (!pinned && completedAt !== null) {
+                expiresAt = previous?.pinned ? at + TTL : previous?.completedAt === completedAt && previous.expiresAt !== null ? previous.expiresAt : completedAt + TTL;
+              }
+              const entry = { key, scope: scopeKey, owner: ownerKey, id, revision: Math.max(owner?.revision || 0, previous?.revision || 0) + 1, title, updatedAt: at, completedAt, pinned, expiresAt, bytes: 0 };
+              if (!Number.isSafeInteger(entry.revision)) throw invalid();
+              const payload = { key, body };
+              const payloadBytes = utf8(JSON.stringify(payload));
+              let measured;
+              do { measured = entry.bytes; entry.bytes = payloadBytes + utf8(JSON.stringify(entry)); } while (entry.bytes !== measured);
+              const used = entries.reduce((sum, row) => sum + (row === previous ? 0 : row.bytes), 0);
+              if (used + entry.bytes > maxBytes) throw failure('HISTORY_LIMIT', '履歴の保存上限に達しました。不要な履歴を削除してください。前回の保存内容は残っています。');
+              // Monotonic owner revisions also prevent a stale writer after deletion
+              // and recreation of the same id (without retaining deleted payloads).
+              tx.objectStore('owners').put({ owner: ownerKey, revision: entry.revision });
+              tx.objectStore('entries').put(entry); tx.objectStore('payloads').put(payload);
+              done(metadata(entry));
+            });
+          });
+        });
+      }
+      function remove(id, revision) {
+        if (!validId(id) || !validRevision(revision)) return Promise.reject(invalid());
+        const key = [scopeKey, id];
+        return transaction('readwrite', ['entries', 'payloads'], ({ tx, request, done }) => {
+          request(tx.objectStore('entries').get(key), entry => {
+            if (!entry) { done(false); return; }
+            if (entry.revision !== revision) throw conflict();
+            tx.objectStore('entries').delete(key); tx.objectStore('payloads').delete(key); done(true);
+          });
+        });
+      }
+      function prune() {
+        const at = time();
+        return transaction('readwrite', ['entries', 'payloads'], ({ tx, request, done }) => {
+          request(tx.objectStore('entries').index('scope').getAll(scopeKey), entries => done({ removed: entries.length - purge(tx, entries, at).length }));
+        });
+      }
+      function usage() {
+        return transaction('readonly', ['entries'], ({ tx, request, done }) => {
+          request(tx.objectStore('entries').index('owner').getAll(ownerKey), entries => {
+            const bytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+            done({ bytes, maxBytes, availableBytes: Math.max(0, maxBytes - bytes), count: entries.length });
+          });
+        });
+      }
+      function close() { closed = true; connection?.close(); connection = null; }
+      return { list, load, save, remove, prune, usage, close };
+    }
+    return { create, TTL, DEFAULT_MAX_BYTES };
+  })();
+
+  /* Browser-local session lifecycle. Storage failures never erase the active workspace. */
+  'use strict';
+  const KTReleaseHistorySession = (() => {
+    const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    const failure = (code, message) => Object.assign(new Error(message), { code });
+    const editedFiles = payload => (payload?.editor?.files || []).filter(file => file.isNew || typeof file.registeredText !== 'string' || file.text !== file.registeredText);
+    function signature(payload) {
+      const value = clone(payload), state = value?.session?.state;
+      if (state) { delete state.explanationId; delete state.resultRunId; }
+      if (value?.editor) { const files = editedFiles(value); for (const file of files) delete file.viewState; value.editor = files.length ? { version: value.editor.version, files } : null; }
+      return JSON.stringify(value);
+    }
+    function hasContent(payload) {
+      const s = payload?.session?.state || {};
+      return !!(payload?.draft || editedFiles(payload).length || s.messages?.length || s.explanations?.length || s.runs?.length || s.proposal || s.plan);
+    }
+    function create({ store, capture, restore, verifyAccess, canSwitch = () => true, onStatus = () => {}, now = () => Date.now(), makeId = () => globalThis.crypto.randomUUID(), debounceMs = 450 } = {}) {
+      let current = null, lastSignature = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;
+      let queue = Promise.resolve(), status = { state: 'saved', message: '' };
+      const notify = (state, message = '') => { status = { state, message, completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
+      const serial = work => { const next = queue.catch(() => {}).then(work); queue = next; return next; };
+      const requireUnchanged = expected => {
+        if (signature(capture()) !== expected) throw failure('HISTORY_EDITED', '読み込み中に内容が変わったため、会話の切り替えを止めました。追記は残しています。');
+      };
+      const report = error => {
+        dirty = true;
+        notify('error', error?.code === 'HISTORY_CONFLICT' ? '別のタブで保存内容が変わりました。手元の内容は残っています。書き出してから会話を開き直してください。'
+          : error?.code === 'HISTORY_LIMIT' || error?.name === 'QuotaExceededError' ? '保存容量が足りません。手元の内容は残っています。保存した会話を整理してください。'
+          : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。');
+      };
+      async function saveCurrent({ completedAt, pinned, snapshot } = {}) {
+        const payload = snapshot || clone(capture()), nextSignature = signature(payload);
+        if (!current && !hasContent(payload)) { lastSignature = nextSignature; dirty = false; notify('saved'); return current; }
+        const changed = nextSignature !== lastSignature;
+        if (!changed && completedAt === undefined && pinned === undefined && current) { dirty = false; notify('saved', 'このブラウザーに保存済み'); return current; }
+        await verifyAccess(false);
+        const s = payload.session.state;
+        const title = s.goal || s.messages?.find(m => m.role === 'user')?.text || s.explanations?.[0]?.title || '作業中の会話';
+        const prior = current?.expiresAt && current.expiresAt <= now() && (changed || pinned === true || completedAt !== undefined) ? null : current;
+        const saved = await store.save({ id: prior?.id || makeId(), revision: prior?.revision ?? null,
+          title: String(title).slice(0, 120), payload, completedAt: completedAt !== undefined ? completedAt : changed ? null : current?.completedAt ?? null,
+          pinned: pinned !== undefined ? pinned : !!current?.pinned });
+        current = saved; lastSignature = nextSignature;
+        dirty = signature(capture()) !== nextSignature;
+        notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : 'このブラウザーに保存済み');
+        if (dirty && !disposed) schedule();
+        return current;
+      }
+      function schedule() { clearTimeout(timer); timer = setTimeout(() => { timer = null; flush().catch(() => {}); }, debounceMs); }
+      function changed() {
+        if (suppress || disposed) return;
+        dirty = true; notify('saving', '保存しています…'); schedule();
+      }
+      function flush() {
+        clearTimeout(timer); timer = null;
+        return serial(async () => { try { return await saveCurrent(); } catch (error) { report(error); throw error; } });
+      }
+      async function list() {
+        await verifyAccess(true);
+        const entries = await store.list(), usage = await store.usage();
+        await verifyAccess(false);
+        return { entries, usage, currentId: current?.id || null };
+      }
+      async function open(id) {
+        if (switching || !canSwitch()) return false;
+        switching = true;
+        try {
+          await flush(); requireUnchanged(lastSignature);
+          const before = signature(capture());
+          await verifyAccess(false);
+          const saved = await store.load(id);
+          await verifyAccess(false); requireUnchanged(before);
+          if (!saved) throw failure('HISTORY_MISSING', '保存期間を過ぎたか、別のタブで削除された会話です。');
+          if (!canSwitch()) return false;
+          suppress = true;
+          const ok = await restore(clone(saved.payload));
+          if (!ok) throw failure('HISTORY_OPEN_FAILED', '現在のアプリと保存内容を確認できません。開いていた会話と編集は残しています。');
+          current = Object.fromEntries(Object.entries(saved).filter(([key]) => key !== 'payload'));
+          lastSignature = signature(capture()); dirty = false;
+          notify('saved', current.completedAt != null ? '保存した会話を表示しています' : 'このブラウザーに保存済み');
+          return true;
+        } catch (error) { report(error); return false; }
+        finally { suppress = false; switching = false; }
+      }
+      async function beforeNewTask() {
+        if (switching || !canSwitch()) return false;
+        switching = true;
+        try { await flush(); requireUnchanged(lastSignature); current = null; lastSignature = ''; dirty = false; notify('saved'); return true; }
+        catch (error) { report(error); return false; } finally { switching = false; }
+      }
+      async function markComplete() {
+        if (switching || !canSwitch()) return false;
+        return serial(async () => { try { await saveCurrent({ completedAt: now() }); return !!current; } catch (error) { report(error); return false; } });
+      }
+      async function setPinned(entry, value) {
+        if (switching || !canSwitch()) return false;
+        await verifyAccess(true);
+        if (entry.id === current?.id) return serial(async () => {
+          try { await saveCurrent({ pinned: value, completedAt: !value && current.completedAt != null ? now() : current.completedAt }); return true; }
+          catch (error) { report(error); return false; }
+        });
+        const saved = await store.load(entry.id);
+        await verifyAccess(false);
+        if (!saved || saved.revision !== entry.revision) throw failure('HISTORY_CONFLICT', '別のタブで保存内容が変わりました。一覧を取り直してください。');
+        await store.save({ ...saved, pinned: value, completedAt: !value && saved.completedAt != null ? now() : saved.completedAt }); return true;
+      }
+      async function remove(entry) {
+        if (entry.id === current?.id) throw failure('HISTORY_ACTIVE', '開いている会話は削除できません。別の会話へ移動してから削除してください。');
+        await verifyAccess(true); return store.remove(entry.id, entry.revision);
+      }
+      function dispose() { const snapshot = clone(capture()); disposed = true; clearTimeout(timer); timer = null; return serial(() => saveCurrent({ snapshot })).catch(error => { report(error); }).finally(() => store.close()); }
+      return { changed, flush, list, open, beforeNewTask, markComplete, setPinned, remove, dispose, initialize: () => store.prune().catch(error => { report(error); }),
+        getStatus: () => ({ ...status }), getCurrent: () => clone(current), isDirty: () => dirty, exportCurrent: () => clone(capture()), isSwitching: () => switching };
+    }
+    return { create, signature, hasContent };
+  })();
+
   /* Release workspace: explicit user actions, service outcomes, and one execution record.
    * No requirement-text interpretation or verification-case aggregation belongs here.
    */
@@ -14412,6 +14759,99 @@
     const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
     const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
     const busyPhases = new Set(['consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
+    const SESSION_VERSION = 'release-workspace-session-1';
+    const savedStateKeys = ['phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
+    const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
+    const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
+    // Saved content is a document, never a credential store or an execution snapshot.
+    // Nested specs and evidence may use any field code, including token/password.
+    // Keep their JSON exactly; transport data is excluded by domain allowlists.
+    function historyData(value) {
+      if (value == null || typeof value === 'string' || typeof value === 'boolean') return value;
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (Array.isArray(value)) return value.map(historyData);
+      if (!object(value)) throw new Error('保存できない内容があります。');
+      return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, historyData(item)]));
+    }
+    const savedError = error => historyData(pick(error, ['code', 'message', 'operation']));
+    const savedGenerated = result => {
+      if (!result) return null;
+      const value = historyData(pick(result, ['strategy', 'targetFile', 'summary', 'code', 'body', 'patch', 'events', 'fields', 'apis', 'assumptions', 'warnings', 'coverage', 'verification', 'artifactOutcome', 'error', 'decline']));
+      if (result.generated) value.generated = savedGenerated(result.generated);
+      if (value.error) value.error = savedError(value.error);
+      return value;
+    };
+    const savedRow = row => historyData(pick(row, ['id', 'stepId', 'title', 'label', 'name', 'targetFile', 'status', 'message', 'partial']));
+    const savedResult = value => {
+      if (!value) return null;
+      const result = historyData(pick(value, ['status', 'written', 'message', 'recoveryState', 'retryable', 'reasons']));
+      if (Array.isArray(value.rows)) result.rows = value.rows.map(savedRow);
+      for (const key of ['settings', 'files']) {
+        if (Array.isArray(value[key])) result[key] = value[key].map(savedRow);
+        else if (object(value[key])) result[key] = { ...historyData(pick(value[key], ['status', 'message'])), steps: (value[key].steps || []).map(savedRow) };
+      }
+      if (value.error) result.error = savedError(value.error);
+      return result;
+    };
+    const savedRun = run => ({
+      ...historyData(pick(run, ['id', 'at', 'taskId', 'goal', 'status'])), archived: true,
+      prepared: run.prepared ? { changes: historyData(run.prepared.changes || []), confirmations: historyData(run.prepared.confirmations || []), reasons: historyData(run.prepared.reasons || []) } : null,
+      result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {})
+    });
+    const appOf = value => value?.appId ?? value?.data?.appId ?? value?.current?.appId ?? value?.inputs?.data?.appId ?? null;
+    const environmentOf = value => value?.env ?? value?.current?.env ?? null;
+    // Same verification inputs as the execution adapter; only their digest is saved.
+    async function verificationFingerprint(base) {
+      const value = base?.current;
+      if (!value) return null;
+      return hash('release-verification:' + JSON.stringify(stable({ fields: value.fields?.properties || {},
+        status: { enable: value.status?.enable ?? false, states: value.status?.states ?? null, actions: value.status?.actions ?? null },
+        scope: value.customize?.scope ?? null,
+        files: (value.files || []).map(f => ({ target: f.target, name: f.name, text: f.text ?? null, sourceAvailable: f.sourceAvailable === true })),
+        registrations: Object.fromEntries(['desktop', 'mobile'].map(target => [target, (value.customize?.[target]?.js || []).map(f => ({ type: f.type, name: f.file?.name ?? f.name ?? null, url: f.url ?? null }))])) })));
+    }
+    function sessionState(state) {
+      const saved = historyData(pick(state, savedStateKeys));
+      saved.proposal = historyData(pick(state.proposal, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
+      saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
+      saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact']));
+      saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId'])));
+      saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted'])));
+      saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
+      saved.error = savedError(state.error);
+      saved.runs = state.runs.map(savedRun);
+      return saved;
+    }
+    function validSession(payload) {
+      const s = payload?.state, integer = n => Number.isSafeInteger(n) && n >= 0;
+      if (!object(payload) || payload.version !== SESSION_VERSION || !object(s) || !integer(payload.sequence) || !Array.isArray(payload.pendingPlanQuestions)) return false;
+      if (!savedStateKeys.concat('runs').every(key => Object.hasOwn(s, key))) return false;
+      const arrays = (value, keys) => keys.every(key => value[key] == null || Array.isArray(value[key]));
+      if (!['idle', 'proposal', 'blocked', 'incomplete', 'review', 'unchanged', 'result', 'rollback-confirm', ...busyPhases].includes(s.phase) ||
+        !integer(s.taskId) || !s.taskId || !integer(s.version) || !integer(s.questionIdFloor) || typeof s.goal !== 'string' ||
+        !['consultation', 'document', 'ideation'].includes(s.requestPurpose) || typeof s.proposalPending !== 'boolean') return false;
+      if (!['selectedSuggestionIds', 'answers', 'messages', 'explanations', 'artifacts', 'runs'].every(key => Array.isArray(s[key]))) return false;
+      if (s.selectedSuggestionIds.some(id => typeof id !== 'string') || s.answers.some(a => !object(a) || typeof a.id !== 'string' || typeof a.answer !== 'string')) return false;
+      if (s.messages.some(m => !object(m) || !integer(m.id) || !m.id || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !arrays(m, ['facts']))) return false;
+      if (s.explanations.some(e => !object(e) || !/^explanation-[1-9][0-9]*$/.test(e.id) || typeof e.title !== 'string' || !Array.isArray(e.sections))) return false;
+      if (s.explanations.some(e => !arrays(e, ['unknowns', 'facts']) || e.sections.some(section => !object(section) || !arrays(section, ['paragraphs', 'items', 'evidenceIds']) || (section.table != null && (!object(section.table) || !Array.isArray(section.table.columns) || !Array.isArray(section.table.rows)))))) return false;
+      if (new Set(s.messages.map(m => m.id)).size !== s.messages.length || new Set(s.explanations.map(e => e.id)).size !== s.explanations.length) return false;
+      if (s.explanationId !== null && !s.explanations.some(e => e.id === s.explanationId)) return false;
+      for (const key of ['consultationTarget', 'proposalTarget', 'adoptedTarget']) if (s[key] !== null && consultationTargetOf(s[key]) === false) return false;
+      for (const key of ['proposal', 'adopted']) if (s[key] !== null && (!object(s[key]) || !Array.isArray(s[key].behaviors) || !Array.isArray(s[key].decisions) || !arrays(s[key], ['assumptions', 'cannot']) || s[key].behaviors.some(b => !object(b) || typeof b.id !== 'string' || typeof b.text !== 'string'))) return false;
+      if (s.plan !== null && (!object(s.plan) || !Array.isArray(s.plan.steps) || !Array.isArray(s.plan.customizations) || !Array.isArray(s.plan.questions) ||
+        s.plan.steps.some(step => !object(step) || typeof step.id !== 'string' || typeof step.actionType !== 'string') || s.plan.customizations.some(c => !object(c) || typeof c.customizationId !== 'string'))) return false;
+      if (s.plan && (!payload.baseline || !arrays(s.plan, ['relevantFields', 'proposedFields', 'alternatives', 'unknowns', 'impact']))) return false;
+      if (s.artifacts.some(a => !object(a) || typeof a.customizationId !== 'string' || (a.result != null && !object(a.result)))) return false;
+      if (s.runs.some(r => !object(r) || typeof r.id !== 'string' || !integer(r.taskId) || !r.taskId || typeof r.goal !== 'string' || !['running', 'complete', 'partial', 'failed', 'unknown'].includes(r.status))) return false;
+      if (s.runs.some(r => (r.prepared != null && (!object(r.prepared) || !arrays(r.prepared, ['changes', 'confirmations', 'reasons']))) || [r.result, r.rollback].some(result => result != null && (!object(result) || !arrays(result, ['rows', 'reasons']) || ['settings', 'files'].some(key => result[key] != null && !Array.isArray(result[key]) && (!object(result[key]) || !arrays(result[key], ['steps']))))))) return false;
+      if (new Set(s.runs.map(r => r.id)).size !== s.runs.length || (s.resultRunId !== null && !s.runs.some(r => r.id === s.resultRunId))) return false;
+      if (payload.pendingPlanQuestions.some(q => !object(q))) return false;
+      if (payload.baseline !== null && (!object(payload.baseline) || typeof payload.baseline.stamp !== 'string' || !payload.baseline.stamp ||
+        (payload.baseline.appId !== null && typeof payload.baseline.appId !== 'string') || (payload.baseline.environment !== null && typeof payload.baseline.environment !== 'string') ||
+        (payload.baseline.verificationFingerprint !== null && !/^[a-f0-9]{64}$/.test(payload.baseline.verificationFingerprint)))) return false;
+      return true;
+    }
     const questions = (proposal, answers = []) => (proposal?.decisions || []).filter(q => q.blocking && !q.answer && !answers.some(a => a.id === q.id && a.answer));
     const generatedBody = result => { const g = result?.generated || result; return g?.strategy === 'EXTEND_EXISTING_JS' ? g.body || '' : g?.code || ''; };
     // Rechecking never regenerates code or reuses an approval. It is available only
@@ -14495,11 +14935,12 @@
     function create({ services, loadBase, execution, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
       const state = { phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
-      let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null;
+      let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null, restoringSession = false, restoredBaseline = null, documentPhase = null;
+      const fingerprints = new WeakMap(), fingerprintTasks = new WeakMap();
       const listeners = new Set(onChange ? [onChange] : []);
       const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
       const set = values => { Object.assign(state, values); emit(); };
-      const available = () => !busyPhases.has(state.phase);
+      const available = () => !restoringSession && !busyPhases.has(state.phase);
       const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
       const changeRequests = () => state.messages.filter(m => m.role === 'user' && (!m.requestPurpose || m.requestPurpose === 'consultation'));
       const requestTargets = () => changeRequests().map(m => ({ text: m.text, target: clone(m.consultationTarget || null) }));
@@ -14507,6 +14948,8 @@
       async function getBase(reason) {
         const fresh = await loadBase({ reason });
         if (!fresh?.ok || !stampOf(fresh)) throw Object.assign(new Error(fresh?.message || '動作テスト環境の設定を取得できませんでした。'), { code: 'BASE_UNAVAILABLE' });
+        const fingerprintTask = verificationFingerprint(fresh).then(value => { fingerprints.set(fresh, value); if (base === fresh) emit(); return value; }).catch(() => null);
+        fingerprintTasks.set(fresh, fingerprintTask);
         return fresh;
       }
       async function activity(phase, work, failurePhase = 'blocked') {
@@ -14570,13 +15013,18 @@
         const fresh = await getBase('prepare');
         if (!live()) return;
         if (!acceptFresh && stampOf(fresh) !== stampOf(base)) { set({ phase: 'blocked', prepared: null, error: { code: 'BASE_CHANGED', message: '作成中に設定が変わりました。最新の設定で確認し直してください。' }, progress: '' }); return; }
-        const prepared = await execution.prepare({ plan: clone(state.plan), artifacts: clone(state.artifacts), base: fresh, ...(acceptFresh ? { previousBase: base } : {}) });
+        if (restoredBaseline) { await fingerprintTasks.get(fresh); if (!live()) return; }
+        if (restoredBaseline && state.artifacts.length && stampOf(fresh) !== restoredBaseline.stamp &&
+          (!restoredBaseline.verificationFingerprint || fingerprints.get(fresh) !== restoredBaseline.verificationFingerprint)) {
+          set({ phase: 'blocked', prepared: null, progress: '', error: { code: 'VERIFICATION_CONTEXT_CHANGED', message: 'JavaScriptの検証に使った設定が変わりました。最新の設定で変更案を作り直してください。' } }); return;
+        }
+        const prepared = await execution.prepare({ plan: clone(state.plan), artifacts: clone(state.artifacts), base: fresh, ...(acceptFresh ? { previousBase: restoredBaseline ? fresh : base } : {}) });
         if (!live()) return;
         const signature = await hash({ plan: state.plan, artifacts: state.artifacts, baseStamp: stampOf(fresh), changes: prepared.changes, confirmations: prepared.confirmations });
         if (!live()) return;
         prepared.baseStamp = stampOf(fresh); prepared.signature = signature;
         // A rejected recheck must not become the basis of the old verification.
-        if (prepared.ok) base = fresh;
+        if (prepared.ok) { base = fresh; restoredBaseline = null; }
         set({ prepared, progress: '', phase: !prepared.ok ? 'blocked' : prepared.changes?.length ? 'review' : 'unchanged' });
       }
       const matchesProposal = reference => reference?.taskId === state.taskId && reference?.version === state.version;
@@ -14657,7 +15105,7 @@
               error: { code: 'BASE_CHANGED', message: (error ? error.message + ' ' : '') + operationLabel + 'の間に設定が変わりました。変更案を最新の設定で確認し直してください。' } } : {}) });
           };
           const stop = () => restore({ code: 'CANCELLED', operation: requestPurpose, message: operationLabel + 'を中断しました。変更案はそのまま残っています。' });
-          cancelDocument = stop;
+          cancelDocument = stop; documentPhase = previous.phase;
           userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
           try {
             await activity('consulting', async (signal, live) => {
@@ -14681,7 +15129,7 @@
                 if (live()) { const failure = errorOf(error); failure.operation = requestPurpose; failure.message = (ideation ? 'アイディアを作成できませんでした。' : '資料を作成できませんでした。') + failure.message; restore(failure); }
               }
             }, previous.phase);
-          } finally { if (cancelDocument === stop) cancelDocument = null; }
+          } finally { if (cancelDocument === stop) { cancelDocument = null; documentPhase = null; } }
           return completed;
         }
         invalidate(); userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
@@ -14720,20 +15168,20 @@
           if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; }
           // Retired question identifiers are never reused within the same conversation.
           state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
-          base = fresh; pendingPlanQuestions = [];
+          base = fresh; restoredBaseline = null; pendingPlanQuestions = [];
           // Model intent never authorizes plan generation or a kintone write.
           set({ phase: state.proposal ? 'proposal' : 'idle', plan: null, adopted: null, artifacts: [], proposalPending: response.proposal && !response.proposalUnchanged ? false : unresolved || requireProposalUpdate });
         }, state.proposal ? 'proposal' : 'idle');
       }
       async function adopt() {
-        if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available()) return false;
+        if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
         invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
         return activity('building', async (signal, live) => {
           const fresh = await getBase('plan');
           if (!live()) return;
-          base = fresh;
+          base = fresh; restoredBaseline = null;
           set({ progress: '変更の計画を作成しています。' });
           const adoptedTarget = resolveConsultationTarget(state.adoptedTarget, fresh);
           const response = await services.plan({ proposal: clone(state.adopted), consultationTarget: adoptedTarget, requestTargets: requestTargets(), goal: state.goal, answers: clone(state.answers), requests: changeRequests().map(m => m.text), version: state.version, base, signal });
@@ -14746,11 +15194,12 @@
         }, 'incomplete');
       }
       async function resume() {
-        if (!creationStateOf(state).canResume) return false;
+        if (!creationStateOf(state).canResume || state.runs.some(r => r.archived && r.taskId === state.taskId)) return false;
         return activity('building', async (signal, live) => {
           const fresh = await getBase('resume');
           if (!live()) return;
           if (stampOf(fresh) !== stampOf(base)) throw Object.assign(new Error('設定が変わったため、残りだけを作成できません。最新の設定で変更案を作り直してください。'), { code: 'BASE_CHANGED' });
+          base = fresh; restoredBaseline = null;
           await build(signal, live);
         }, 'incomplete');
       }
@@ -14781,7 +15230,7 @@
       async function recheckRun(runId, kind) {
         const run = state.runs.find(r => r.id === runId), restoring = kind === 'rollback';
         const value = restoring ? run?.rollback : run?.result, method = restoring ? 'recheckRollback' : 'recheckApply';
-        if (!run || (restoring ? value?.status : run.status) !== 'unknown' || (!restoring && run.rollback) || !available() || typeof execution[method] !== 'function') return false;
+        if (!run || run.archived || (restoring ? value?.status : run.status) !== 'unknown' || (!restoring && run.rollback) || !available() || typeof execution[method] !== 'function') return false;
         const previous = { phase: state.phase, resultRunId: state.resultRunId, progress: state.progress, error: clone(state.error) };
         const currentRun = run.taskId === state.taskId && state.phase === 'result' && (!state.resultRunId || state.resultRunId === run.id);
         const label = restoring ? '復元' : '反映';
@@ -14803,7 +15252,7 @@
       const recheckRollback = runId => recheckRun(runId, 'rollback');
       async function requestRollback(runId) {
         const run = state.runs.find(r => r.id === runId);
-        if (!run || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
+        if (!run || run.archived || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
         return activity('preparing', async (_, live) => {
           const prepared = await execution.prepareRollback(clone(run));
           if (!live()) return;
@@ -14813,28 +15262,97 @@
       async function rollback(runId) {
         if (state.phase !== 'rollback-confirm' || state.rollback?.runId !== runId || !state.rollback.prepared?.ok) return false;
         const run = state.runs.find(r => r.id === runId), prepared = clone(state.rollback.prepared);
-        if (!run) return false;
+        if (!run || run.archived) return false;
         return activity('rolling-back', async () => {
           try { run.rollback = await execution.rollback({ run: clone(run), prepared, onProgress: p => { run.progress = p; emit(); } }); }
           catch (e) { run.rollback = { status: 'unknown', message: '戻した結果を確認できません。', error: errorOf(e) }; }
           set({ phase: 'result', resultRunId: run.id, rollback: null });
         }, 'result');
       }
+      function exportSession() {
+        const appId = appOf(base), environment = environmentOf(base);
+        const persistent = { ...state, ...(documentPhase && state.phase === 'consulting' ? { phase: documentPhase } : {}) };
+        if (['rollback-confirm', 'rolling-back'].includes(persistent.phase) && state.rollback?.runId) persistent.resultRunId = state.rollback.runId;
+        return { version: SESSION_VERSION, state: sessionState(persistent), sequence,
+          pendingPlanQuestions: historyData(pendingPlanQuestions),
+          baseline: base ? { stamp: stampOf(base), appId: appId == null ? null : String(appId), environment,
+            verificationFingerprint: restoredBaseline?.verificationFingerprint ?? fingerprints.get(base) ?? null } : null };
+      }
+      async function restoreSession(payload, { shouldContinue = () => true } = {}) {
+        if (!available() || typeof shouldContinue !== 'function') return false;
+        let saved;
+        try { saved = clone(payload); if (!validSession(saved)) return false; } catch (_) { return false; }
+        restoringSession = true;
+        try {
+          // A fresh settings read is also the access check. Do not replace the current
+          // conversation, emit, call AI, prepare, or write until it succeeds.
+          const fresh = await getBase('history-open'), baseline = saved.baseline;
+          if (!shouldContinue()) return false;
+          await fingerprintTasks.get(fresh);
+          if (!shouldContinue()) return false;
+          if (baseline && ((baseline.appId !== null && String(appOf(fresh)) !== baseline.appId) ||
+              (baseline.environment !== null && environmentOf(fresh) !== baseline.environment))) return false;
+          const next = sessionState(saved.state);
+          for (const artifact of next.artifacts) {
+            if (artifact.result?.artifactOutcome?.state !== 'ready') continue;
+            const customization = next.plan?.customizations.find(c => c.customizationId === artifact.customizationId);
+            if (!customization) return false;
+            await validateArtifact(artifact.result, customization);
+            if (!shouldContinue()) return false;
+          }
+          Object.assign(next, { prepared: null, rollback: null, progress: '' });
+          for (const run of next.runs) {
+            if (run.status === 'running') {
+              run.status = 'unknown'; run.result = { ...run.result, status: 'unknown', written: null,
+                message: '反映中に画面が閉じられたため、結果を確認できません。同じ変更を再度反映せず、現在の設定を確認してください。' };
+            }
+            if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id))
+              run.rollback = { ...run.rollback, status: 'unknown', message: '復元中に画面が閉じられたため、結果を確認できません。現在の設定を確認してください。' };
+          }
+          const currentRun = next.runs.find(r => r.id === next.resultRunId) || next.runs.findLast(r => r.taskId === next.taskId);
+          if (currentRun && ['result', 'applying', 'rolling-back', 'rollback-confirm', 'checking-result'].includes(next.phase)) {
+            next.phase = 'result'; next.resultRunId = currentRun.id;
+          } else if (next.phase === 'consulting' && next.requestPurpose === 'consultation') {
+            next.proposalPending = true; next.phase = next.proposal ? 'proposal' : 'idle';
+            next.error = { code: 'CANCELLED', message: '相談の完了を確認できません。相談内容をもう一度送信してください。' };
+          } else if (next.plan) {
+            const ready = next.plan.customizations.every(c => next.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'));
+            if (ready && !next.plan.questions.some(q => q && q.blocking !== false)) {
+              next.phase = 'blocked'; next.error = { code: baseline && stampOf(fresh) !== baseline.stamp ? 'BASE_CHANGED' : 'APPROVAL_CHANGED',
+                message: '保存した変更案を開きました。反映する前に、最新の設定で内容を確認し直してください。' };
+            } else if (next.plan.questions.some(q => q && q.blocking !== false)) next.phase = 'blocked';
+            else {
+              next.phase = 'incomplete';
+              if (baseline && stampOf(fresh) !== baseline.stamp) next.error = { code: 'BASE_CHANGED', message: '保存後に設定が変わりました。最新の設定で変更案を作り直してください。' };
+            }
+          } else if (busyPhases.has(next.phase) || ['review', 'unchanged', 'rollback-confirm'].includes(next.phase)) next.phase = next.proposal ? 'proposal' : 'idle';
+          const nextQuestions = historyData(saved.pendingPlanQuestions);
+          const nextSequence = [...next.messages.map(m => m.id), ...next.explanations.map(e => Number(e.id.split('-').at(-1))), ...next.runs.map(r => Number(r.id.split('-').at(-1)) || 0)].reduce((maximum, id) => Math.max(maximum, id), Math.max(sequence, saved.sequence));
+          if (!Number.isSafeInteger(nextSequence) || !shouldContinue()) return false;
+          ++epoch; controller?.abort(); controller = null; cancelDocument = null; documentPhase = null;
+          pendingPlanQuestions = nextQuestions; sequence = nextSequence;
+          restoredBaseline = baseline;
+          base = baseline ? { ok: true, stamp: baseline.stamp, appId: baseline.appId, env: baseline.environment } : fresh;
+          Object.assign(state, next);
+          emit(); return true;
+        } catch (_) { return false; }
+        finally { restoringSession = false; }
+      }
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-        send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
+        exportSession, restoreSession, send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
         setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
         setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
-        showExplanation(id) { if (!state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
-        showChanges() { set({ explanationId: null }); return true; },
-        async prepare() { if (!state.plan || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
-        cancelRollback() { if (state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; ++epoch; base = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+        showExplanation(id) { if (restoringSession || !state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
+        showChanges() { if (restoringSession) return false; set({ explanationId: null }); return true; },
+        async prepare() { if (!state.plan || state.proposalPending || state.runs.some(r => r.archived && r.taskId === state.taskId) || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
+        cancelRollback() { if (restoringSession || state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
+        newTask() { if (!available()) return false; ++epoch; base = null; restoredBaseline = null; pendingPlanQuestions = []; Object.assign(state, { phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
           ++epoch; controller?.abort(); controller = null;
-          if (consulting && cancelDocument) { const stop = cancelDocument; cancelDocument = null; stop(); return true; }
+          if (consulting && cancelDocument) { const stop = cancelDocument; cancelDocument = null; documentPhase = null; stop(); return true; }
           invalidate();
           // send() already retired the previous plan and retained pending questions.
           set({ phase: state.plan ? 'incomplete' : state.proposal ? 'proposal' : 'idle', progress: '', error: { code: 'CANCELLED', message: consulting ? '相談を中断しました。案は更新していません。' : state.artifacts.length ? '作成を中断しました。作成途中の内容は残っています。' : '作成を中断しました。反映はしていません。' } }); return true;
@@ -15504,6 +16022,20 @@
     const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>入力した内容を送信するか、消してから操作してください。</p>`;
     const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
     function connectionOf(options) { try { return (typeof options.connection === 'function' ? options.connection() : options.connection) || {}; } catch (_) { return { connected: false, message: '接続の状態を確認できません。' }; } }
+    function historyStatusHtml(options) {
+      let status;
+      try { status = typeof options.historyStatus === 'function' ? options.historyStatus() : options.historyStatus; }
+      catch (_) { status = { state: 'unavailable', message: '保存の状態を確認できません。' }; }
+      if (!status?.state) return '';
+      const labels = { saving: '保存中…', saved: '保存済み', error: '保存できません', unavailable: '保存を利用できません', loading: '読み込み中…' };
+      const label = labels[status.state];
+      if (!label) return '';
+      const detail = [label, status.completed ? '完了' : '', status.pinned ? '保護中' : ''].filter(Boolean).join('・');
+      const failed = status.state === 'error' || status.state === 'unavailable';
+      const message = status.message || (failed ? '保存した会話を開いて、保存の状態を確認してください。' : detail);
+      const indicator = '<span class="ktr-history-status" data-release-history-state="' + esc(status.state) + '" role="' + (failed ? 'alert' : 'status') + '">' + esc(detail) + '</span>';
+      return failed ? '<details class="ktr-history-status-detail" data-release-panel="history-status"><summary>' + indicator + '</summary><div class="ktr-history-status-message"><p>' + esc(message) + '</p></div></details>' : '<span title="' + esc(message) + '">' + indicator + '</span>';
+    }
     function usageHtml(value) {
       const usage = workspace.usageOf(value), count = n => n == null ? '未確認' : n + '回';
       if (!usage) return '<p class="ktr-note">利用状況は未確認です。［接続を更新］で確認できます。</p>';
@@ -15579,7 +16111,7 @@
       return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(consultationLabel(m.consultationTarget))}</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
     }
     function composer(state, options = {}) {
-      const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical;
+      const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical || !!options.switching;
       const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
       const quotaBlocked = document ? conn.canCreate === false : conn.canConsult === false;
       const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
@@ -15709,23 +16241,24 @@
       const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
         (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
         run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-      const canRestore = run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+      const canRestore = !run.archived && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
       const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
       const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
       const checkMobile = platforms.has('mobile');
       const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
       return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
-        ${list(result.reasons || [], 'ktr-reasons')}
+        ${run.archived ? '<p class="ktr-note">保存した反映結果です。現在の状態や、元に戻せることを保証するものではありません。</p>' : ''}${list(result.reasons || [], 'ktr-reasons')}
         ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
         ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
         ${!run.rollback && status === 'complete' && checkDesktop ? '<p>PCの動作は、動作テスト環境を開いて確認してください。</p>' : ''}
         ${!run.rollback && status === 'complete' && checkMobile ? '<p>モバイルの動作は、動作テスト環境では確認できません。モバイル画面での確認は別途必要です。</p>' : ''}
         ${recoveryLimited ? '<p>フィールドの削除・選択肢の変更を含むため、この反映は、この画面から自動では元に戻せません。保管したデータと現在の設定を確認してください。</p>' : ''}
         ${status === 'unknown' ? `<p>${run.rollback ? 'もう一度戻す前に、現在の状態を確認してください。' : '同じ変更をもう一度反映せず、現在の設定を確認してください。'}</p>` : ''}
-        <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
+        <div class="ktr-actions">${historical ? button('current', '現在の作業に戻る', { primary: true }) : `${status === 'complete' && !run.rollback && checkDesktop && typeof options.onOpenPreview === 'function' ? button('preview', '動作テスト環境を開く', { primary: true }) : ''}${button('new-task', '別の変更を相談する')}`}${!run.archived && !run.rollback && status === 'unknown' ? button('recheck-apply', '反映結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${!run.archived && run.rollback?.status === 'unknown' ? button('recheck-rollback', '復元結果を確認する', { primary: true, id: run.id, disabled: !!options.operationBusy }) : ''}${canRestore ? button('request-rollback', 'この反映の変更を戻す', { id: run.id, disabled: !!options.operationBusy }) : ''}</div></section>`;
     }
     function rollbackHtml(state, options) {
       const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
+      if (run?.archived) return runHtml(run, options);
       return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
     }
     function diagnosticHtml(error) {
@@ -15766,14 +16299,14 @@
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><span class="ktr-environment">動作テスト環境</span></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}</nav></div></header>
+      return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</nav></div></header>
         <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
     }
     function create(host, options = {}) {
       if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
       const controller = options.controller;
-      let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false;
-      const expanded = new Set(), displayListeners = new Set();
+      let draft = '', selectedRunId = null, notice = '', disposed = false, sending = false, switching = false;
+      const expanded = new Set(), displayListeners = new Set(), draftListeners = new Set();
       let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null;
       function draw(state = controller.getState()) {
         if (disposed) return;
@@ -15792,7 +16325,7 @@
         const codePanel = options.codePanelElement?.();
         const codeFocus = codePanel?.contains(host.ownerDocument?.activeElement) ? host.ownerDocument.activeElement : null;
         codePanel?.remove();
-        host.innerHTML = render(state, { ...options, draft, sending, selectedRunId, notice });
+        host.innerHTML = render(state, { ...options, draft, sending: sending || switching, switching, selectedRunId, notice });
         if (codePanel) host.querySelector('.ktr-layout').appendChild(codePanel);
         codeFocus?.focus?.({ preventScroll: true });
         const nextNotice = host.querySelector?.('[data-release-panel="header-notice"]'), sameNotice = nextNotice?.dataset.releaseNotice === previousNotice?.dataset.releaseNotice;
@@ -15815,17 +16348,44 @@
         for (const listener of displayListeners) listener();
         previousPhase = state.phase; previousRunId = selectedRunId; previousExplanationId = state.explanationId; previousMessageCount = state.messages?.length || 0;
       }
+      // Autosave status changes must not replace the composer during IME input.
+      function updateHistoryStatus() {
+        if (disposed) return;
+        const slot = host.querySelector?.('[data-release-history-status]');
+        if (!slot) return;
+        const markup = historyStatusHtml(options);
+        if (slot.innerHTML === markup) return;
+        const previous = slot.querySelector('details'), wasOpen = !!previous?.open;
+        const hadFocus = !!previous && previous.querySelector('summary') === host.ownerDocument?.activeElement;
+        const scrollTop = previous?.querySelector('.ktr-history-status-message')?.scrollTop || 0;
+        slot.innerHTML = markup;
+        const next = slot.querySelector('details');
+        if (next && wasOpen) { next.open = true; expanded.add('history-status'); }
+        else expanded.delete('history-status');
+        if (next && hadFocus) next.querySelector('summary')?.focus?.({ preventScroll: true });
+        if (next?.open) { const message = next.querySelector('.ktr-history-status-message'); if (message) message.scrollTop = scrollTop; }
+      }
       function updateDraftGuard() {
-        const pending = draftPending({ draft, sending });
+        const pending = draftPending({ draft, sending: sending || switching });
         host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { el.disabled = el.dataset.releaseBaseDisabled === 'true' || pending; });
         host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
         const state = controller.getState();
-        host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
+        host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || switching || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
       }
-      function inputChanged(event) { if (event.target?.id === 'kt-release-input') { draft = event.target.value; updateDraftGuard(); } }
+      function setDraft(value) {
+        if (disposed) return false;
+        const next = String(value ?? ''), changed = next !== draft;
+        draft = next;
+        const input = host.querySelector?.('#kt-release-input');
+        if (input && input.value !== draft) input.value = draft;
+        updateDraftGuard();
+        if (changed) for (const listener of draftListeners) listener(draft);
+        return changed;
+      }
+      function inputChanged(event) { if (event.target?.id === 'kt-release-input') setDraft(event.target.value); }
       function canSend(purpose = controller.getState().requestPurpose) {
         const state = controller.getState(), conn = connectionOf(options);
-        return !disposed && !sending && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
+        return !disposed && !sending && !switching && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'document' ? conn.canCreate !== false : conn.canConsult !== false);
       }
       async function send(request, onStart, suggestionReference = null, requestOptions = null) {
         const fromDocument = typeof request === 'string' && !suggestionReference;
@@ -15838,8 +16398,7 @@
         const restoreInput = () => {
           const activeInput = host.querySelector?.('#kt-release-input');
           if (!cleared || disposed || controller.getState().taskId !== sentTaskId || String(activeInput?.value ?? draft).trim()) return;
-          draft = value; if (activeInput) activeInput.value = value;
-          updateDraftGuard();
+          setDraft(value);
         };
         try {
           if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
@@ -15847,7 +16406,7 @@
           if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (fromTemplate ? conn.canCreate === false : controller.getState().requestPurpose === 'document' ? conn.canCreate === false : conn.canConsult === false)) return false;
           if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
           if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
-          if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; draft = ''; const activeInput = host.querySelector?.('#kt-release-input'); if (activeInput) activeInput.value = ''; }
+          if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; setDraft(''); }
           selectedRunId = null; notice = '';
           onStart?.();
           const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: 'document' } : undefined);
@@ -15856,6 +16415,7 @@
         } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
       }
       async function act(action, id, target = {}) {
+        if (disposed || switching) return;
         const state = controller.getState();
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
         if (action === 'send') return send();
@@ -15888,8 +16448,22 @@
           }
           draw(); return;
         }
-        if (action === 'answer') { controller.setRequestPurpose('consultation'); draft = target.dataset?.releaseAnswer || ''; const input = host.querySelector?.('#kt-release-input'); if (input) { input.value = draft; input.focus?.(); } updateDraftGuard(); return; }
-        if (action === 'new-task') { draft = ''; const input = host.querySelector?.('#kt-release-input'); if (input) input.value = ''; selectedRunId = null; notice = ''; return controller.newTask(); }
+        if (action === 'answer') { controller.setRequestPurpose('consultation'); setDraft(target.dataset?.releaseAnswer || ''); host.querySelector?.('#kt-release-input')?.focus?.(); return; }
+        if (action === 'new-task') {
+          if (sending || busy.has(state.phase)) return;
+          try {
+            const pending = typeof options.onNewTask === 'function' ? options.onNewTask() : true;
+            switching = true; draw();
+            if (await pending === false) return false;
+            if (disposed || sending || busy.has(controller.getState().phase)) return false;
+            setDraft(''); selectedRunId = null; notice = '';
+            return controller.newTask();
+          } finally { switching = false; draw(); }
+        }
+        if (action === 'saved-history') {
+          if (sending || busy.has(state.phase)) return;
+          return options.onHistory?.();
+        }
         if (action === 'cancel-rollback') return controller.cancelRollback();
         if (action === 'request-rollback') { selectedRunId = null; return controller.requestRollback(id); }
         if (action === 'rollback') return controller.rollback(id);
@@ -15923,7 +16497,7 @@
       }
       function suggestionChanged(event) {
         const target = event.target;
-        if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || selectedRunId) return;
+        if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || switching || selectedRunId) return;
         controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
       }
       function keydown(event) { if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); send().catch(error => { notice = error.message; draw(); }); } }
@@ -15935,13 +16509,14 @@
       host.addEventListener('toggle', toggled, true);
       const unsubscribe = controller.subscribe(draw);
       draw();
-      return { canRequestDocument: () => canSend('document'), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { draft = text; input.value = draft; updateDraftGuard(); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+      return { updateHistoryStatus, newTask: () => act('new-task'), canSwitchSession() { return !disposed && !sending && !switching && !busy.has(controller.getState().phase); }, resetDisplay() { if (disposed) return; selectedRunId = null; notice = ''; expanded.clear(); draw(); }, getDraft: () => String(host.querySelector?.('#kt-release-input')?.value ?? draft), setDraft, subscribeDraft(fn) { draftListeners.add(fn); return () => draftListeners.delete(fn); }, canRequestDocument: () => canSend('document'), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !disposed && !sending && !switching && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { setDraft(text); } input?.focus?.(); }, dispose() { disposed = true; displayListeners.clear(); draftListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
     }
     const styles = `
       .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
       .ktr-consult-target{padding:8px;border:1px solid var(--ktr-line);border-radius:6px;margin:8px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.ktr-consult-target small{flex-basis:100%;color:var(--ktr-muted)}
       .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:clamp(14px,1.5%,20px);overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-current{border-top:1px solid var(--ktr-line);padding-top:24px;margin-top:24px;scrollbar-gutter:stable}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;gap:6px;flex-wrap:wrap}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
       .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:20px;line-height:1.4;margin:0 0 14px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
+      .ktr-heading-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-history-status{font-size:11px;color:var(--ktr-muted)}.ktr-history-status[data-release-history-state="error"],.ktr-history-status[data-release-history-state="unavailable"]{color:var(--ktr-danger)}.ktr-workspace .ktr-history-status-detail{margin:0;font-size:11px}.ktr-workspace .ktr-history-status-detail>summary{padding:0}.ktr-history-status-message{position:absolute;z-index:5;left:0;top:calc(100% - 8px);width:min(420px,100%);max-height:30dvh;overflow:auto;padding:12px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);box-shadow:0 6px 20px #0002}.ktr-history-status-message>p{margin:0;font-size:12px}
       .ktr-heading{min-width:0}.ktr-title-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-workspace .ktr-header-notice{margin:0;min-width:0;max-width:100%;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-header-notice>summary{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;list-style:none}.ktr-header-notice>summary::-webkit-details-marker{display:none}.ktr-header-notice>summary:after{content:'▾';color:var(--ktr-muted)}.ktr-header-notice[open]>summary:after{content:'▴'}.ktr-header-notice>summary [role="alert"]{color:var(--ktr-danger)}.ktr-header-notice>summary small{font-size:inherit;white-space:nowrap}
       .ktr-header-notice-body{position:absolute;z-index:5;top:calc(100% - 8px);left:0;width:min(520px,100%);max-height:35dvh;overflow:auto;padding:14px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);color:var(--ktr-text);box-shadow:0 6px 20px #0002;font-size:13px;overflow-wrap:anywhere}.ktr-header-notice-body section+section{border-top:1px solid var(--ktr-line);padding-top:8px}.ktr-header-notice-body .ktr-error{max-height:none;padding:0;border:0;background:transparent;margin:0 0 12px}.ktr-header-notice-body button{font-size:12px}
       .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-phase{font-size:12px;color:var(--ktr-muted);white-space:nowrap;padding:3px 8px;background:var(--ktr-soft);border-radius:5px}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
@@ -16443,6 +17018,7 @@
         codeSlot.setAttribute('aria-label', 'コードと差分');
       }
       codePanel = panel;
+      attachHistoryEditor();
       view?.render();
       if (codeOpen) codePanel.onVisible?.();
       return true;
@@ -16541,7 +17117,7 @@
     controller.subscribe(state => {
       const run = state.runs.find(r => r.id === state.resultRunId);
       const key = run && run.id + ':' + (run.rollback?.status || 'applied');
-      if (state.phase === 'result' && run && (run.result?.written || run.result?.written === null || run.status === 'unknown') && !notifiedResults.has(key)) {
+      if (state.phase === 'result' && run && !run.archived && (run.result?.written || run.result?.written === null || run.status === 'unknown') && !notifiedResults.has(key)) {
         notifiedResults.add(key);
         latestBase = null;
         d.onSettingsChanged?.({ preview: true, production: false, source: 'ai' });
@@ -16769,18 +17345,123 @@
       const el = dialog('アプリの情報', b ? '<p>動作テスト環境の設定の版: ' + esc(b.revision?.preview) + '</p><p>運用環境へ未反映の変更: ' + esc(b.diff?.available ? String(b.diff.items.length) + '件' + (b.diff.complete === false ? '（比較できた範囲）' : '') : '未確認') + '</p><details><summary>現在の設定の詳細</summary><pre style="white-space:pre-wrap"></pre></details>' : '<p>この作業では、まだ動作テスト環境の設定を取得していません。</p>', { wide: true });
       if (b) el.querySelector('pre').textContent = JSON.stringify({ appId: b.appId, revision: b.revision, diff: b.diff }, null, 2);
     }
+    // Only the current app/user may save or open local work. Authentication stays in its existing store.
+    let history = null, historyInitError = '', pendingEditor = null, editorUnsubscribe = null, draftUnsubscribe = null, stateUnsubscribe = null;
+    const historyScope = () => {
+      if (d.historyScope) return { ...d.historyScope };
+      let user; try { user = globalThis.kintone?.getLoginUser?.(); } catch (_) {}
+      return user?.id && d.appId != null ? { domain: location.origin, appId: String(d.appId), userId: String(user.id), environment: 'preview' } : null;
+    };
+    const sameScope = (a, b) => !!a && !!b && ['domain', 'appId', 'userId', 'environment'].every(key => String(a[key]) === String(b[key]));
+    function editingSnapshot() { return codePanel?.exportDrafts?.() || pendingEditor; }
+    function validEditor(value) {
+      return value == null || value.version === 1 && Array.isArray(value.files) && value.files.length <= 200 &&
+        (value.active == null || typeof value.active === 'string') &&
+        value.files.every(file => file && typeof file.name === 'string' && file.name.length <= 300 && typeof file.text === 'string' &&
+          ['preview', 'production'].includes(file.environment) && ['desktop', 'mobile'].includes(file.target) && ['js', 'css'].includes(file.kind) &&
+          (file.registeredText == null || typeof file.registeredText === 'string'));
+    }
+    function initializeHistory() {
+      const scope = historyScope();
+      if (!scope || typeof KTReleaseHistory === 'undefined' || !globalThis.indexedDB) { historyInitError = 'この環境では会話の自動保存を利用できません。必要な内容をファイルで保存してください。'; return; }
+      try {
+        const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
+        history = KTReleaseHistorySession.create({ store,
+          capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', editor: editingSnapshot() }),
+          restore: async payload => {
+            if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor)) return false;
+            if (codePanel?.canRestoreDrafts?.() === false) return false;
+            const draftBefore = view.getDraft(), editorBefore = JSON.stringify(editingSnapshot());
+            const shouldContinue = () => sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === JSON.stringify(editingSnapshot()) && codePanel?.canRestoreDrafts?.() !== false;
+            if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
+            pendingEditor = payload.editor || { version: 1, files: [], active: null };
+            if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;
+            view.setDraft(payload.draft); view.resetDisplay?.(); setCodeOpen(false); return true;
+          },
+          verifyAccess: async refresh => {
+            if (!sameScope(scope, historyScope())) throw new Error('利用者またはアプリが変わりました。画面を開き直してください。');
+            if (refresh) {
+              const base = await loadBase({ reason: 'history-list' });
+              if (!sameScope(scope, historyScope())) throw new Error('利用者またはアプリが変わりました。画面を開き直してください。');
+              if (!base?.ok || base.env !== scope.environment || String(base.appId) !== String(scope.appId))
+                throw new Error('現在のアプリを取得できないため、保存した会話を開けません。');
+            }
+          },
+          canSwitch: () => view?.canSwitchSession?.() === true && codePanel?.canRestoreDrafts?.() !== false,
+          onStatus: () => view?.updateHistoryStatus?.(), ...(d.historySessionOptions || {})
+        });
+        history.initialize();
+        stateUnsubscribe = controller.subscribe(() => history.changed());
+        draftUnsubscribe = view.subscribeDraft(() => history.changed());
+        if (codePanel) attachHistoryEditor();
+      } catch (_) { historyInitError = '会話の保存を開始できません。必要な内容をファイルで保存してください。'; }
+    }
+    function attachHistoryEditor() {
+      editorUnsubscribe?.(); editorUnsubscribe = null;
+      if (!history || !codePanel) return;
+      if (pendingEditor && codePanel.restoreDrafts?.(pendingEditor)) pendingEditor = null;
+      editorUnsubscribe = codePanel.subscribeDrafts?.(() => history.changed());
+    }
+    async function historyDialog() {
+      const el = dialog('保存した会話', '<p>この端末・ブラウザーの、このアプリの会話です。完了した会話は30日後に整理します。「残す」を選んだ会話と作業中の内容は保護します。</p><p data-history-note role="status">読み込んでいます…</p><div data-history-list></div><div class="ktr-actions"><button data-history-new>新しい会話</button><button data-history-save>今の会話を保存</button><button data-history-complete>完了にする</button><button data-history-export>今の内容をファイルで保存</button></div><p class="ktr-note">ブラウザーのデータを消すと、この履歴も消えます。開くだけではAIを呼びません。</p>', { wide: true });
+      let busy = false;
+      el.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+      const note = text => { if (el.open) el.querySelector('[data-history-note]').textContent = text; };
+      const renderList = async () => {
+        if (!history) { note(historyInitError); el.querySelector('[data-history-save]').disabled = true; el.querySelector('[data-history-complete]').disabled = true; return; }
+        const result = await history.list(); if (!el.open) return;
+        const mb = value => (value / 1024 / 1024).toFixed(2);
+        note('保存容量 ' + mb(result.usage.bytes) + ' / ' + mb(result.usage.maxBytes) + ' MB（同じ利用者の全アプリ）');
+        el.querySelector('[data-history-list]').innerHTML = result.entries.length ? result.entries.map(entry => '<article style="padding:12px 0;border-bottom:1px solid var(--kt-line)"><strong>' + esc(entry.title) + '</strong><p class="ktr-note">' +
+          (entry.id === result.currentId ? '表示中 · ' : '') + (entry.pinned ? '残す · ' : '') + (entry.completedAt != null ? '完了' : '作業中') +
+          (entry.expiresAt ? ' · 整理予定 ' + esc(new Date(entry.expiresAt).toLocaleDateString('ja-JP')) : '') +
+          '</p><div class="ktr-actions"><button data-history-open="' + esc(entry.id) + '"' + (entry.id === result.currentId ? ' disabled' : '') + '>開く</button><button data-history-pin="' + esc(entry.id) + '" data-history-revision="' + entry.revision + '" data-history-pinned="' + entry.pinned + '">' + (entry.pinned ? '「残す」を解除' : '残す') + '</button><button data-history-delete="' + esc(entry.id) + '" data-history-revision="' + entry.revision + '"' + (entry.id === result.currentId ? ' disabled' : '') + '>削除</button></div></article>').join('') : '<p>保存した会話はありません。</p>';
+      };
+      el.addEventListener('click', async event => {
+        const button = event.target.closest('button'); if (!button || busy || button.hasAttribute('data-close')) return;
+        const data = button.dataset;
+        if (!Object.keys(data).some(key => key.startsWith('history'))) return;
+        busy = true; el.querySelector('[data-close]').disabled = true;
+        try {
+          if (button.hasAttribute('data-history-export')) { const payload = history?.exportCurrent() || { version: 1, session: controller.exportSession(), draft: view.getDraft(), editor: editingSnapshot() }; d.downloadText('toolkit-conversation-' + d.appId + '.json', JSON.stringify(payload, null, 2), 'application/json'); return; }
+          if (button.hasAttribute('data-history-new')) { if (await view.newTask()) el.close(); return; }
+          if (!history) return;
+          if (data.historyOpen) { if (await history.open(data.historyOpen)) { el.close(); return; } throw new Error(history.getStatus().message); }
+          if (data.historyDelete) {
+            if (!window.confirm('この端末の会話と成果物を削除します。kintoneの設定は変わりません。削除しますか？')) return;
+            await history.remove({ id: data.historyDelete, revision: Number(data.historyRevision) });
+          } else if (data.historyPin) {
+            if (!await history.setPinned({ id: data.historyPin, revision: Number(data.historyRevision) }, data.historyPinned !== 'true')) throw new Error(history.getStatus().message);
+          } else if (button.hasAttribute('data-history-complete')) {
+            if (!await history.markComplete()) throw new Error(history.getStatus().message || '会話がないか、処理中のため完了にできません。');
+          } else if (button.hasAttribute('data-history-save')) await history.flush();
+          await renderList();
+        } catch (error) { note(error.message || '保存した会話を確認できませんでした。'); }
+        finally { busy = false; if (el.open) el.querySelector('[data-close]').disabled = false; }
+      });
+      let saveError = '';
+      try { if (history) await history.flush(); } catch (error) { saveError = history.getStatus().message || error.message; }
+      try { await renderList(); if (saveError) note(saveError); } catch (error) { note(error.message); }
+    }
+
     view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: d.openConfigLens,
+      onHistory: historyDialog, historyStatus: () => history?.getStatus() || (historyInitError ? { state: 'unavailable', message: historyInitError } : null), onNewTask: () => history ? history.beforeNewTask() : true,
       codePanelElement: () => codeOpen ? codeSlot : null,
       codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
       onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
       onOpenPreview: d.onOpenPreview || (/^\d+$/.test(String(d.appId)) && !location.pathname.startsWith('/k/guest/') ? () => window.open(location.origin + '/k/admin/preview/' + encodeURIComponent(d.appId) + '/', '_blank', 'noopener') : null),
       appName: d.getInputs?.()?.data?.appName || 'アプリの相談' });
+    initializeHistory(); view.render();
+    const flushHistory = () => { if (history) history.flush().catch(() => {}); };
+    const onHistoryVisibility = () => { if (document.visibilityState === 'hidden') flushHistory(); };
+    document.addEventListener('visibilitychange', onHistoryVisibility);
     const warnBeforeLeave = event => {
       const state = controller.getState();
-      if (state.messages.length || state.runs.length) { event.preventDefault(); event.returnValue = ''; }
+      flushHistory();
+      if (history?.isDirty() || ['consulting','building','preparing','applying','rolling-back'].includes(state.phase) || (!history && (state.messages.length || state.runs.length))) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', warnBeforeLeave);
-    return { controller, view, capability: () => capability, refreshCapability,
+    return { controller, view, history: () => history, capability: () => capability, refreshCapability,
       onVisible() { view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
       invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
       attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
@@ -16806,6 +17487,8 @@
       },
       dispose() {
         clearTimeout(usageResetTimer);
+        stateUnsubscribe?.(); draftUnsubscribe?.(); editorUnsubscribe?.(); history?.dispose();
+        document.removeEventListener('visibilitychange', onHistoryVisibility);
         flow?.cancel(); controller.cancel(); setCodeOpen(false);
         if (codePanel) codePanel.home.appendChild(codePanel.element);
         codeSlot?.remove();
@@ -21543,6 +22226,26 @@
       if (!activeDocument) return;
       drafts.set(draftKey(activeDocument), { ...activeDocument, text: editor.getValue(), viewState: editor.saveViewState?.() });
     }
+    const historyDraftListeners = new Set();
+    const notifyHistoryDrafts = () => { for (const listener of historyDraftListeners) listener(); };
+    function exportDrafts() {
+      retainEditor();
+      const keys = ['name', 'target', 'kind', 'environment', 'fileKey', 'text', 'registeredText', 'isNew'];
+      return { version: 1, active: activeDocument ? draftKey(activeDocument) : null,
+        files: [...drafts.values()].map(file => Object.fromEntries(keys.filter(key => file[key] !== undefined).map(key => [key, file[key]]))) };
+    }
+    function restoreDrafts(saved) {
+      if (manualBusy || !saved) return false;
+      ++fileReadSeq; ++listRequestSeq; invalidateManualConfirmation();
+      const files = saved.files.map(file => ({ ...file }));
+      activeDocument = null; drafts.clear();
+      for (const file of files) drafts.set(draftKey(file), file);
+      const active = drafts.get(saved.active) || files[0];
+      if (active) displayDocument(active);
+      else { currentFileName = null; editor.setValue(''); renderDrafts(); syncFileSelection(); updateManualButtons(); }
+      return true;
+    }
+
     function editingState(d, text = d.text) {
       if (d.isNew) return { key: 'new', label: '新規ファイル' };
       if (typeof d.registeredText !== 'string') return { key: 'unknown', label: '比較元を未取得' };
@@ -21645,7 +22348,7 @@
       if (!panel || assistant === panel) return;
       comparison?.dispose(); assistant = panel; observeManualAvailability();
       comparison = KTReleaseCustomize.createComparison($('#kt-customize-comparison'), { controller: panel.controller, monaco, getSelectedRunId: panel.view.getSelectedRunId, subscribeDisplay: panel.view.subscribeDisplay, getEditingFile: assistantDocument });
-      panel.attachCodePanel({ element: codePane, home: codeHome, getLocalEdits, onVisible() {
+      panel.attachCodePanel({ element: codePane, home: codeHome, getLocalEdits, exportDrafts, restoreDrafts, canRestoreDrafts: () => !manualBusy, subscribeDrafts(listener) { historyDraftListeners.add(listener); return () => historyDraftListeners.delete(listener); }, onVisible() {
         const target = panel.controller.getState().consultationTarget;
         if (target?.type === 'FILE') {
           ++fileReadSeq; // A delayed selection from Customize must not replace the consultation source.
@@ -21946,7 +22649,7 @@
       manualPending = pending; $manualConfirm.querySelector('[data-manual-description]').textContent = description;
       $manualConfirm.querySelector('[data-manual-confirm]').textContent = label; $manualConfirm.hidden = false;
     }
-    const manualEditListener = editor.onDidChangeModelContent(() => { invalidateManualConfirmation(); updateManualButtons(); });
+    const manualEditListener = editor.onDidChangeModelContent(() => { invalidateManualConfirmation(); updateManualButtons(); notifyHistoryDrafts(); });
     let manualStateListener = null;
     function observeManualAvailability() {
       manualStateListener?.();

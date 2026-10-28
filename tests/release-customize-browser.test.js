@@ -907,3 +907,33 @@ test('未登録の編集は本文を渡さず一覧にし、開いているコ�
     assert.equal(await page.evaluate(()=>proposalCalls.length),before.calls);assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);await page.evaluate(()=>work.dispose());
   }finally{await context.close();await browser.close();}
 });
+
+test('会話の再開でPC・モバイルの手編集を戻し、画面の破棄でも保存から落とさない',{timeout:60000},async()=>{
+  const browser=await playwright().chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:960},serviceWorkers:'block'}),errors=[],unexpected=[];
+  try {
+    await context.route('**/*',route=>{const url=route.request().url();if(url==='https://customize.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html><body></body></html>'});if(url.startsWith('https://www.google.com/s2/favicons?'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg"/>'});unexpected.push(url);return route.abort();});
+    const page=await context.newPage();page.setDefaultTimeout(6000);page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+    const setup=async()=>{await page.addScriptTag({content:bundle()});await page.evaluate(()=>{window.kintone={getLoginUser:()=>({id:'history-customize-user'})};});await mount(page);};
+    await page.goto('https://customize.test.invalid/');await setup();
+    await selected(page,'same.js','// PC original\nconst memo = 1;\n');await editor(page).fill('// saved PC edit');
+    await page.locator('#kt-customize-source').selectOption('JavaScriptMobile');await selected(page,'same.js','// mobile original\nconst memo = 2;\n');await editor(page).fill('// saved mobile edit');
+    await page.evaluate(()=>work.view.setDraft('次はこの条件を確認する'));
+    const id=await page.evaluate(async()=>{await work.history().flush();return work.history().getCurrent().id;});
+    await page.reload();await setup();const calls=await page.evaluate(()=>proposalCalls.length);
+    assert.equal(await page.evaluate(id=>work.history().open(id),id),true);
+    assert.equal(await editor(page).inputValue(),'// saved mobile edit');
+    const saved=await page.evaluate(()=>attachedCodePanel.exportDrafts());
+    assert.equal(saved.files.find(f=>f.target==='desktop'&&f.name==='same.js').text,'// saved PC edit');
+    assert.equal(saved.files.find(f=>f.target==='mobile'&&f.name==='same.js').registeredText,'// mobile original\nconst memo = 2;\n');
+    assert.equal(await page.evaluate(()=>work.view.getDraft()),'次はこの条件を確認する');assert.equal(await page.evaluate(()=>proposalCalls.length),calls);
+    await editor(page).fill('// last edit before detach');
+    await page.evaluate(()=>customize.attachAssistant({...work}));
+    assert.equal(await editor(page).inputValue(),'// last edit before detach','再接続で以前の保存本文を当て直さない');
+    await page.evaluate(()=>work.dispose());await new Promise(resolve=>setTimeout(resolve,100));
+    await page.reload();await setup();assert.equal(await page.evaluate(id=>work.history().open(id),id),true);
+    assert.equal(await editor(page).inputValue(),'// last edit before detach','破棄時の非同期保存で編集中コードをnullにしない');
+    assert.deepEqual(await page.evaluate(()=>operations),[]);assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
+    await page.evaluate(()=>work.dispose());
+  } finally {await context.close();await browser.close();}
+});

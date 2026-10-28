@@ -5,7 +5,7 @@ const root = path.resolve(__dirname, '..'), target = path.join(root, 'kintoneApp
 const startMark = '  // BEGIN RELEASE WORKSPACE (generated from src/release-*.js)';
 const endMark = '  // END RELEASE WORKSPACE';
 let code = fs.readFileSync(target, 'utf8').replace(/\r\n/g, '\n');
-const sources = ['vendor/config-lens-compare.js', 'release-environment-diff.js', 'release-environment-view.js', 'release-settings-export.js', 'release-settings-compare.js', 'release-config-lens-view.js', 'release-config-lens.js', 'release-workspace.js', 'release-context.js', 'release-execution.js', 'release-view.js', 'release-customize.js', 'release-runtime.js'];
+const sources = ['vendor/config-lens-compare.js', 'release-environment-diff.js', 'release-environment-view.js', 'release-settings-export.js', 'release-settings-compare.js', 'release-config-lens-view.js', 'release-config-lens.js', 'release-history.js', 'release-history-session.js', 'release-workspace.js', 'release-context.js', 'release-execution.js', 'release-view.js', 'release-customize.js', 'release-runtime.js'];
 const section = sources.map(file => fs.readFileSync(path.join(root, 'src', file), 'utf8').replace(/\r\n/g, '\n')
   .replace(/^if \(typeof module !== 'undefined'.*$/gm, '').trim().split('\n').map(line => line ? '  ' + line : '').join('\n')).join('\n\n');
 if (code.includes(startMark)) {
