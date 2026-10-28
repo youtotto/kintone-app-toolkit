@@ -155,3 +155,75 @@ test('読込・AI説明準備・保存を区別し、別処理を設定の読込
     for(const action of ['refresh','explain','save-production','save-preview']) assert.match(tagOf(html,'data-cl-action="'+action+'"'),/ disabled/);
   }
 });
+
+function savedComparison(crossApp = false) {
+  const result = comparison();
+  result.source = {
+    comparisonType: 'saved-settings', crossApp,
+    beforeLabel: '保存ファイル（運用環境）', afterLabel: '現在のアプリ（運用環境）',
+    before: { domain: 'saved.cybozu.com', appId: '398', environment: 'production', revision: '7', capturedAt: '2026-10-20T01:00:00Z' },
+    after: { domain: crossApp ? 'current.cybozu.com' : 'saved.cybozu.com', appId: crossApp ? '399' : '398', environment: 'production', revision: '12', capturedAt: '2026-10-28T01:00:00Z' }
+  };
+  return result;
+}
+
+test('保存ファイルと現在アプリの比較は左右の出所・日時・保存対象を区別する', () => {
+  const result = savedComparison(), savedFile = { filename: 'settings-old.json', source: result.source.before };
+  const before = clone({ result, savedFile });
+  const html = render({ result, savedFile, targetEnvironment: 'production' });
+  assert.match(html, /data-cl-action="open-file"/);
+  assert.match(html, /<input type="file" data-cl-file accept="\.json,application\/json"[^>]* hidden/);
+  assert.match(html, /data-cl-file-comparison/);
+  assert.match(html, /settings-old\.json/);
+  assert.match(html, /value="production" selected/);
+  assert.match(html, /data-cl-action="environment-mode"/);
+  assert.match(html, /<th scope="col">保存ファイル（運用環境）<\/th><th scope="col">現在のアプリ（運用環境）<\/th>/);
+  assert.match(html, /saved\.cybozu\.com \/ アプリ 398 \/ 運用環境/);
+  assert.match(html, /設定の版 7 \/ 取得：2026-10-20T01:00:00Z/);
+  assert.match(html, /設定の版 12 \/ 取得：2026-10-28T01:00:00Z/);
+  assert.match(html, /現在の運用環境を保存/);
+  assert.match(html, /現在の動作テスト環境を保存/);
+  assert.match(html, /追加・変更・削除は左から右への違い/);
+  assert.doesNotMatch(html, /data-cl-cross-app|data-cl-action="restore"|data-cl-action="apply"/);
+  assert.deepEqual({ result, savedFile }, before);
+});
+
+test('別アプリの比較は履歴と区別し、同名項目の照合と両方のアプリを示す', () => {
+  const result = savedComparison(true);
+  const html = render({ result, savedFile: { filename: 'other-app.json', source: result.source.before }, targetEnvironment: 'production' });
+  assert.match(html, /data-cl-cross-app/);
+  assert.match(html, /変更履歴ではありません/);
+  assert.match(html, /一覧・グラフ・アプリアクションは同じ名前で照合/);
+  assert.match(html, /saved\.cybozu\.com \/ アプリ 398/);
+  assert.match(html, /current\.cybozu\.com \/ アプリ 399/);
+  assert.match(html, /比較できていません/);
+  assert.match(tagOf(html, 'data-cl-action="explain"'), / disabled/);
+  assert.match(html, /AI説明は環境どうしの比較が対象/);
+  assert.doesNotMatch(tagOf(render(), 'data-cl-action="explain"'), / disabled/, '従来の環境間比較の説明は維持');
+});
+
+test('保存ファイルの読込中は比較・保存・環境選択を止め、選択したファイルは表示する', () => {
+  const result = savedComparison();
+  const html = render({ result, savedFile: { filename: 'loading.json', source: result.source.before }, importing: true });
+  for (const action of ['refresh','explain','open-file','save-production','save-preview','environment-mode']) {
+    assert.match(tagOf(html, 'data-cl-action="' + action + '"'), / disabled/);
+  }
+  assert.match(html, /<select data-cl-environment disabled/);
+  assert.match(html, /<input type="file"[^>]* disabled/);
+  assert.match(html, /保存ファイルを読み込んでいます…/);
+  assert.match(html, /loading\.json/);
+  assert.doesNotMatch(html, /設定を読み込んでいます…|設定を保存しています…/);
+});
+
+test('保存ファイル名・取得元・環境の表示でファイル内のHTMLを実行しない', () => {
+  const attack = '<img src=x onerror="alert(1)">';
+  const result = savedComparison(true);
+  result.source.beforeLabel = attack;
+  result.source.afterLabel = attack;
+  for (const value of [result.source.before, result.source.after]) {
+    value.domain = attack; value.appId = attack; value.capturedAt = attack; value.revision = attack;
+  }
+  const html = render({ result, savedFile: { filename: attack, source: result.source.before } });
+  assert.doesNotMatch(html, /<img|onerror="alert/);
+  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+});
