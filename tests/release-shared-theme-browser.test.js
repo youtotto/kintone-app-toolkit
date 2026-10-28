@@ -210,6 +210,26 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         assert.equal(await page.locator('#view-ai').isVisible(), false);
         assert.match(await page.locator('#tab-config-lens').getAttribute('class'), /active/);
         assert.equal(await page.locator('#kt-toolkit .tabs .active').count(), 1);
+        for (const action of ['refresh', 'save-production', 'save-preview', 'explain']) {
+          const button = page.locator('#view-config-lens [data-cl-action="' + action + '"]');
+          assert.equal(await button.count(), 1, 'Config Lensの' + action + 'を一つ残す');
+          assert.equal(await button.isVisible(), true, 'Config Lensの' + action + 'を画面から操作できる');
+          assert.equal(await button.isEnabled(), true, '取得後は' + action + 'を操作できる');
+          assert.equal(await button.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true, action + 'の文を切らず折り返す');
+        }
+        assert.match(await page.locator('#view-config-lens [data-cl-summary]').innerText(), /変更\s*1件/);
+        assert.match((await page.locator('#view-config-lens .ktcl-source').allTextContents()).join(' '), /運用環境.*1.*動作テスト環境.*2/);
+        assert.match(await page.locator('#view-config-lens [data-cl-category="aclField"]').innerText(), /未確認/);
+        await page.locator('.ktcl-view').evaluate(view => { for (let node = view; node && node !== document.body; node = node.parentElement) node.scrollTop = 0; });
+        const lensOverview = await page.locator('.ktcl-view').evaluate(view => {
+          const top = view.getBoundingClientRect().top;
+          const box = selector => {
+            const rect = view.querySelector(selector)?.getBoundingClientRect();
+            return rect ? { top: rect.top - top, bottom: rect.bottom - top, height: rect.height } : null;
+          };
+          return { viewportWidth: innerWidth, viewWidth: view.clientWidth, headerHeight: box('.ktcl-shell')?.top, header: box('.ktcl-header'), source: box('.ktcl-source'), summary: box('[data-cl-summary]') };
+        });
+        await page.screenshot({ path: path.join(output, label + '-config-lens-overview.png'), fullPage: true });
         await page.locator('#view-config-lens [data-cl-category="fields"]').click();
         await page.locator('#view-config-lens .ktcl-entry > summary').click();
         const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-source', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
@@ -231,7 +251,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.locator('#tab-ai').click();
         assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'Config Lensへ移動してもAIの下書きを保持する');
         assert.equal(await page.locator('.ktr-message').count(), 2, '会話表示を保持する');
-        fs.writeFileSync(path.join(output, label + '-config-lens-measurements.json'), JSON.stringify({ lens, lensFailures }, null, 2));
+        fs.writeFileSync(path.join(output, label + '-config-lens-measurements.json'), JSON.stringify({ lens, lensOverview, lensFailures }, null, 2));
         assert.deepEqual(lensFailures, []);
 
         // Actual Customize buttons, without loading code or settings. Monaco only supplies its local editor surface.

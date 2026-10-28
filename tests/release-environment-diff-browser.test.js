@@ -191,13 +191,13 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
     revision = '4'; releaseRead();
     await page.waitForFunction(() => !document.querySelector('#lens [data-cl-action="refresh"]').disabled);
     assert.equal(await pane().locator('[data-cl-category="fields"]').count(), 0, '古い取得結果を無効化の後に再表示しない');
-    await open(); assert.match(await pane().locator('.ktcl-source').innerText(), /動作テスト環境の版 4/);
+    await open(); assert.match((await pane().locator('.ktcl-source').allTextContents()).join(' '), /動作テスト環境の版 4/);
 
     pauseNextRead = true; await lensAction('refresh').click();
     await page.waitForFunction(() => !document.querySelector('#lens [data-cl-action="refresh"]').disabled);
     assert.equal(await pane().locator('[data-cl-category="fields"]').count(), 0, '中断した取得を完了済みの一覧として残さない');
     await page.locator('#tab-ai').click(); await open();
-    assert.match(await pane().locator('.ktcl-source').innerText(), /動作テスト環境の版 4/, '再表示で中断した取得をやり直す');
+    assert.match((await pane().locator('.ktcl-source').allTextContents()).join(' '), /動作テスト環境の版 4/, '再表示で中断した取得をやり直す');
 
     failCore = true; await refresh();
     assert.equal(await lensAction('explain').isDisabled(), true, '説明に必要な動作テスト環境の取得が失敗したら押せない');
