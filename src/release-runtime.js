@@ -25,7 +25,7 @@ function mountReleaseWorkspace(host, d) {
   const updateUsage = value => { usageRevision++; capability = { ...capability, usage: usageTools.usageOf(value) }; scheduleUsageReset(); view?.render(); updateConnections(); };
   async function requestWithUsage(bucket, request) {
     if (usageTools.usageExpired(capability.usage)) await refreshCapability(true);
-    if (usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket, usage: capability.usage } } } });
+    if (usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket: capability.usage?.version === 3 ? 'credits' : bucket, usage: capability.usage } } } });
     try { const result = await request(); updateUsage(result?.usage); return result; }
     catch (error) { const usage = error?.details?.error?.detail?.usage; if (usage) updateUsage(usage); throw error; }
   }
@@ -207,7 +207,7 @@ function mountReleaseWorkspace(host, d) {
   function connectionDialog() {
     const staging = 'https://appinsight-ai-api-staging.black-waterfall-157a.workers.dev';
     const verification = KTAiClient.isDevMode() && typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の設定</summary><p data-staging-note></p><button type="button" data-staging-select>検証用の接続先（staging）に切り替える</button><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p></details>' : '';
-    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary>回数の数え方</summary><p>通常の相談・変更の提案・アイディアは、送信1回につき相談1回です。資料の作成・修正は、送信1回につき作成1回です。</p><p>［この案で作成］では計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。コードの件数は計画を作った後に決まるため、全体の回数は事前には確定しません。サービス内部の修正・確認で回数は増えません。</p><p>コピー・保存・反映・元に戻す操作では回数を使いません。残数には処理中などの確保分も反映されています。</p></details>' + verification);
+    const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary data-usage-help-title>回数の数え方</summary><div data-usage-help></div></details>' + verification);
     verificationSettings(el);
     const message = t => { el.querySelector('[data-message]').textContent = t; };
     const stagingReason = () => {
@@ -221,6 +221,8 @@ function mountReleaseWorkspace(host, d) {
     };
     const render = () => {
       el.querySelector('[data-usage]').innerHTML = KTReleaseView.usageHtml(capability.usage);
+      el.querySelector('[data-usage-help-title]').textContent = capability.usage?.version === 3 ? 'クレジットの数え方' : '回数の数え方';
+      el.querySelector('[data-usage-help]').innerHTML = KTReleaseView.usageDetailsHtml(capability.usage);
       el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
       el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
       el.querySelector('[data-refresh]').disabled = connectionBusy || connectionSettingsFailed;
@@ -297,7 +299,8 @@ function mountReleaseWorkspace(host, d) {
     let pending = false;
     const update = () => {
       el.querySelector('[data-document-create]').disabled = pending || !canRequest();
-      el.querySelector('[data-document-status]').textContent = connection().canCreate === false && usageTools.usageReserved(capability.usage, 'creation') ? '作成回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canCreate === false ? '今月の作成回数の上限に達しています。［接続］で回数の更新日を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '［AIで作成］を押すと、作成回数を1回使います。';
+      const shared = capability.usage?.version === 3, unit = shared ? 'クレジット' : '作成回数';
+      el.querySelector('[data-document-status]').textContent = connection().canCreate === false && usageTools.usageReserved(capability.usage, 'creation') ? unit + 'は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canCreate === false ? '今月の' + unit + 'の上限に達しています。［接続］で更新日を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : shared ? '［AIで作成］を押すと、1クレジットを使います。' : '［AIで作成］を押すと、作成回数を1回使います。';
     };
     update();
     const unsubscribe = controller.subscribe(update);
@@ -509,7 +512,7 @@ function mountReleaseWorkspace(host, d) {
       await refreshCapability();
       if (!view.canRequestDocument()) {
         connectionDialog();
-        return { ok: false, message: 'AIへの説明依頼は送信していません。接続と作成回数を確認してください。' };
+        return { ok: false, message: 'AIへの説明依頼は送信していません。接続と' + (capability.usage?.version === 3 ? 'クレジット' : '作成回数') + 'を確認してください。' };
       }
       const ok = await view.requestDocument('運用環境へ未反映の変更を説明してください。運用環境から動作テスト環境への変更内容と、反映前に確認する点を整理してください。取得できない範囲と手元の未登録編集は分けてください。変更案の作成・採用・反映は依頼していません。',
         { consultationTarget: null, environmentComparison: { key: KTReleaseEnvironmentView.keyOf(result), localEdits } });

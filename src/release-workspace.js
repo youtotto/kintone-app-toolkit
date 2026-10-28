@@ -13,14 +13,16 @@ const KTReleaseWorkspace = (() => {
   }
   // Counts come only from the service. Missing fields are unknown, never zero.
   const countOf = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const usageCountsOf = value => value && typeof value === 'object' ? Object.fromEntries(['limit', 'used', 'reserved', 'remaining'].map(key => [key, countOf(value[key])])) : null;
   function usageOf(value) {
     if (!value || typeof value !== 'object') return null;
     const common = { plan: typeof value.plan === 'string' ? value.plan : '', yyyymm: typeof value.yyyymm === 'string' ? value.yyyymm : '', resetsAt: typeof value.resetsAt === 'string' && Number.isFinite(Date.parse(value.resetsAt)) ? value.resetsAt : null, timeZone: 'Asia/Tokyo' };
+    if (value.version === 3) return { version: 3, ...common, credits: usageCountsOf(value.credits) };
     if (value.version === 2 && value.buckets && typeof value.buckets === 'object') {
       const buckets = {};
       for (const key of ['consultation', 'creation']) {
         const b = value.buckets[key];
-        buckets[key] = b && typeof b === 'object' ? Object.fromEntries(['limit', 'used', 'reserved', 'remaining'].map(k => [k, countOf(b[k])])) : null;
+        buckets[key] = usageCountsOf(b);
       }
       return { version: 2, ...common, buckets };
     }
@@ -30,17 +32,19 @@ const KTReleaseWorkspace = (() => {
     return { version: 1, ...common, monthlyLimit: limit, usedThisMonth: used, remainingThisMonth: remaining ?? (limit != null && used != null ? Math.max(0, limit - used) : null) };
   }
   const usageExpired = (usage, now = Date.now()) => !!usage?.resetsAt && Date.parse(usage.resetsAt) <= now;
-  const usageBlocked = (usage, bucket, now) => !usageExpired(usage, now) && (usage?.version === 2 ? usage.buckets?.[bucket]?.remaining === 0 : usage?.version === 1 && usage.remainingThisMonth === 0);
-  const usageReserved = (usage, bucket) => usage?.version === 2 && usage.buckets?.[bucket]?.remaining === 0 && usage.buckets[bucket].used != null && usage.buckets[bucket].limit != null && usage.buckets[bucket].used < usage.buckets[bucket].limit && usage.buckets[bucket].reserved > 0;
+  const usageBucket = (usage, bucket) => usage?.version === 3 ? usage.credits : usage?.version === 2 ? usage.buckets?.[bucket] : null;
+  const usageBlocked = (usage, bucket, now) => !usageExpired(usage, now) && (usage?.version === 1 ? usage.remainingThisMonth === 0 : usageBucket(usage, bucket)?.remaining === 0);
+  const usageReserved = (usage, bucket) => { const b = usageBucket(usage, bucket); return b?.remaining === 0 && b.used != null && b.limit != null && b.used < b.limit && b.reserved > 0; };
   const quotaErrorDetail = error => error?.details?.error?.detail || error?.detail?.error?.detail || error?.details || error?.detail || {};
   const isReservedError = error => { const detail = quotaErrorDetail(error); return detail.reason === 'QUOTA_RESERVED' || usageReserved(usageOf(detail.usage), detail.bucket); };
   const usageResetText = usage => usage?.resetsAt ? new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(usage.resetsAt)) + '（日本時間）' : '未確認';
-  const usagePlanLabel = usage => ({ 'toolkit-light': 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
+  const usagePlanLabel = usage => ({ 'toolkit-light': usage?.version === 3 ? 'スターター' : 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
   function monthlyLimitText(error) {
     const detail = quotaErrorDetail(error);
-    const usage = usageOf(detail.usage), label = { consultation: '相談', creation: '作成' }[detail.bucket] || 'AI利用';
-    if (isReservedError(error)) return `${label}回数は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
-    return `今月の${label}回数の上限に達しました。${usage?.resetsAt ? '回数の更新は' + usageResetText(usage) + 'です。' : '［接続］で回数の更新日を確認してください。'}会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+    const usage = usageOf(detail.usage), shared = usage?.version === 3 || detail.bucket === 'credits';
+    const label = shared ? 'クレジット' : ({ consultation: '相談', creation: '作成' }[detail.bucket] || 'AI利用') + '回数', reset = shared ? '利用枠' : '回数';
+    if (isReservedError(error)) return `${label}は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+    return `今月の${label}の上限に達しました。${usage?.resetsAt ? reset + 'の更新は' + usageResetText(usage) + 'です。' : '［接続］で' + reset + 'の更新日を確認してください。'}会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
   }
   const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
   const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達したため、作成を止めました。［接続］で利用状況を確認してください。' : e?.code === 'MODEL_OUTPUT_INVALID' ? 'AIの応答を確認できなかったため、処理を止めました。' : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
