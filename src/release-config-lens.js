@@ -29,7 +29,12 @@ function mountReleaseConfigLens(host, d) {
     const openEntries = new Set(Array.from(host.querySelectorAll('details[open][data-cl-entry]')).map(e => e.getAttribute('data-cl-entry')));
     host.innerHTML = KTReleaseConfigLensView.render({ result, localEdits: editsOf(), busy: busy(), reading, sending, saving, importing,
       error, exportStatus: notice, selectedCategory, filter,
-      savedFile: savedFile && { filename: savedFile.filename, source: savedFile.document.source }, targetEnvironment,
+      savedFile: savedFile && { filename: savedFile.filename, source: savedFile.document.source,
+        appName: savedFile.document.settings.settings?.name, savedAt: savedFile.document.savedAt }, targetEnvironment,
+      currentSources: Object.fromEntries(['production', 'preview'].map(environment => [environment, base?.comparisonInputs?.[environment] ? {
+        domain: d.domain, appId: base.appId, environment, appName: base.comparisonInputs[environment].settings?.name,
+        revision: base.revision?.[environment], capturedAt: base.loadedAt
+      } : null])),
       canExplain: !savedFile && !!base?.ok && KTReleaseEnvironmentView.canExplain(result) && canRead(),
       canSaveProduction: !!base?.comparisonInputs?.production && canRead(),
       canSavePreview: !!base?.comparisonInputs?.preview && canRead() });
