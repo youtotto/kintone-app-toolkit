@@ -3,6 +3,8 @@
 // KT_SRC and KT_RELEASE_VIEW_SRC allow the same assertions against a previous build.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
+const { loadToolkit } = require('./helpers/load-toolkit.js');
+const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
 const root = path.resolve(__dirname, '..');
 const output = path.resolve(process.env.KT_THEME_OUTPUT || path.join(root, 'tests/.build/release-shared-theme'));
 const scenes = [
@@ -36,7 +38,7 @@ function bundle() {
     source = source.slice(0, start) + fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC, 'utf8') + '\n' + source.slice(end);
   }
   const end = source.lastIndexOf('})();'); assert.ok(end >= 0);
-  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,renderPlugins,renderCustomize,mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.ThemeTest={mountRoot,renderFields,renderPlugins,renderCustomize,mountReleaseWorkspace,mountReleaseConfigLens,KTAiClient};\n' + source.slice(end);
 }
 async function inspect(page, selectors) {
   return page.evaluate(selectors => {
@@ -128,6 +130,12 @@ function audit(normal, ai, dialog, scene) {
 
 test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマと画面幅', { timeout: 120000 }, async t => {
   fs.mkdirSync(output, { recursive: true });
+  const production = { appId: '310', fields: { memo: { code: 'memo', label: '備考', type: 'MULTI_LINE_TEXT', required: false } }, layout: [], views: { views: {} }, customize: { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } } };
+  const preview = structuredClone(production); preview.fields.memo.required = true;
+  const settingsFixture = await loadToolkit().KTDevBase.loadForRelease({
+    appId: '310', now: () => Date.parse('2026-10-28T01:00:00Z'),
+    ...makeEnvGetter({ production, preview, revisions: { production: '1', preview: '2' }, fail: { 'production:field/acl': new Error('固定の権限不足') } })
+  });
   const browser = await playwright().chromium.launch({ channel: process.env.BROWSER_CHANNEL || 'msedge', headless: true });
   try {
     for (const scene of scenes) for (const colorScheme of ['light', 'dark']) await t.test(`${scene.name}-${colorScheme}`, async () => {
@@ -144,7 +152,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.goto('https://shared-theme.test.invalid/');
         await page.evaluate(scene => { localStorage.setItem('ktTemplatesMovedNotice.v1', '1'); localStorage.setItem('ktToolkitFull.v1', scene.full ? '1' : '0'); localStorage.setItem('ktToolkitFullZoom.v1', String(scene.zoom)); }, scene);
         await page.addScriptTag({ content: bundle() });
-        await page.evaluate(async fixture => {
+        await page.evaluate(async ({ fixture, settingsFixture }) => {
           const T = ThemeTest, C = T.KTAiClient;
           const shell = window.shell = T.mountRoot();
           await T.renderFields(shell, { appId: '310', fields: { memo: { type: 'MULTI_LINE_TEXT', code: 'memo', label: '備考', required: false } }, layout: [] });
@@ -158,13 +166,22 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
           const client = { getHealth: async () => health, propose: denied('AI.propose'), plan: denied('AI.plan'), generate: denied('AI.generate') };
           window.work = T.mountReleaseWorkspace(host, { appId: '310', settings: C.createSettingsStore(), session: { client, status: () => ({ connected: true, apiBase: 'https://gateway.test.invalid' }) },
             loadDevBase: denied('kintone.loadBase'), executor: { api: new Proxy({}, { get: (_, name) => denied('kintone.' + String(name)) }) },
-            getInputs: () => ({ data: { appId: '310', appName: '案件管理', fields: {} }, deps: {}, scan: { files: [] } }), copyText: denied('clipboard'), downloadText: denied('download') });
+            getInputs: () => ({ data: { appId: '310', appName: '案件管理', fields: {} }, deps: {}, scan: { files: [] } }), copyText: denied('clipboard'), downloadText: denied('download'),
+            openConfigLens: () => shell.ktTabs.switchTab('config-lens') });
+          window.lensReads = 0;
+          window.configLens = T.mountReleaseConfigLens(shell.querySelector('#view-config-lens'), {
+            loadBase: async () => { lensReads++; return structuredClone(settingsFixture); },
+            domain: 'fixture.cybozu.com', localEdits: () => [], downloadText: denied('download'),
+            explain: denied('AI.explain'), canRead: () => true,
+            isVisible: () => shell.querySelector('#tab-config-lens').classList.contains('active') && !shell.ktPanel.isMini()
+          });
+          shell.ktTabs.onSwitch(id => { if (id === 'config-lens') configLens.onVisible(); });
           await work.refreshCapability();
           // Seed the rendered state only; no service or kintone operation creates this fixture.
           work.controller.getState = () => structuredClone(fixture); work.view.render();
           shell.ktTabs.onSwitch(id => { if (id === 'ai') work.onVisible(); });
           shell.ktTabs.switchTab('fields');
-        }, fixture);
+        }, { fixture, settingsFixture });
         const normal = await inspect(page, normalSelectors);
         await page.screenshot({ path: path.join(output, label + '-fields.png'), fullPage: true });
         await page.locator('#tab-ai').click();
@@ -183,6 +200,39 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.screenshot({ path: path.join(output, label + '-dialog.png'), fullPage: true });
         await page.locator('dialog[open] [data-close]').click();
         assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'dialogを閉じても入力draftを保持');
+
+        // Actual shell tab and the same independent Config Lens mount. These
+        // reads use a fixed snapshot; opening/filtering the free tab calls no AI.
+        assert.equal(await page.evaluate(() => lensReads), 0, 'Config Lens初期化だけでは設定を取得しない');
+        await page.locator('[data-release-action="pending-changes"]').click();
+        await page.waitForFunction(() => !document.querySelector('#view-config-lens [data-cl-action="refresh"]')?.disabled && !!document.querySelector('#view-config-lens [data-cl-category="fields"]'));
+        assert.equal(await page.locator('#view-config-lens').isVisible(), true, 'AI内入口から共通shellの独立タブへ移動する');
+        assert.equal(await page.locator('#view-ai').isVisible(), false);
+        assert.match(await page.locator('#tab-config-lens').getAttribute('class'), /active/);
+        assert.equal(await page.locator('#kt-toolkit .tabs .active').count(), 1);
+        await page.locator('#view-config-lens [data-cl-category="fields"]').click();
+        await page.locator('#view-config-lens .ktcl-entry > summary').click();
+        const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-source', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
+        const lens = await inspect(page, lensSelectors), lensFailures = [];
+        const shellSample = normal.samples.find(sample => sample.selector === '#kt-toolkit');
+        const lensSample = lens.samples.find(sample => sample.selector === '.ktcl-view');
+        for (const key of ['color', 'background', 'font']) assert.equal(lensSample[key], shellSample[key], 'Config Lensと共通shellの' + key + 'が揃う');
+        for (const sample of lens.samples) {
+          if (!sample.disabled && sample.contrast < 4.5) lensFailures.push(sample.selector + '「' + sample.text + '」のコントラスト ' + sample.contrast.toFixed(2));
+          if (sample.width <= 0 || sample.height <= 0) lensFailures.push(sample.selector + ' の領域が潰れている');
+        }
+        assert.ok(lens.documentWidth <= lens.width + 1, 'Config Lensがページを横にはみ出させない');
+        assert.equal(await page.locator('.ktcl-view').evaluate(el => el.scrollWidth <= el.clientWidth + 1), true);
+        await page.screenshot({ path: path.join(output, label + '-config-lens.png'), fullPage: true });
+        await page.locator('#tab-fields').click(); await page.locator('#tab-config-lens').click();
+        assert.equal(await page.evaluate(() => lensReads), 1, 'タブへ戻るだけで保存済み比較を取り直さない');
+        assert.equal(await page.locator('#view-config-lens [data-cl-category="fields"]').getAttribute('aria-pressed'), 'true');
+        assert.equal(await page.locator('#view-config-lens .ktcl-entry').evaluate(el => el.open), true, '設定詳細の開閉をタブ移動で保持する');
+        await page.locator('#tab-ai').click();
+        assert.equal(await page.locator('#kt-release-input').inputValue(), draft, 'Config Lensへ移動してもAIの下書きを保持する');
+        assert.equal(await page.locator('.ktr-message').count(), 2, '会話表示を保持する');
+        fs.writeFileSync(path.join(output, label + '-config-lens-measurements.json'), JSON.stringify({ lens, lensFailures }, null, 2));
+        assert.deepEqual(lensFailures, []);
 
         // Actual Customize buttons, without loading code or settings. Monaco only supplies its local editor surface.
         await page.evaluate(async()=>{
@@ -291,7 +341,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         assert.deepEqual(await page.evaluate(() => serviceCalls), [], 'AI・kintone・保存への呼び出しはゼロ');
         assert.deepEqual(unexpected, [], '外部ネットへの要求はゼロ'); assert.deepEqual(errors, []);
         assert.deepEqual(failures, []);
-        await page.evaluate(() => work.dispose());
+        await page.evaluate(() => { configLens.dispose(); work.dispose(); });
       } finally { await context.close(); }
     });
   } finally { await browser.close(); }

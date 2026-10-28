@@ -18,6 +18,7 @@
   - [Fields](#fields)
   - [Views](#views)
   - [Graphs](#graphs)
+  - [Config Lens](#config-lens)
   - [Relations](#relations)
   - [Deps](#deps)
   - [Notices](#notices)
@@ -50,6 +51,7 @@ Toolkitは、kintone開発を標準化・効率化するための **Tampermonkey
 - ✅ **Deps**: 依存関係グラフ + 横断検索 + 依存関係レポート出力
 - ✅ **Customize**: 登録済み JS / CSS の確認・解析（PC / モバイル・FILE / URL）＋ 「AIに相談」
 - ✅ **Plugins**: 動作テスト環境／運用環境の差分管理
+- ✅ **Config Lens（v2.3.0候補）**: 運用環境と動作テスト環境の設定比較、環境を選んだJSON保存、任意のAI説明
 - ✅ **JS Scanner**: JS/CSS解析（ファイル・フィールド・イベント起点）と、変更の影響をAIへ相談
 - ✅ **AI Assistant**: ［資料を作る］でテンプレートを選び、AIに概要や引継ぎ資料を依頼。AIを使わない設定資料の書き出しも利用できます。Nest Rec AI に接続すると、相談 → 仮案の修正・採用 → 変更内容の作成・確認 → 動作テスト環境への反映と結果の確認まで進められます
 
@@ -166,6 +168,14 @@ Toolkit は、設定を「見る」ツールから **「実現したい業務」
 <img width="635" height="235" alt="image" src="https://github.com/user-attachments/assets/83dae65e-f719-45a3-9f72-11c4f241435d" />
 
 ---
+
+### Config Lens
+
+運用環境と動作テスト環境の設定を、カテゴリと追加・変更・削除で絞り、左右に並べて比較します。取得できない範囲と手元の未登録編集は別に表示します。比較と設定の保存にはAI接続は不要です。
+
+［運用環境を保存］［動作テスト環境を保存］で、取得元・日時・設定の版・取得状況を含むJSONを保存します。JavaScript/CSSは登録情報のみで、ファイル本体・レコード・未登録編集は含みません。完全なバックアップや復元用ファイルではありません。
+
+必要な場合だけ［AIに変更点を説明してもらう］を押します。AI Assistantへ移動し、既存の会話と採用内容を保ったまま説明を依頼します。設定の反映は行いません。
 
 ### Relations
 アプリ間の依存関係を、方向を区別して一覧化します。

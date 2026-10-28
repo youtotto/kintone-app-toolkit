@@ -883,6 +883,7 @@ test('未登録の編集は本文を渡さず一覧にし、開いているコ�
     await editor(page).fill('// secret PC edit');
     const pc={name:'same.js',kind:'js',target:'desktop',environment:'preview',state:'edited'};
     assert.deepEqual(await edits(),[pc],'現在のエディターの本文で編集状態を調べる');
+    assert.deepEqual(await page.evaluate(()=>shell.ktCustomize.getLocalEdits()),[pc],'Config Lensも同じ手元編集の取得口を使える');
     const before=await page.evaluate(()=>({state:work.controller.getState(),calls:proposalCalls.length,reads:fileReads.length,operations:[...operations],models:monacoModels.length}));
     await page.evaluate(()=>{const list=attachedCodePanel.getLocalEdits();list[0].name='changed outside';list.push({text:'must not enter drafts'});});
     assert.deepEqual(await edits(),[pc],'戻り値を変更しても作業中の文書に影響しない');
