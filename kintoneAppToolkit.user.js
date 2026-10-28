@@ -2539,8 +2539,8 @@
     // 作業の基準に必須の設定（どれかが取れなければ基準にしない）
     const CORE = Object.freeze({ fields: 'app/form/fields', layout: 'app/form/layout', views: 'app/views', status: 'app/status', generalNotify: 'app/notifications/general', perRecordNotify: 'app/notifications/perRecord', reminderNotify: 'app/notifications/reminder', actions: 'app/actions', customize: 'app/customize', settings: 'app/settings' });
     // 取れなくても基準にはする（取得できなかったことを facts と画面に出し、「無い」とは扱わない）
-    const OPTIONAL = Object.freeze({ appAcl: 'app/acl', recordAcl: 'record/acl', fieldAcl: 'field/acl', reports: 'app/reports', appPlugins: 'app/plugins' });
-    const LABEL = Object.freeze({ fields: 'フィールド', layout: 'フォームの配置', views: '一覧', status: 'プロセス管理', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー', actions: 'アプリアクション', customize: 'JavaScript / CSS カスタマイズ', settings: 'アプリの一般設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', reports: 'グラフ', appPlugins: 'プラグイン' });
+    const OPTIONAL = Object.freeze({ appAcl: 'app/acl', recordAcl: 'record/acl', fieldAcl: 'field/acl', reports: 'app/reports', appPlugins: 'app/plugins', adminNotes: 'app/adminNotes' });
+    const LABEL = Object.freeze({ fields: 'フィールド', layout: 'フォームの配置', views: '一覧', status: 'プロセス管理', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダー', actions: 'アプリアクション', customize: 'JavaScript / CSS カスタマイズ', settings: 'アプリの一般設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', reports: 'グラフ', appPlugins: 'プラグイン', adminNotes: 'アプリ管理者用メモ' });
     const pathOf = (env, p) => `/k/v1/${env === ENV.PREVIEW ? 'preview/' : ''}${p}`;
     const errOf = (e) => ({ code: e?.code ?? null, message: String(e?.message ?? e ?? '').slice(0, 300), status: e?.status ?? null });
     const isPermission = (x) => x.status === 403 || x.code === 'CB_NO02' || /権限|permission/i.test(String(x.message || ''));

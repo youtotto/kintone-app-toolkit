@@ -13,7 +13,9 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
   const { describeRegistry } = await import(pathToFileURL(path.join(root, '../AI/worker/src/v2/prompt-registry.mjs')).href);
   const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
   const prod = { appId: '398', appName: '比較用', fields: { memo: { code: 'memo', label: '備考', type: 'SINGLE_LINE_TEXT' } }, layout: [], views: { views: {} }, settings: { name: '比較用', description: '' }, customize: { scope: 'ALL', desktop: { js: [fileEntry('old', 'test.js', 'OLD;')], css: [] }, mobile: { js: [], css: [] } } };
+  prod.adminNotes = { content: '<p>運用の管理メモ</p>', includeInTemplateAndDuplicates: false };
   const prev = clone(prod);
+  prev.adminNotes = { content: '<img src=x onerror=alert(1)>動作テストの管理メモ', includeInTemplateAndDuplicates: true };
   prev.fields.memo.required = true;
   prev.fields.added = { code: 'added', label: '<img src=x onerror=alert(1)>', type: 'SINGLE_LINE_TEXT' };
   prev.customize.desktop.js = [fileEntry('new', 'test.js', 'NEW;')];
@@ -97,6 +99,11 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
       return row.top >= navigation.top - 1 && row.bottom <= navigation.bottom + 1;
     }), true, 'スクロールしたカテゴリを選んでも選択位置が見える');
     assert.match(await pane().locator('[data-cl-result-category="aclField"]').innerText(), /比較できていません|未確認/);
+    await pane().locator('[data-cl-category="notes"]').click();
+    for (const summary of await pane().locator('.ktcl-entry > summary').all()) await summary.click();
+    assert.match(await pane().locator('[data-cl-result-category="notes"]').innerText(), /運用の管理メモ/);
+    assert.match(await pane().locator('[data-cl-result-category="notes"]').innerText(), /動作テストの管理メモ/);
+    assert.equal(await pane().locator('img').count(), 0, '管理者用メモのHTMLは文字として表示する');
     await pane().locator('[data-cl-category="fields"]').click();
     await pane().locator('[data-cl-kind="added"]').click();
     assert.equal(await pane().locator('.ktcl-entry').count(), 1, 'カテゴリと変更種別で絞れる');
@@ -124,6 +131,9 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
     assert.equal(saved[1].doc.settings.fields.properties.added.code, 'added');
     assert.equal(saved[0].doc.settings.fields.properties.memo.required, undefined);
     assert.equal(saved[1].doc.settings.fields.properties.memo.required, true);
+    assert.equal(saved[0].doc.settings.adminNotes.content, prod.adminNotes.content);
+    assert.equal(saved[1].doc.settings.adminNotes.content, prev.adminNotes.content);
+    assert.ok(saved.every(item => item.doc.coverage.some(row => row.id === 'notes' && row.status === 'included')));
     assert.ok(saved.every(item => item.type === 'application/json' && item.doc.settings.customize), '絞り込みと無関係に選んだ環境の取得済み設定全体を保存する');
     assert.ok(saved[0].doc.coverage.some(item => item.id === 'aclField' && item.status === 'unavailable'));
     assert.doesNotMatch(JSON.stringify(saved), /local secret draft|do-not-send|OLD;|NEW;/);

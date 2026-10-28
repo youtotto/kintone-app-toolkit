@@ -3,6 +3,8 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const { KTReleaseSettingsExport: Export } = require('../src/release-settings-export.js');
 const { loadToolkit } = require('./helpers/load-toolkit.js');
 const { makeEnvGetter } = require('./helpers/dev-base-fake.js');
+const { KTReleaseEnvironmentDiff: Diff } = require('../src/release-environment-diff.js');
+const { KTReleaseConfigLensView: View } = require('../src/release-config-lens-view.js');
 const clone = value => JSON.parse(JSON.stringify(value));
 const options = environment => ({ environment, domain: 'example.cybozu.com', savedAt: '2026-10-28T02:30:00Z', appId: '398' });
 function raw(revision, label) {
@@ -125,9 +127,79 @@ test('出どころを確認できない保存要求には理由付きで失敗�
 test('製品の取得結果から運用と動作テストの設定を分けて保存できる', async () => {
   const T = loadToolkit(), production = { fields: { memo: { code: 'memo', label: '運用', type: 'MULTI_LINE_TEXT' } }, settings: { name: '保存用', description: '' } }, preview = clone(production);
   preview.fields.memo.label = 'テスト';
-  const b = await T.KTDevBase.loadForRelease({ appId: '398', ...makeEnvGetter({ production, preview }) });
+  production.adminNotes = { content: '<p>運用だけの管理メモ</p>', includeInTemplateAndDuplicates: false };
+  preview.adminNotes = { content: '<p>テストだけの管理メモ</p>', includeInTemplateAndDuplicates: true };
+  const io = makeEnvGetter({ production, preview }), requests = [];
+  const b = await T.KTDevBase.loadForRelease({ appId: '398', ...io, getImpl: (path, params) => {
+    requests.push({ path, params: clone(params) }); return io.getImpl(path, params);
+  } });
   const p = Export.create(b, options('production')), t = Export.create(b, options('preview'));
   assert.equal(p.document.settings.fields.properties.memo.label, '運用');
   assert.equal(t.document.settings.fields.properties.memo.label, 'テスト');
-  assert.ok(p.unavailable.some(row => row.id === 'notes'));
+  assert.deepEqual(requests.filter(row => row.path.endsWith('/adminNotes')).sort((a, b) => a.path.localeCompare(b.path)),
+    ['/k/v1/app/adminNotes', '/k/v1/preview/app/adminNotes'].map(path => ({ path, params: { app: '398' } })));
+  for (const [result, data, revision] of [[p, production, '10'], [t, preview, '12']]) {
+    assert.deepEqual(result.document.settings.adminNotes, { ...data.adminNotes, revision });
+    assert.equal(result.document.coverage.find(row => row.id === 'notes').status, 'included');
+    assert.equal(result.complete, true);
+  }
+  const result = Diff.compare(b), notes = result.categories.find(row => row.id === 'notes');
+  assert.equal(notes.status, 'ok'); assert.equal(notes.entries.length, 2);
+  assert.deepEqual(notes.entries.flatMap(entry => entry.rows).find(row => row.path[0] === 'content'), {
+    path: ['content'], before: production.adminNotes.content, after: preview.adminNotes.content
+  });
+  assert.ok(notes.entries.flatMap(entry => entry.rows).some(row => row.path[0] === 'includeInTemplateAndDuplicates' && row.before === false && row.after === true));
+  const html = View.render({ result, selectedCategory: 'notes' });
+  assert.match(html, /&lt;p&gt;運用だけの管理メモ&lt;\/p&gt;/);
+  assert.match(html, /&lt;p&gt;テストだけの管理メモ&lt;\/p&gt;/);
+  assert.doesNotMatch(JSON.stringify(T.KTDevBase.inputsOf(b)), /運用だけの管理メモ|テストだけの管理メモ/);
+  assert.equal(T.KTDevBase.currentOf(b).adminNotes, undefined, '反映対象へ追加しない');
+  const fingerprint = T.KTDevBase.fingerprint(b);
+  b.comparisonInputs.preview.adminNotes.content = '管理メモ本文だけの変更';
+  assert.equal(T.KTDevBase.fingerprint(b), fingerprint);
+});
+
+test('空の管理者用メモも取得済みとして比較・保存する', async () => {
+  const T = loadToolkit(), io = makeEnvGetter({ production: {}, preview: {} });
+  const b = await T.KTDevBase.loadForRelease({ appId: '398', ...io });
+  const notes = Diff.compare(b).categories.find(row => row.id === 'notes');
+  assert.equal(notes.status, 'ok'); assert.deepEqual(notes.entries, []);
+  for (const env of ['production', 'preview']) {
+    const result = Export.create(b, options(env));
+    assert.equal(result.document.settings.adminNotes.content, '');
+    assert.equal(result.document.settings.adminNotes.includeInTemplateAndDuplicates, false);
+    assert.equal(result.document.coverage.find(row => row.id === 'notes').status, 'included');
+  }
+});
+test('管理者用メモの権限・通信エラーを未取得にし、別環境の本文で補わない', async () => {
+  const T = loadToolkit();
+  for (const env of ['production', 'preview']) for (const status of [403, 503]) {
+    const production = { adminNotes: { content: '運用メモ', includeInTemplateAndDuplicates: false } };
+    const preview = { adminNotes: { content: 'テストメモ', includeInTemplateAndDuplicates: true } };
+    const io = makeEnvGetter({ production, preview, fail: { [env + ':app/adminNotes']: Object.assign(new Error('取得失敗'), { status }) } });
+    const b = await T.KTDevBase.loadForRelease({ appId: '398', ...io });
+    assert.equal(b.ok, true, 'メモの取得失敗だけで通常の作業を停止しない');
+    assert.equal(b.errors.find(row => row.what === 'adminNotes').core, false);
+    const result = Diff.compare(b), notes = result.categories.find(row => row.id === 'notes');
+    assert.equal(notes.status, 'unavailable'); assert.deepEqual(notes.entries, []);
+    assert.match(notes.warnings.join(), env === 'preview' ? /動作テスト環境/ : /運用環境/);
+    const html = View.render({ result, selectedCategory: 'notes' });
+    assert.match(html, /この範囲は比較できていません/);
+    assert.doesNotMatch(html, /class="ktcl-empty">変更はありません/);
+    const failed = Export.create(b, options(env)), other = Export.create(b, options(env === 'preview' ? 'production' : 'preview'));
+    assert.equal(failed.document.settings.adminNotes, undefined);
+    assert.equal(failed.document.coverage.find(row => row.id === 'notes').status, 'unavailable');
+    assert.equal(other.document.coverage.find(row => row.id === 'notes').status, 'included');
+    assert.equal(other.document.settings.adminNotes.content, env === 'preview' ? '運用メモ' : 'テストメモ');
+  }
+});
+test('管理者用メモだけ設定の版が違う場合も比較・保存へ混ぜない', async () => {
+  const T = loadToolkit(), io = makeEnvGetter({ production: {}, preview: {} });
+  const b = await T.KTDevBase.loadForRelease({ appId: '398', ...io, getImpl: async (path, params) => {
+    const result = await io.getImpl(path, params);
+    return path === '/k/v1/preview/app/adminNotes' ? { ...result, revision: '13' } : result;
+  } });
+  assert.equal(Diff.compare(b).status, 'stale');
+  assert.throws(() => Export.create(b, options('preview')), { code: 'SETTINGS_EXPORT_STALE' });
+  assert.equal(Export.create(b, options('production')).document.settings.adminNotes.revision, '10');
 });

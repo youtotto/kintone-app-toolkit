@@ -106,6 +106,7 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
    if(extra)await docs().locator('[data-document-extra]').fill(extra);
    assert.match(await docs().locator('[data-document-status]').innerText(),/入力は送信せず、そのまま残します/);
    await create().click();await docsCount(index+1);
+   await docs().waitFor({state:'detached'});
    assert.equal(await docs().count(),0,'開始したダイアログは閉じる');
    const request=calls.filter(c=>c.name==='propose').at(-1).ctx;
    assert.equal(request.requestPurpose,'document');
@@ -152,6 +153,7 @@ test('資料の5種類を同じ相談へ送り、採用内容と下書きを保�
   const beforeFailure=countPaid();failNext=true;
   await action('documents').click();await create().click();
   await page.waitForFunction(()=>work.controller.getState().phase!=='consulting'&&!!work.controller.getState().error);
+  await docs().waitFor({state:'detached'});
   assert.equal(await docs().count(),0,'送信開始後の失敗は相談側で表示する');
   assert.equal(countPaid(),beforeFailure+1,'失敗時も自動再送しない');
   await page.locator('.ktr-header-notice > summary').click();

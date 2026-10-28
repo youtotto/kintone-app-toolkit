@@ -8,9 +8,9 @@ const {KTReleaseContext:C}=require('../src/release-context.js');
 const {KTReleaseEnvironmentDiff:D}=require('../src/release-environment-diff.js');
 const {KTReleaseEnvironmentView:V}=require('../src/release-environment-view.js');
 const response=()=>({reply:'未反映の変更をまとめました。',intent:'question',proposalUnchanged:true,turn:{ops:[],answers:[],requirementOps:[]},explanation:{title:'未反映の変更',sections:[{heading:'変更内容',paragraphs:['比較できた範囲の内容です。'],items:[],evidenceIds:['E1']}],unknowns:[]}});
-async function setup(){
+async function setup(fail={}){
  const prod={fields:{memo:{code:'memo',label:'備考',type:'MULTI_LINE_TEXT'}},settings:{name:'test',description:''}},preview=F.clone(prod);preview.fields.memo.required=true;
- const T=loadToolkit(),b=await T.KTDevBase.loadForRelease({appId:'398',...makeEnvGetter({production:prod,preview})});b.stamp=T.KTDevBase.stamp(b);b.current=T.KTDevBase.currentOf(b);
+ const T=loadToolkit(),b=await T.KTDevBase.loadForRelease({appId:'398',...makeEnvGetter({production:prod,preview,fail})});b.stamp=T.KTDevBase.stamp(b);b.current=T.KTDevBase.currentOf(b);
  let current=b,ctx=null,requests=0;
  const f=F.fixture(W,{loadBase:()=>F.clone(current),propose:args=>{if(args.requestPurpose!=='document')return F.proposal();ctx=C.proposal(args);requests++;return response();}});
  return{...f,b,input:()=>ctx,requests:()=>requests,setBase:value=>{current=value;}};
@@ -28,7 +28,7 @@ test('一覧を表示した後に設定が変わるとAIを呼ばず、古い採
  assert.equal(await f.controller.send('説明',{requestPurpose:'document',consultationTarget:null,environmentComparison:{key}}),false);assert.equal(f.requests(),0);const s=f.controller.getState();assert.equal(s.error.code,'BASE_CHANGED');assert.equal(s.prepared,null);assert.deepEqual(s.adopted,before);assert.equal(f.count('apply'),0);
 });
 test('比較の未取得範囲と未登録編集のメタデータを分け、本文・キーを送らない',async()=>{
- const f=await setup(),result=D.compare(f.b),localEdits={available:true,files:[{name:'draft.js',target:'mobile',kind:'js',environment:'preview',state:'edited',text:'PRIVATE',fileKey:'SECRET'}]};
+ const f=await setup({'preview:app/adminNotes':Object.assign(new Error('fixture denied'),{status:403})}),result=D.compare(f.b),localEdits={available:true,files:[{name:'draft.js',target:'mobile',kind:'js',environment:'preview',state:'edited',text:'PRIVATE',fileKey:'SECRET'}]};
  const ctx=C.proposal({text:'説明',requestPurpose:'document',base:f.b,environmentComparison:{key:V.keyOf(result),localEdits}});
  assert.equal(ctx.coverage.dependencies,false);assert.ok(ctx.facts.find(x=>x.kind==='env-diff-coverage').value.categories.some(x=>x.status==='unavailable'));assert.doesNotMatch(JSON.stringify(ctx),/PRIVATE|SECRET/);assert.deepEqual(ctx.facts.at(-1).value.files,[{name:'draft.js',kind:'js',target:'mobile',environment:'preview',state:'edited'}]);
  const later=F.clone(f.b);later.loadedAt='2099-01-01T00:00:00Z';assert.equal(V.keyOf(D.compare(later)),V.keyOf(result),'時刻だけ取り直して同じ内容なら説明できる');

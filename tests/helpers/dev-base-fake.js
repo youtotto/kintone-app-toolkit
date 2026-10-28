@@ -21,6 +21,7 @@ const MAP = {
   'field/acl': (d) => clone(d.fieldAcl || { rights: [] }),
   'app/reports': (d) => clone(d.reports || { reports: {} }),
   'app/plugins': (d) => clone(d.appPlugins || { plugins: [] }),
+  'app/adminNotes': (d) => clone(d.adminNotes || { content: '', includeInTemplateAndDuplicates: false }),
 };
 
 function makeEnvGetter({ preview, production, files = {}, revisions = { preview: '12', production: '10' }, fail = {} } = {}) {
