@@ -11,7 +11,7 @@ const KTReleaseSmalltalk=(()=>{
   async function submit(){
    if(disposed||state.pending||!state.open||!canSend())return false;
    const text=state.draft.trim();
-   if(!text||[...text].length>500){state.error='雑談は500文字以内で入力してください。';emit();return false;}
+   if(!text||[...text].length>100){state.error='雑談は100文字以内で入力してください。';emit();return false;}
    state.pending=true;state.error='';abort=new AbortController();const signal=abort.signal;emit();
    let started=false;
    try{

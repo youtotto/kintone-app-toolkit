@@ -16135,7 +16135,7 @@
     async function submit(){
      if(disposed||state.pending||!state.open||!canSend())return false;
      const text=state.draft.trim();
-     if(!text||[...text].length>500){state.error='雑談は500文字以内で入力してください。';emit();return false;}
+     if(!text||[...text].length>100){state.error='雑談は100文字以内で入力してください。';emit();return false;}
      state.pending=true;state.error='';abort=new AbortController();const signal=abort.signal;emit();
      let started=false;
      try{
@@ -16492,7 +16492,7 @@
         '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
         (s.error?'<p class="ktr-error" role="alert">'+esc(s.error)+'</p>':'')+(exhausted?'<p class="ktr-note">'+esc(resets)+'</p>':'')+
         (conn.canSmalltalk!==true?'<p class="ktr-note">雑談には対応したAIサービスと有効なToolkit契約での接続が必要です。</p>':'')+
-        '<div class="ktr-composer"><label for="kt-smalltalk-input">雑談（500文字以内）</label><textarea id="kt-smalltalk-input" '+(s.pending?'disabled':'')+' placeholder="ちょっとひと息、話してみましょう">'+esc(s.draft)+'</textarea><div class="ktr-compose-actions"><span>500文字以内・クレジット消費なし</span>'+button(s.pending?'smalltalk-cancel':'smalltalk-send',s.pending?'中断する':'送信',{primary:!s.pending,disabled:!s.pending&&disabled})+'</div></div>';
+        '<div class="ktr-composer"><label for="kt-smalltalk-input">雑談（100文字以内）</label><textarea id="kt-smalltalk-input" '+(s.pending?'disabled':'')+' placeholder="ちょっとひと息、話してみましょう">'+esc(s.draft)+'</textarea><div class="ktr-compose-actions"><span>100文字以内・クレジット消費なし</span>'+button(s.pending?'smalltalk-cancel':'smalltalk-send',s.pending?'中断する':'送信',{primary:!s.pending,disabled:!s.pending&&disabled})+'</div></div>';
     }
     function render(state, options = {}) {
       const smalltalk = options.smalltalk?.getState();

@@ -22,7 +22,7 @@ test('保留中の二重送信・復元・開閉を止め、失敗しても入�
 test('無料非対応・作業中・長文では呼ばない',async()=>{
  let n=0;const s=make({available:()=>false,send:async()=>n++});s.toggle();s.setDraft('こんにちは');await s.submit();assert.equal(n,0);assert.equal(s.getState().draft,'こんにちは');
  const busy=make({canSend:()=>false,send:async()=>n++});assert.equal(busy.toggle(),false);assert.equal(await busy.submit(),false);
- const long=make({send:async()=>n++});long.toggle();long.setDraft('あ'.repeat(501));await long.submit();assert.equal(n,0);assert.equal(long.getState().draft.length,501);
+ const long=make({send:async()=>n++});long.toggle();long.setDraft('あ'.repeat(101));await long.submit();assert.equal(n,0);assert.equal(long.getState().draft.length,101);
 });
 test('失敗から自動再試行せず、生成物を受け渡さない',async()=>{
  let calls=0;const s=make({send:async()=>{calls++;throw Error('通信できません');}});s.toggle();s.setDraft('入力');await s.submit();assert.equal(calls,1);assert.equal(s.getState().draft,'入力');assert.equal(s.handoff('r1'),null);
@@ -43,3 +43,11 @@ test('本物の認証クライアントから雑談だけを送り、通信失�
  assert.deepEqual(JSON.parse(requests[0].body),{version:1,requestId:'free-1',text:'こんにちは',history:[]});
  fail=true;await assert.rejects(session.client.smalltalk({text:'続き',requestId:'free-2'}));assert.equal(requests.length,2);
 });
+
+ test('100文字は送信し101文字は拒否、旧500文字の履歴は保持する',async()=>{
+  let calls=[];const s=make({send:async x=>{calls.push(x);return {ok:true,version:1,reply:'返信',handoff:false};}});
+  const old={id:'old',user:'あ'.repeat(500),reply:'以前の返信',handoff:false};
+  assert.equal(s.restore({version:1,open:true,draft:'',turns:[old]}),true);
+  s.setDraft('😀'.repeat(101));assert.equal(await s.submit(),false);assert.equal(calls.length,0);assert.match(s.getState().error,/100文字/);
+  s.setDraft('😀'.repeat(100));assert.equal(await s.submit(),true);assert.equal(calls.length,1);assert.equal(calls[0].text,'😀'.repeat(100));assert.equal(calls[0].history[0].user,old.user);
+ });
