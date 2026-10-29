@@ -20,12 +20,12 @@ const KTReleaseEnvironmentView = (() => {
     const edits = localEdits(request.localEdits?.available ? request.localEdits.files : null), facts = [];
     const add = (kind, statement, value) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value });
     add('env-diff-coverage', '比較の対象・時点と未確認の範囲', { ...result.source, status: result.status,
-      categories: result.categories.map(c => ({ id: c.id, label: c.label, status: c.status, warnings: c.warnings })), limitations: result.limitations });
-    for (const entry of result.entries) add('env-diff', (result.categories.find(c => c.id === entry.categoryId)?.label || '') + '：' + entry.label, entry);
+      categories: result.categories.map(c => ({ id: c.id, label: c.label, status: c.id === 'notes' ? 'excluded' : c.status, warnings: c.id === 'notes' ? ['アプリ管理者用メモはAIに送信しません。'] : c.warnings })), limitations: [...result.limitations, 'アプリ管理者用メモはAIへの送信対象外です。メモの内容や変更の有無は説明していません。'] });
+    for (const entry of result.entries.filter(e => e.categoryId !== 'notes')) add('env-diff', (result.categories.find(c => c.id === entry.categoryId)?.label || '') + '：' + entry.label, entry);
     for (const code of result.codeChanges || []) add('env-diff', 'JavaScriptの登録内容・本文の違い', { categoryId: 'customize', ...code });
     add('local-unregistered-edit', '環境の比較には含めない手元の編集', edits);
     if (facts.length > 500) throw Object.assign(new Error('比較結果が一度に送れる量を超えています。一覧は確認できますが、AIには送信していません。'), { code: 'CONTEXT_TOO_LARGE' });
-    return { facts, coverage: { fields: result.categories.find(c => c.id === 'fields')?.status === 'ok', dependencies: false, javascript: result.categories.find(c => c.id === 'customize')?.status === 'ok', incoming: false, plugins: false, environmentComparison: { status: result.status, source: result.source, unavailable: result.unavailable }, localUnregisteredEdits: edits.available, recordData: false, runtime: false } };
+    return { facts, coverage: { adminNotes: false, fields: result.categories.find(c => c.id === 'fields')?.status === 'ok', dependencies: false, javascript: result.categories.find(c => c.id === 'customize')?.status === 'ok', incoming: false, plugins: false, environmentComparison: { status: result.status, source: result.source, unavailable: result.unavailable.filter(c => c.categoryId !== 'notes') }, localUnregisteredEdits: edits.available, recordData: false, runtime: false } };
   }
   return { context, keyOf, canExplain, localEdits };
 })();

@@ -28,7 +28,7 @@ test('一覧を表示した後に設定が変わるとAIを呼ばず、古い採
  assert.equal(await f.controller.send('説明',{requestPurpose:'document',consultationTarget:null,environmentComparison:{key}}),false);assert.equal(f.requests(),0);const s=f.controller.getState();assert.equal(s.error.code,'BASE_CHANGED');assert.equal(s.prepared,null);assert.deepEqual(s.adopted,before);assert.equal(f.count('apply'),0);
 });
 test('比較の未取得範囲と未登録編集のメタデータを分け、本文・キーを送らない',async()=>{
- const f=await setup({'preview:app/adminNotes':Object.assign(new Error('fixture denied'),{status:403})}),result=D.compare(f.b),localEdits={available:true,files:[{name:'draft.js',target:'mobile',kind:'js',environment:'preview',state:'edited',text:'PRIVATE',fileKey:'SECRET'}]};
+ const f=await setup({'preview:app/reports':Object.assign(new Error('fixture denied'),{status:403})}),result=D.compare(f.b),localEdits={available:true,files:[{name:'draft.js',target:'mobile',kind:'js',environment:'preview',state:'edited',text:'PRIVATE',fileKey:'SECRET'}]};
  const ctx=C.proposal({text:'説明',requestPurpose:'document',base:f.b,environmentComparison:{key:V.keyOf(result),localEdits}});
  assert.equal(ctx.coverage.dependencies,false);assert.ok(ctx.facts.find(x=>x.kind==='env-diff-coverage').value.categories.some(x=>x.status==='unavailable'));assert.doesNotMatch(JSON.stringify(ctx),/PRIVATE|SECRET/);assert.deepEqual(ctx.facts.at(-1).value.files,[{name:'draft.js',kind:'js',target:'mobile',environment:'preview',state:'edited'}]);
  const later=F.clone(f.b);later.loadedAt='2099-01-01T00:00:00Z';assert.equal(V.keyOf(D.compare(later)),V.keyOf(result),'時刻だけ取り直して同じ内容なら説明できる');

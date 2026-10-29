@@ -13824,12 +13824,12 @@
       const edits = localEdits(request.localEdits?.available ? request.localEdits.files : null), facts = [];
       const add = (kind, statement, value) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value });
       add('env-diff-coverage', '比較の対象・時点と未確認の範囲', { ...result.source, status: result.status,
-        categories: result.categories.map(c => ({ id: c.id, label: c.label, status: c.status, warnings: c.warnings })), limitations: result.limitations });
-      for (const entry of result.entries) add('env-diff', (result.categories.find(c => c.id === entry.categoryId)?.label || '') + '：' + entry.label, entry);
+        categories: result.categories.map(c => ({ id: c.id, label: c.label, status: c.id === 'notes' ? 'excluded' : c.status, warnings: c.id === 'notes' ? ['アプリ管理者用メモはAIに送信しません。'] : c.warnings })), limitations: [...result.limitations, 'アプリ管理者用メモはAIへの送信対象外です。メモの内容や変更の有無は説明していません。'] });
+      for (const entry of result.entries.filter(e => e.categoryId !== 'notes')) add('env-diff', (result.categories.find(c => c.id === entry.categoryId)?.label || '') + '：' + entry.label, entry);
       for (const code of result.codeChanges || []) add('env-diff', 'JavaScriptの登録内容・本文の違い', { categoryId: 'customize', ...code });
       add('local-unregistered-edit', '環境の比較には含めない手元の編集', edits);
       if (facts.length > 500) throw Object.assign(new Error('比較結果が一度に送れる量を超えています。一覧は確認できますが、AIには送信していません。'), { code: 'CONTEXT_TOO_LARGE' });
-      return { facts, coverage: { fields: result.categories.find(c => c.id === 'fields')?.status === 'ok', dependencies: false, javascript: result.categories.find(c => c.id === 'customize')?.status === 'ok', incoming: false, plugins: false, environmentComparison: { status: result.status, source: result.source, unavailable: result.unavailable }, localUnregisteredEdits: edits.available, recordData: false, runtime: false } };
+      return { facts, coverage: { adminNotes: false, fields: result.categories.find(c => c.id === 'fields')?.status === 'ok', dependencies: false, javascript: result.categories.find(c => c.id === 'customize')?.status === 'ok', incoming: false, plugins: false, environmentComparison: { status: result.status, source: result.source, unavailable: result.unavailable.filter(c => c.categoryId !== 'notes') }, localUnregisteredEdits: edits.available, recordData: false, runtime: false } };
     }
     return { context, keyOf, canExplain, localEdits };
   })();
@@ -15582,7 +15582,7 @@
           add(key, '参照先アプリの定義は、別途取得した運用環境の情報です。対象アプリの動作テスト環境と同じ時点・同じ環境の情報ではありません。', value,
             { confidence: Object.values(value).some(app => app?.error) ? 'NOT_ANALYZED' : 'CERTAIN',
               provenance: { environment: 'production', loadedAt: base.relatedLoadedAt ?? null } });
-        } else if (!['fields', 'appId', 'appName', 'name', 'plugins', 'relatedApps'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
+        } else if (!['fields', 'appId', 'appName', 'name', 'plugins', 'relatedApps', 'adminNotes'].includes(key) && value != null) add(key, (labels[key] || key) + 'の現在の設定', value);
       }
       for (const file of base.files || []) {
         const available = sameFileEnvironment(file, base) && file.sourceAvailable !== false && typeof file.text === 'string';
@@ -15596,7 +15596,7 @@
       if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
       return facts;
     }
-    const coverageOf = (base, dependencies) => ({ fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => sameFileEnvironment(f, base) && f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
+    const coverageOf = (base, dependencies) => ({ adminNotes: false, fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => sameFileEnvironment(f, base) && f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
     function dictionaryOf(base) {
       const fields = fieldsOf(base.data?.fields), data = base.data || {};
       return { fieldCodes: fields.map(f => f.code), fieldLabels: fields.map(f => f.label), fieldTypes: Object.fromEntries(fields.map(f => [f.code, f.type])),
