@@ -2,7 +2,7 @@
 'use strict';
 const KTReleaseSmalltalk=(()=>{
  const clone=x=>JSON.parse(JSON.stringify(x));
- const usageOf=x=>x&&['daily','monthly'].every(k=>x[k]&&['used','remaining','limit'].every(n=>Number.isSafeInteger(x[k][n])&&x[k][n]>=0)&&Number.isFinite(Date.parse(x[k].resetsAt)))?clone(x):null;
+ const usageOf=x=>x&&['monthly'].every(k=>x[k]&&['used','remaining','limit'].every(n=>Number.isSafeInteger(x[k][n])&&x[k][n]>=0)&&Number.isFinite(Date.parse(x[k].resetsAt)))?clone(x):null;
  const valid=s=>s&&Object.keys(s).every(k=>['version','open','draft','turns'].includes(k))&&s.version===1&&typeof s.open==='boolean'&&typeof s.draft==='string'&&s.draft.length<=10000&&Array.isArray(s.turns)&&s.turns.length<=10000&&s.turns.every(t=>t&&Object.keys(t).every(k=>['id','user','reply','handoff'].includes(k))&&typeof t.id==='string'&&typeof t.user==='string'&&[...t.user].length<=500&&(t.reply==null||typeof t.reply==='string'&&[...t.reply].length<=1200)&&typeof t.handoff==='boolean');
  function create({send,available,canSend,beforeSend=async()=>true,makeId=()=>globalThis.crypto.randomUUID()}){
   let state={version:1,open:false,draft:'',turns:[],pending:false,error:'',usage:null},abort=null,disposed=false;

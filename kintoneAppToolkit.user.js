@@ -16126,7 +16126,7 @@
   'use strict';
   const KTReleaseSmalltalk=(()=>{
    const clone=x=>JSON.parse(JSON.stringify(x));
-   const usageOf=x=>x&&['daily','monthly'].every(k=>x[k]&&['used','remaining','limit'].every(n=>Number.isSafeInteger(x[k][n])&&x[k][n]>=0)&&Number.isFinite(Date.parse(x[k].resetsAt)))?clone(x):null;
+   const usageOf=x=>x&&['monthly'].every(k=>x[k]&&['used','remaining','limit'].every(n=>Number.isSafeInteger(x[k][n])&&x[k][n]>=0)&&Number.isFinite(Date.parse(x[k].resetsAt)))?clone(x):null;
    const valid=s=>s&&Object.keys(s).every(k=>['version','open','draft','turns'].includes(k))&&s.version===1&&typeof s.open==='boolean'&&typeof s.draft==='string'&&s.draft.length<=10000&&Array.isArray(s.turns)&&s.turns.length<=10000&&s.turns.every(t=>t&&Object.keys(t).every(k=>['id','user','reply','handoff'].includes(k))&&typeof t.id==='string'&&typeof t.user==='string'&&[...t.user].length<=500&&(t.reply==null||typeof t.reply==='string'&&[...t.reply].length<=1200)&&typeof t.handoff==='boolean');
    function create({send,available,canSend,beforeSend=async()=>true,makeId=()=>globalThis.crypto.randomUUID()}){
     let state={version:1,open:false,draft:'',turns:[],pending:false,error:'',usage:null},abort=null,disposed=false;
@@ -16477,9 +16477,9 @@
     function smalltalkHtml(s, conn) {
       const disabled=s.pending||conn.canSmalltalk!==true;
       const quota=s.usage;
-      const count=quota ? '今日 '+quota.daily.used+'/'+quota.daily.limit+'回・今月 '+quota.monthly.used+'/'+quota.monthly.limit+'回' : '1契約で1日10回・月100回（日本時間）。送信開始後は中断しても1回に数えます。';
-      const exhausted=quota&&(quota.daily.remaining===0||quota.monthly.remaining===0);
-      const resets=exhausted ? new Date(quota.monthly.remaining===0?quota.monthly.resetsAt:quota.daily.resetsAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）から利用できます。' : '';
+      const count=quota ? '今月 '+quota.monthly.used+'/'+quota.monthly.limit+'回（契約全体で共有）' : 'スターター・スタンダード共通で1契約につき月300回。1日制限はありません。毎月1日（日本時間）に更新します。送信開始後は中断しても1回に数えます。';
+      const exhausted=quota&&quota.monthly.remaining===0;
+      const resets=exhausted ? new Date(quota.monthly.resetsAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）から利用できます。' : '';
       return '<h2 class="ktr-pane-title">雑談・クレジット消費なし</h2><p class="ktr-note">アプリの設定は送りません。入力した文章と直近3往復までの雑談をAIへ送ります。</p><details data-release-panel="smalltalk-quota"><summary>無料枠について</summary><p>'+esc(count)+'</p><p>'+esc(resets)+'</p></details>'+
         '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
         (s.error?'<p class="ktr-error" role="alert">'+esc(s.error)+'</p>':'')+(exhausted?'<p class="ktr-note">'+esc(resets)+'</p>':'')+
