@@ -85,8 +85,8 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
     const acceptedState = () => page.evaluate(() => { const s = work.controller.getState(); return { proposal: s.proposal, version: s.version, answers: s.answers, plan: s.plan, prepared: s.prepared, runs: s.runs, consultationTarget: s.consultationTarget }; });
 
     assert.equal(reads, 0, '独立タブを開くまでは比較用に取得しない');
-    await action('pending-changes').click(); await waitResult();
-    assert.equal(await pane().isVisible(), true, 'AI内の入口は独立したConfig Lensへ移動する');
+    await open();
+    assert.equal(await pane().isVisible(), true, '独立したConfig Lensタブから比較を開く');
     assert.equal(await page.locator('dialog').count(), 0, '比較をAI内のダイアログへ重ねない');
     assert.equal(calls.length, 0, '未接続で無料一覧を開いてもAIもhealthも呼ばない');
     assert.match(await pane().innerText(), /確認できた変更/);

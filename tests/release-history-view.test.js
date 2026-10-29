@@ -29,16 +29,20 @@ function mount(options = {}, methods = {}) {
 async function click(host, action, extra = {}) { await host.dispatch('click', { dataset: { releaseAction: action, ...extra }, disabled: false }); }
 async function type(host, text) { const input = host.querySelector('#kt-release-input'); input.value = text; await host.dispatch('input', input); }
 
-test('保存した会話は任意のヘッダー操作で、既存メニューの順序を保持する', async () => {
+test('保存した会話はチャット上部に置き、ヘッダーは接続とその他に絞る', async () => {
   assert.equal(button(clean(View.render(stateOf())), 'saved-history'), undefined);
   let opened = 0;
   const { host, view } = mount({ onHistory: () => ++opened, historyStatus: () => ({ state: 'saved', completed: true, pinned: true }) });
   const html = clean(host.innerHTML), header = html.match(/<header class="ktr-header">[\s\S]*?<\/header>/)[0];
-  assert.match(header, /data-release-action="saved-history"[^>]*>保存した会話/);
+  const chatTools = html.match(/<div class="ktr-conversation-tools">[\s\S]*?<\/div>/)[0];
+  assert.match(chatTools, /data-release-action="saved-history"[^>]*>保存した会話/);
   assert.match(header, /data-release-history-state="saved" role="status">保存済み・完了・保護中/);
-  assert.ok(header.indexOf('data-release-action="connect"') < header.indexOf('data-release-action="documents"'));
-  assert.ok(header.indexOf('data-release-action="documents"') < header.indexOf('data-release-action="pending-changes"'));
-  assert.ok(header.indexOf('data-release-action="pending-changes"') < header.indexOf('data-release-action="details"'));
+  assert.match(header, /data-release-action="connect"/);
+  assert.match(header, /<summary>その他<\/summary>[\s\S]*data-release-action="details"/);
+  assert.doesNotMatch(header, /data-release-action="(?:saved-history|documents|diagnose|code|pending-changes)"|class="ktr-phase"/);
+  assert.doesNotMatch(html, /data-release-action="pending-changes"/);
+  const composeTools = html.match(/<nav class="ktr-compose-tools"[\s\S]*?<\/nav>/)[0];
+  assert.match(composeTools, /data-release-action="diagnose"[\s\S]*data-release-action="documents"/);
   await click(host, 'saved-history'); assert.equal(opened, 1); view.dispose();
 });
 

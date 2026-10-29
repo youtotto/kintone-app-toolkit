@@ -191,6 +191,12 @@ test('実ホストの幅・高さ・文字拡大とダイアログを固定応�
         await action('connect').click(); await checkDialog(page, { label: scene.name + '/connection' });
         if (scene.zoom === 1.1) await page.screenshot({ path: path.join(out, scene.name + '-connection.png') });
         await page.locator('dialog [data-close]').click();
+        const more = page.locator('.ktr-more>summary');
+        await more.focus(); await more.press('Enter');
+        await fullyVisible(page, action('details'), scene.name + '/その他のアプリ情報');
+        await page.evaluate(() => work.view.render());
+        assert.equal(await page.locator('.ktr-more').getAttribute('open'), '', '再描画でその他を閉じない');
+        assert.equal(await more.evaluate(el => el === document.activeElement), true, 'その他のキーボード操作位置を保つ');
         await action('details').click(); await checkDialog(page, { wide: true, label: scene.name + '/details' });
         await page.locator('dialog [data-close]').click();
         await action('documents').click();

@@ -101,11 +101,11 @@ async function dragBy(page,handle,dx,dy){
 async function geometry(page){return page.evaluate(async()=>{
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   const rect=selector=>{const r=(document.querySelector(selector)?.getBoundingClientRect() || {left:0,top:0,right:0,bottom:0,width:0,height:0});return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
-  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host .ktr-conversation'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu'),home:rect('#kt-customize-workspace')};
+  return {viewport:innerWidth,documentWidth:document.documentElement.scrollWidth,shell:rect('#kt-toolkit'),ai:rect('#kt-ai-host .ktr-conversation'),chat:rect('#kt-ai-host .ktr-conversation'),code:rect('#kt-customize-code-pane'),codeSlot:rect('.ktr-code-slot'),detailPane:rect('.ktr-detail-pane'),proposal:rect('#kt-ai-host .ktr-current'),editor:rect('#kt-customize-editor'),menu:rect('.kt-customize-menu'),home:rect('#kt-customize-workspace')};
 });}
 function assertHorizontal(g,label){
   assert.ok(g.code.left>=g.ai.right-2,label+': 左の相談と右のコードが重ならない');
-  assert.ok(Math.abs(g.ai.top-g.codeSlot.top)<=2,label+': 相談とコードを同じ高さに並べる');
+  assert.ok(Math.abs(g.ai.top-g.detailPane.top)<=2,label+': 相談と右ペインを同じ高さに並べる');
   assert.ok(g.ai.width>=320&&g.code.width>=380,label+': 相談とコードに読み書きできる幅を残す');
   assert.ok(g.ai.left>=g.shell.left-1&&g.code.right<=g.shell.right+1,label+': 枠内に収まる');
 }
@@ -349,6 +349,9 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('#tab-ai').click();
         const headerBefore=await page.locator('.ktr-header').boundingBox();
         const toolsBefore=await page.locator('.ktr-tools').boundingBox();
+        assert.equal(await page.locator('.ktr-header [data-release-action="code"]').count(),0,'コード操作を全体ヘッダーへ置かない');
+        assert.equal(await page.locator('.ktr-pane-tools [data-release-action="code"]').isVisible(),true,'右ペインに表示の切り替えを置く');
+        const paneToolsBefore=await page.locator('.ktr-pane-tools').boundingBox();
         const normal=await geometry(page);
         assert.ok(normal.proposal.left>=normal.chat.right-2,'AI Assistantは左相談・右通常案');
         assert.equal(await page.locator('#kt-customize-code-pane').isVisible(),false);
@@ -361,6 +364,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assertHorizontal(codeGeometry,'AI Assistantでコードを開く');
         const headerAfter=await page.locator('.ktr-header').boundingBox(),toolsAfter=await page.locator('.ktr-tools').boundingBox();
         assert.deepEqual(headerAfter,headerBefore,'コード開閉で共通ヘッダーの位置・幅を変えない');
+        assert.deepEqual(await page.locator('.ktr-pane-tools').boundingBox(),paneToolsBefore,'コード開閉でも右ペインの操作位置を動かさない');
+        assert.equal(await page.locator('.ktr-pane-tools [data-release-action="code"]').evaluate(el=>el===document.activeElement),true,'切り替え後もキーボードの操作位置を保持する');
         assert.equal(toolsAfter.y,toolsBefore.y,'メニューを左ペインへ移さない');
         assert.equal(toolsAfter.x+toolsAfter.width,toolsBefore.x+toolsBefore.width,'メニューの右端を固定する');
         assert.ok(codeGeometry.editor.height>=450,'コードが最初から十分な高さで見える');
@@ -453,7 +458,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('.ktr-code-attention [data-release-action="code"]').click();
         assert.equal(await page.locator('.ktr-current').isVisible(),true);
         assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/モバイルの備考の編集制御を確認できませんでした/,'案に戻って生成物の不合格理由を読める');
-        await page.locator('.ktr-tools [data-release-action="code"]').click();
+        await page.locator('.ktr-pane-tools [data-release-action="code"]').click();
         await page.evaluate(()=>{
           temporaryDisplay={...temporaryDisplay,phase:'blocked',artifacts:[],prepared:{ok:false,reasons:[{message:'動作テスト環境の設定が変更されています。'}]}};
           work.view.render();
@@ -463,7 +468,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await page.locator('.ktr-code-attention [data-release-action="code"]').click();
         assert.equal(await page.locator('.ktr-current').isVisible(),true);
         assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/動作テスト環境の設定が変更されています/,'案に戻って反映前の停止理由を読める');
-        await page.locator('.ktr-tools [data-release-action="code"]').click();
+        await page.locator('.ktr-pane-tools [data-release-action="code"]').click();
 
         await page.evaluate(()=>{work.controller.getState=normalGetState;work.view.render();});
         assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),stateBeforeCode,'表示用の状態を元に戻す');

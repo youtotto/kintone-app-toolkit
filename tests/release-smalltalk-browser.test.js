@@ -32,7 +32,7 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
  assert.equal(await action('smalltalk-close').getAttribute('aria-pressed'),'true');
  await page.locator('#kt-release-input').fill(F.REQUEST);await action('send').click();await page.waitForFunction(()=>work.controller.getState().phase==='proposal');
  const fixed=await page.evaluate(()=>JSON.stringify(work.controller.getState()));await page.locator('#kt-release-input').fill('通常相談の未送信文');
- await action('code').click();await switchChat();assert.equal(await page.locator('#local-code').inputValue(),'HAND_EDIT');assert.equal(calls.filter(c=>c.n==='smalltalk').length,0);assert.equal(await action('documents').isDisabled(),true);assert.equal(await action('adopt').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.requestDocument('資料を作って')),false);
+ await action('code').click();await switchChat();assert.equal(await page.locator('#local-code').inputValue(),'HAND_EDIT');assert.equal(calls.filter(c=>c.n==='smalltalk').length,0);assert.equal(await action('documents').count(),0);assert.equal(await action('adopt').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.requestDocument('資料を作って')),false);
  await page.locator('[data-release-panel="smalltalk-quota"] summary').click();assert.match(await page.locator('[data-release-panel="smalltalk-quota"]').innerText(),/月300回/);assert.match(await page.locator('[data-release-panel="smalltalk-quota"]').innerText(),/1日制限はありません/);
  assert.match(await page.getByRole('group',{name:'チャットの種類'}).innerText(),/クレジット消費なし・月300回まで（契約全体）/);
  const beforeSelection=calls.length;await action('smalltalk-open').click();assert.equal(await action('smalltalk-open').getAttribute('aria-pressed'),'true');assert.equal(calls.length,beforeSelection);

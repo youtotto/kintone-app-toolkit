@@ -204,9 +204,9 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         // Actual shell tab and the same independent Config Lens mount. These
         // reads use a fixed snapshot; opening/filtering the free tab calls no AI.
         assert.equal(await page.evaluate(() => lensReads), 0, 'Config Lens初期化だけでは設定を取得しない');
-        await page.locator('[data-release-action="pending-changes"]').click();
+        await page.locator('#tab-config-lens').click();
         await page.waitForFunction(() => !document.querySelector('#view-config-lens [data-cl-action="refresh"]')?.disabled && !!document.querySelector('#view-config-lens [data-cl-category="fields"]'));
-        assert.equal(await page.locator('#view-config-lens').isVisible(), true, 'AI内入口から共通shellの独立タブへ移動する');
+        assert.equal(await page.locator('#view-config-lens').isVisible(), true, '共通shellのConfig Lensタブへ移動する');
         assert.equal(await page.locator('#view-ai').isVisible(), false);
         assert.match(await page.locator('#tab-config-lens').getAttribute('class'), /active/);
         assert.equal(await page.locator('#kt-toolkit .tabs .active').count(), 1);

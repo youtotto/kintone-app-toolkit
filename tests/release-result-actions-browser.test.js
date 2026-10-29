@@ -55,7 +55,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     await page.waitForFunction(() => controller.getState().phase === 'checking-result' && typeof finishRead === 'function');
     assert.equal(await page.locator('#kt-release-input').isDisabled(), true);
     assert.match(await page.locator('.ktr-current h2').first().innerText(), /反映結果を確認しています/);
-    assert.doesNotMatch(await page.locator('.ktr-phase').innerText(), /復元/);
+    assert.doesNotMatch(await page.locator('.ktr-stage-header').innerText(), /復元/);
     await page.evaluate(() => finishRead());
     await page.waitForFunction(() => controller.getState().phase === 'result');
     assert.equal(await page.locator('#kt-release-input').inputValue(), '未送信の次の相談');
@@ -72,7 +72,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     await page.locator('[data-release-panel="runs"] > summary').click();
     await page.locator('[data-release-action="history"]').click();
     await page.locator('[data-release-action="recheck-rollback"]').click();
-    assert.equal(await page.locator('.ktr-phase').innerText(), '過去の反映記録');
+    assert.match(await page.locator('.ktr-stage-header').innerText(), /過去の反映記録/);
     assert.equal(await page.evaluate(() => controller.getState().phase), 'proposal');
     assert.deepEqual(await page.evaluate(() => controller.getState().proposal), currentTask.proposal);
     assert.deepEqual(await page.evaluate(() => calls), { ...beforeHistory, rollbackRead: beforeHistory.rollbackRead + 1 });
