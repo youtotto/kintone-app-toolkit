@@ -12,7 +12,7 @@ const KTReleaseHistorySession = (() => {
   }
   function hasContent(payload) {
     const s = payload?.session?.state || {};
-    return !!(payload?.draft || editedFiles(payload).length || s.messages?.length || s.explanations?.length || s.runs?.length || s.proposal || s.plan);
+    return !!(payload?.smalltalk?.draft || payload?.smalltalk?.turns?.length || payload?.draft || editedFiles(payload).length || s.messages?.length || s.explanations?.length || s.runs?.length || s.proposal || s.plan);
   }
   function create({ store, capture, restore, verifyAccess, canSwitch = () => true, onStatus = () => {}, now = () => Date.now(), makeId = () => globalThis.crypto.randomUUID(), debounceMs = 450 } = {}) {
     let current = null, lastSignature = '', lastSnapshot = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;

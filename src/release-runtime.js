@@ -7,6 +7,7 @@ function mountReleaseWorkspace(host, d) {
   const budget = d.budget || KTAiBudget.create();
   let capability = { available: false, features: {} }, healthAt = 0, healthPromise = null, latestBase = null, view = null;
   let baseQueue = Promise.resolve();
+  let smalltalkCapability = null;
   let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false, creditContractInvalid = false, bundledCreditsRequired = false;
   const creditOutdated = () => creditContractInvalid || capability.usage?.version === 3;
   const creditUpdateMessage = 'AIサービスのクレジット方式がこのToolkitと一致しません。サービスを更新してから［接続を更新］してください。';
@@ -82,6 +83,7 @@ function mountReleaseWorkspace(host, d) {
     const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
     const available = !creditOutdated() && supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
     return { connected: status.connected, available, usage: capability.usage || null, canConsult: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'consultation'), canDocument: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'document'), canCreate: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'creation'), canResume: !creditOutdated() && (capability.usage?.version === 4 ? usageTools.finalBundleAvailable(controller.getState().plan) : !usageTools.usageBlocked(capability.usage, 'creation')), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
+      canSmalltalk: session.status().connected && smalltalkCapability?.version === 1 && smalltalkCapability.available === true,
       canDiagnose: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('appDiagnosis') === true,
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
       message: connectionError || (creditOutdated() ? creditUpdateMessage : '') || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
@@ -97,12 +99,14 @@ function mountReleaseWorkspace(host, d) {
         const probe = savedProbe ? await savedProbe() : null;
         // Boot's probe returns its own packet; a direct health refresh remains the same auth path.
         const health = probe?.health || (probe?.ok === true ? probe : await session.client.getHealth());
+        smalltalkCapability = health.smalltalk || null;
         const next = KTAiClient.capabilityFromHealth(health);
         // A health request started earlier must not replace newer counts or contract checks.
         capability = { ...next, usage: usageBeforeHealth === usageRevision ? usageForContract(next.usage) : capability.usage };
         scheduleUsageReset();
         healthAt = Date.now(); connectionError = '';
       } catch (e) {
+        smalltalkCapability = null;
         capability = { available: false, reason: e.code, features: {} };
         connectionError = KTAiClient.errorText(e.code) || '接続を確認できませんでした。作成した内容はこの画面に残っています。';
       } finally { healthPromise = null; view?.render(); updateConnections(); }
@@ -423,15 +427,16 @@ function mountReleaseWorkspace(host, d) {
       historyInitError = '';
       const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
       history = KTReleaseHistorySession.create({ store,
-        capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', editor: editingSnapshot() }),
+        capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }),
         restore: async (payload, { shouldContinue: continueOpening = () => true } = {}) => {
-          if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor)) return false;
+          if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor) || (payload.smalltalk != null && !KTReleaseSmalltalk.valid(payload.smalltalk))) return false;
           if (codePanel?.canRestoreDrafts?.() === false) return false;
           const draftBefore = view.getDraft(), editorBefore = editorContent();
           const shouldContinue = () => continueOpening() && sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === editorContent() && codePanel?.canRestoreDrafts?.() !== false;
           if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
           pendingEditor = payload.editor || { version: 1, files: [], active: null };
           if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;
+          if(payload.smalltalk)smalltalk.restore(payload.smalltalk);else smalltalk.reset();
           view.setDraft(payload.draft); view.resetDisplay?.(); setCodeOpen(false); return true;
         },
         verifyAccess: async refresh => {
@@ -480,7 +485,7 @@ function mountReleaseWorkspace(host, d) {
       if (!Object.keys(data).some(key => key.startsWith('history'))) return;
       busy = true; el.querySelector('[data-close]').disabled = true;
       try {
-        if (button.hasAttribute('data-history-export')) { const payload = history?.exportCurrent() || { version: 1, session: controller.exportSession(), draft: view.getDraft(), editor: editingSnapshot() }; d.downloadText('toolkit-conversation-' + d.appId + '.json', JSON.stringify(payload, null, 2), 'application/json'); return; }
+        if (button.hasAttribute('data-history-export')) { const payload = history?.exportCurrent() || { version: 1, session: controller.exportSession(), draft: view.getDraft(), smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }; d.downloadText('toolkit-conversation-' + d.appId + '.json', JSON.stringify(payload, null, 2), 'application/json'); return; }
         if (button.hasAttribute('data-history-new')) { if (await view.newTask()) el.close(); return; }
         if (!history) return;
         if (data.historyOpen) { if (await history.open(data.historyOpen)) { el.close(); return; } throw new Error(history.getStatus().message); }
@@ -501,8 +506,14 @@ function mountReleaseWorkspace(host, d) {
     try { await renderList(); if (saveError) note(saveError); } catch (error) { note(error.message); }
   }
 
-  view = KTReleaseView.create(host, { controller, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: d.openConfigLens,
-    onHistory: historyDialog, historyStatus: () => history?.getStatus() || (historyInitError ? { state: 'unavailable', message: historyInitError } : null), onNewTask: () => history ? history.beforeNewTask() : true,
+  const smalltalk = KTReleaseSmalltalk.create({
+    send: input => session.client.smalltalk(input), available: () => connection().canSmalltalk,
+    canSend: () => !['consulting','building','preparing','applying','rolling-back','checking-result'].includes(controller.getState().phase),
+    beforeSend: async () => { await refreshCapability(); return true; }
+  });
+  smalltalk.subscribe(redraw => { if(redraw)view?.render(); history?.changed(); });
+  view = KTReleaseView.create(host, { controller, smalltalk, connection, beforeSend: consent, onConnect: connectionDialog, onRefreshConnection: () => refreshCapability(true), onDocuments: documents, onDetails: details, onPendingChanges: d.openConfigLens,
+    onHistory: historyDialog, historyStatus: () => history?.getStatus() || (historyInitError ? { state: 'unavailable', message: historyInitError } : null), onNewTask: async () => { const ok = history ? await history.beforeNewTask() : true; if(ok !== false)smalltalk.reset(); return ok; },
     codePanelElement: () => codeOpen ? codeSlot : null,
     codePanelState: () => ({ available: !!codePanel, open: codeOpen, id: codeSlot?.id || '' }), onToggleCode: () => setCodeOpen(!codeOpen),
     onCopy: d.copyText, onDownload: (name, text, type = 'text/javascript') => d.downloadText(name, text, type),
@@ -518,7 +529,7 @@ function mountReleaseWorkspace(host, d) {
     if (history?.isDirty() || ['consulting','building','preparing','applying','rolling-back'].includes(state.phase) || (!history && (state.messages.length || state.runs.length))) { event.preventDefault(); event.returnValue = ''; }
   };
   window.addEventListener('beforeunload', warnBeforeLeave);
-  return { controller, view, history: () => history, capability: () => capability, refreshCapability,
+  return { controller, view, smalltalk, history: () => history, capability: () => capability, refreshCapability,
     onVisible() { initializeHistory(); if (d.canAutoFetch?.() !== false) history?.initialize(); view.onVisible(); if (codeOpen) codePanel?.onVisible?.(); if (d.canAutoFetch?.() !== false && session.status().connected) refreshCapability(); },
     invalidateDevBase() { latestBase = null; }, refreshTargets() { view.render(); },
     attachCodePanel, setCodeOpen, isCodeOpen: () => codeOpen,
@@ -542,7 +553,7 @@ function mountReleaseWorkspace(host, d) {
         : '「' + (target.type === 'event' ? target.id : target.name) + '」（' + (target.type === 'event' ? 'イベント' : 'フィールド') + '）を変更するときの影響を調べたいです。変更範囲・修正順序・未確認事項・修正後の確認項目を整理してください。');
       return { ok: true };
     },
-    dispose() {
+    dispose() { smalltalk.dispose();
       clearTimeout(usageResetTimer);
       stateUnsubscribe?.(); draftUnsubscribe?.(); editorUnsubscribe?.(); history?.dispose();
       document.removeEventListener('visibilitychange', onHistoryVisibility);
