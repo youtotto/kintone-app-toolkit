@@ -82,6 +82,7 @@ function mountReleaseWorkspace(host, d) {
     const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
     const available = !creditOutdated() && supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
     return { connected: status.connected, available, usage: capability.usage || null, canConsult: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'consultation'), canDocument: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'document'), canCreate: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'creation'), canResume: !creditOutdated() && (capability.usage?.version === 4 ? usageTools.finalBundleAvailable(controller.getState().plan) : !usageTools.usageBlocked(capability.usage, 'creation')), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
+      canDiagnose: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('appDiagnosis') === true,
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
       message: connectionError || (creditOutdated() ? creditUpdateMessage : '') || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
   };
@@ -130,11 +131,12 @@ function mountReleaseWorkspace(host, d) {
     baseQueue = next; return next;
   }
   const client = budget.wrap(session.client, { limits: () => capability.limits });
-  const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge };
+  const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge, findBrokenRefs: KTDeps.findBrokenRefs, calcChainStats: KTDeps.calcChainStats };
   const services = {
     async propose(input) {
       await requireFeature(KTAiClient.FEATURE);
       await requireFeature(KTAiClient.FEATURE_PLANNER);
+      if (input.diagnosis && !connection().canDiagnose) throw new Error('アプリの診断にはAIサービスの更新が必要です。');
       const ctx = KTReleaseContext.proposal(input, dependencyTools);
       const r = await requestWithUsage(input.requestPurpose === 'document' ? 'document' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
       return { ...r, facts: ctx.facts };

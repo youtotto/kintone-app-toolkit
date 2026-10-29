@@ -84,10 +84,10 @@ const KTReleaseView = (() => {
     return `<details data-release-panel="explanation-facts-${esc(document.id)}-${index}"><summary>この説明の根拠</summary><p class="ktr-note">説明作成時の設定です。現在の設定とは異なる場合があります。</p><ul>${facts.map((fact, at) => `<li><strong>${esc(fact.id)}</strong> ${esc(textOf(fact) || fact.statement || fact.summary || '')}${fact.value != null ? `<details data-release-panel="explanation-value-${esc(document.id)}-${index}-${at}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof fact.value === 'string' ? fact.value : JSON.stringify(fact.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul></details>`;
   }
   function explanationHtml(document) {
-    return `<article class="ktr-section ktr-explanation" data-release-explanation="${esc(document.id)}"><h2>${esc(document.title || 'アプリの説明')}</h2><div class="ktr-actions">${button('copy-explanation', '本文をコピー', { id: document.id })}${button('download-explanation', 'Markdownで保存', { id: document.id })}</div>${(document.sections || []).map((section, index) => {
+    return `<article class="ktr-section ktr-explanation" data-release-explanation="${esc(document.id)}"><h2>${esc(document.title || 'アプリの説明')}</h2><div class="ktr-actions">${button('copy-explanation', '本文をコピー', { id: document.id })}${button('download-explanation', 'Markdownで保存', { id: document.id })}</div>${document.diagnosisSource ? `<p class="ktr-note">動作テスト環境・アプリ ${esc(document.diagnosisSource.appId)}・設定の版 ${esc(document.diagnosisSource.revision ?? "不明")}（${esc(document.diagnosisSource.loadedAt ?? "取得時刻不明")}）の診断です。手元の未登録編集や実際の画面の動作は含みません。選んだ項目は相談欄に入り、送信するまでAIを呼びません。</p>` : ""}${(document.sections || []).map((section, index) => {
       const table = section.table;
       const tableHtml = table?.columns?.length ? `<div class="ktr-table-scroll" tabindex="0" role="region" aria-label="${esc(section.heading || '説明の表')}"><table><thead><tr>${table.columns.map(column => `<th scope="col">${esc(column)}</th>`).join('')}</tr></thead><tbody>${(table.rows || []).map(row => `<tr>${table.columns.map((_, at) => `<td>${esc(row[at])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
-      return `<section class="ktr-explanation-section">${section.heading ? `<h3>${esc(section.heading)}</h3>` : ''}${(section.paragraphs || []).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}${list(section.items || [])}${tableHtml}${explanationEvidence(document, section, index)}</section>`;
+      return `<section class="ktr-explanation-section">${section.heading ? `<h3>${esc(section.heading)}</h3>` : ''}${(section.paragraphs || []).map(paragraph => `<p>${esc(paragraph)}</p>`).join('')}${list(section.items || [])}${tableHtml}${explanationEvidence(document, section, index)}${document.diagnosisSource && section.evidenceIds?.length ? button("consult-diagnosis", "改善を相談する", { id: document.id, extra: ` data-release-section="${index}"` }) : ""}</section>`;
     }).join('')}${document.unknowns?.length ? `<section class="ktr-explanation-unknowns"><h3>確認できていないこと</h3>${list(document.unknowns)}</section>` : ''}</article>`;
   }
   // Export structured display content as Markdown; do not ask AI to rewrite it.
@@ -95,6 +95,7 @@ const KTReleaseView = (() => {
   function explanationMarkdown(document) {
     if (!document) return '';
     const lines = ['# ' + markdownText(document.title || 'アプリの説明').replace(/\r?\n/g, ' '), ''];
+    if (document.diagnosisSource) lines.push('動作テスト環境・アプリ ' + markdownText(document.diagnosisSource.appId) + '・設定の版 ' + markdownText(document.diagnosisSource.revision ?? '不明') + '（' + markdownText(document.diagnosisSource.loadedAt ?? '取得時刻不明') + '）の診断。実際の動作と手元の未登録編集は未確認です。', '');
     for (const section of document.sections || []) {
       if (section.heading) lines.push('## ' + markdownText(section.heading).replace(/\r?\n/g, ' '), '');
       for (const paragraph of section.paragraphs || []) lines.push(markdownText(paragraph), '');
@@ -325,7 +326,7 @@ const KTReleaseView = (() => {
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
     const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
     const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
-    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</nav></div></header>
+    return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><span class="ktr-phase">${esc(historical ? '過去の反映記録' : stage === 'explanation' ? '説明' : creation?.label || currentPhaseText || '相談')}</span><nav class="ktr-tools" aria-label="補助操作">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}${button('connect', '接続')}${button('diagnose', 'アプリを診断', { disabled: busy.has(state.phase) || conn.connected === false || conn.available === false || conn.canConsult === false || conn.canDiagnose !== true || !!options.sending || !!historical, extra: ' title="' + (conn.canDiagnose !== true ? '診断には対応したAIサービスへの接続が必要です' : sharedCredits(conn.usage) ? '現在の設定をAIで確認します（1クレジット）' : '現在の設定をAIで確認します（相談1回）') + '"' })}${button('documents', '資料を作る')}${button('pending-changes', '未反映の変更を見る')}${button('details', 'アプリの情報を見る')}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</nav></div></header>
       <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><h2 class="ktr-pane-title">相談</h2>${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div>${composer(state, { ...options, historical: !!historical })}</section><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></div></div></div>`;
   }
   function create(host, options = {}) {
@@ -415,7 +416,8 @@ const KTReleaseView = (() => {
     }
     async function send(request, onStart, suggestionReference = null, requestOptions = null) {
       const fromDocument = typeof request === 'string' && !suggestionReference;
-      if (!canSend(fromDocument ? 'document' : controller.getState().requestPurpose)) return false;
+      const explicitPurpose = requestOptions?.diagnosis ? 'ideation' : 'document';
+      if (!canSend(fromDocument ? explicitPurpose : controller.getState().requestPurpose)) return false;
       const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
       const value = String(suggestionReference ? workspace.suggestionRequest(controller.getState()) : fromTemplate ? request : input?.value ?? draft).trim();
       if (!value) return false;
@@ -429,13 +431,13 @@ const KTReleaseView = (() => {
       try {
         if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
         const conn = connectionOf(options);
-        if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (fromTemplate || controller.getState().requestPurpose === 'document' ? documentBlocked(conn) : conn.canConsult === false)) return false;
+        if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || ((fromTemplate ? explicitPurpose : controller.getState().requestPurpose) === 'document' ? documentBlocked(conn) : conn.canConsult === false)) return false;
         if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
         if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
         if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; setDraft(''); }
         selectedRunId = null; notice = '';
         onStart?.();
-        const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: 'document' } : undefined);
+        const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: explicitPurpose } : undefined);
         if (sent === false) restoreInput();
         return sent !== false;
       } catch (error) { restoreInput(); throw error; } finally { sending = false; updateDraftGuard(); }
@@ -445,6 +447,23 @@ const KTReleaseView = (() => {
       const state = controller.getState();
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
       if (action === 'send') return send();
+      if (action === 'diagnose') {
+        if (connectionOf(options).canDiagnose !== true) return;
+        return send('このアプリの設定と登録済みJavaScriptを診断してください。確認が必要な点と、任意の改善案を分けてください。', null, null, { diagnosis: true, consultationTarget: null });
+      }
+      if (action === 'consult-diagnosis') {
+        if (!canSend('consultation') || String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) {
+          notice = '相談欄の入力は残しています。送信するか内容を整理してから、改善する項目を選んでください。'; draw(); return;
+        }
+        const document = state.explanations.find(e => e.id === id), index = Number(target.dataset?.releaseSection);
+        const section = Number.isInteger(index) && index >= 0 ? document?.sections?.[index] : null;
+        if (!document?.diagnosisSource || !section?.evidenceIds?.length) return;
+        const excerpt = explanationMarkdown({ title: section.heading, sections: [section], unknowns: document.unknowns, facts: document.facts });
+        controller.setConsultationTarget(null);
+        controller.setRequestPurpose('consultation');
+        setDraft('次の診断項目について改善を相談したいです。まだ変更は採用していません。現在の設定を確認し、変更範囲・順序・未確認事項・変更後の確認項目を整理してください。ほかの診断項目は取り込まないでください。\n\n' + '診断の取得元：動作テスト環境・アプリ ' + document.diagnosisSource.appId + '・設定の版 ' + (document.diagnosisSource.revision ?? '不明') + '。取得後の変更は未確認です。\n\n' + excerpt);
+        host.querySelector?.('#kt-release-input')?.focus?.(); return;
+      }
       if (action === 'adopt' && connectionOf(options).canCreate === false) return;
       if (action === 'resume' && resumeBlocked(connectionOf(options))) return;
       if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }

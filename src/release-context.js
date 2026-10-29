@@ -17,7 +17,7 @@ const KTReleaseContext = (() => {
     if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
     return ctx;
   }
-  function dependencyContext(base, tools, consultationTarget = null) {
+  function dependencyContext(base, tools, consultationTarget = null, diagnosis = false) {
     const provenance = { environment: base.env || null, appId: String(base.appId ?? ''), revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null };
     const missingSettings = (base.errors || []).filter(e => e.env === 'preview').map(e => ({ key: e.what, label: e.label, code: e.code ?? null }));
     const unavailableFiles = (base.files || []).filter(f => !sameFileEnvironment(f, base) || f.type !== 'FILE' || f.sourceAvailable === false || typeof f.text !== 'string')
@@ -66,6 +66,15 @@ const KTReleaseContext = (() => {
             }
             summary.event.status = summary.event.references ? 'references-found' : 'not-found';
           }
+        }
+        if (diagnosis) {
+          if (typeof tools.findBrokenRefs !== 'function' || typeof tools.calcChainStats !== 'function') throw new Error('HEALTH_UNAVAILABLE');
+          facts.push({ kind: 'app-health', confidence: 'CERTAIN', basis: 'setting', provenance: clone(provenance),
+            statement: 'Healthと同じ参照確認・計算式のつながりの集計です。検出候補の確かさを保ち、件数や深さだけで不具合や遅さを断定しないでください。',
+            value: { brokenReferences: clone(tools.findBrokenRefs(current.deps)), calculationChains: clone(tools.calcChainStats(current.deps)) } });
+          facts.push({ kind: 'js-events', confidence: 'LIKELY', basis: 'code', provenance: clone(provenance),
+            statement: '今回取得した登録済みJavaScriptをJS Scannerで調べたイベントの候補です。同じイベントの使用だけでは競合と判断できません。',
+            value: clone(current.scan.fileEvents || {}) });
         }
         summary.status = 'analyzed'; summary.analyzedAt = current.deps.meta?.scannerMergedAt || current.deps.meta?.generatedAt || null;
       } catch (_) {
@@ -129,14 +138,15 @@ const KTReleaseContext = (() => {
       reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
-  function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base, environmentComparison = null }, dependencyTools = null) {
+  function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base, environmentComparison = null, diagnosis = false }, dependencyTools = null) {
+    if (diagnosis && (requestPurpose !== 'ideation' || environmentComparison || consultationTarget || !base.ok || base.env !== 'preview')) throw new Error('診断する動作テスト環境を確認できません。');
     const comparison = environmentComparison ? (typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView).context(base, environmentComparison) : null;
-    const dependencies = comparison ? { facts: [] } : dependencyContext(base, dependencyTools, consultationTarget);
+    const dependencies = comparison ? { facts: [] } : dependencyContext(base, dependencyTools, consultationTarget, diagnosis);
     const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
       ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
       : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
     return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-      focus: comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+      focus: diagnosis ? { resolution: 'resolved', target: { type: 'app-diagnosis', id: String(base.appId) }, candidates: [] } : comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
   }

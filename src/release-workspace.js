@@ -123,7 +123,7 @@ const KTReleaseWorkspace = (() => {
     saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact', 'planId', 'finalBundle', 'generationInput']));
     saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId'])));
-    saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted'])));
+    saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource'])));
     saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
     saved.error = savedError(state.error);
     saved.runs = state.runs.map(savedRun);
@@ -349,15 +349,16 @@ const KTReleaseWorkspace = (() => {
       const request = suggestionRequest(state);
       return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
-    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null } = {}) {
+    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
       if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
       if (environmentComparison && requestPurpose !== 'document') return false;
+      if (diagnosis && (requestPurpose !== 'ideation' || environmentComparison || consultationTarget)) return false;
       const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
       const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
-      const operationLabel = ideation ? 'アイディア出し' : '資料の作成';
-      state.requestPurpose = requestPurpose;
+      const operationLabel = diagnosis ? 'アプリの診断' : ideation ? 'アイディア出し' : '資料の作成';
+      if (!diagnosis) state.requestPurpose = requestPurpose;
       let resolvedTarget = null, userMessage = null, baseScopeMatched = false;
       const unresolved = state.proposalPending;
       // Suspend actions before any consultation. Restore only when the service
@@ -397,7 +398,7 @@ const KTReleaseWorkspace = (() => {
             && currentTarget.id === resolvedTarget.id && currentTarget.appId === resolvedTarget.appId
             && currentTarget.environment === resolvedTarget.environment) currentTarget.name = resolvedTarget.name;
         userMessage.consultationTarget = clone(resolvedTarget);
-        return services.propose({ text: value, requestPurpose, environmentComparison: clone(environmentComparison), consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
+        return services.propose({ text: value, requestPurpose, diagnosis, environmentComparison: clone(environmentComparison), consultationTarget: clone(resolvedTarget), requestTargets: requestTargets(), discussion, originalRequestHistory, acceptedProposal: previousWork.adopted, currentPlanSummary: currentPlanSummaryOf(fresh), currentResultSummary, previous: clone(state.proposal), questionIdFloor: state.questionIdFloor, pendingPlanQuestions: clone(pendingPlanQuestions), answers: clone(state.answers), requests: changeRequests().map(m => m.text), base: fresh, signal });
       };
       if (readOnly) {
         // Document and ideation actions cannot revise a plan, even if their AI request fails.
@@ -424,9 +425,9 @@ const KTReleaseWorkspace = (() => {
               if (!live()) return;
               if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
                   !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
-                throw Object.assign(new Error(ideation ? 'AIサービスからアイディアを受け取れませんでした。もう一度依頼してください。' : 'AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: ideation ? 'IDEATION_RESPONSE_INVALID' : 'DOCUMENT_RESPONSE_INVALID' });
+                throw Object.assign(new Error(diagnosis ? 'AIサービスから診断結果を受け取れませんでした。もう一度診断してください。' : ideation ? 'AIサービスからアイディアを受け取れませんでした。もう一度依頼してください。' : 'AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: ideation ? 'IDEATION_RESPONSE_INVALID' : 'DOCUMENT_RESPONSE_INVALID' });
               }
-              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
+              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false, ...(diagnosis ? { diagnosisSource: { appId: String(fresh.appId), environment: fresh.env, revision: fresh.revision?.preview ?? null, loadedAt: fresh.loadedAt ?? null } } : {}) };
               state.explanations.push(explanation);
               message('assistant', response.reply, response.facts); state.messages.at(-1).requestPurpose = requestPurpose;
               state.messages.at(-1).explanationId = explanation.id;
@@ -434,7 +435,7 @@ const KTReleaseWorkspace = (() => {
               completed = true;
               restore();
             } catch (error) {
-              if (live()) { const failure = errorOf(error); failure.operation = requestPurpose; failure.message = (ideation ? 'アイディアを作成できませんでした。' : '資料を作成できませんでした。') + failure.message; restore(failure); }
+              if (live()) { const failure = errorOf(error); failure.operation = requestPurpose; failure.message = (diagnosis ? 'アプリを診断できませんでした。' : ideation ? 'アイディアを作成できませんでした。' : '資料を作成できませんでした。') + failure.message; restore(failure); }
             }
           }, previous.phase);
         } finally { if (cancelDocument === stop) { cancelDocument = null; documentPhase = null; } }
