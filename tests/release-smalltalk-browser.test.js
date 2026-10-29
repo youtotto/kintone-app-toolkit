@@ -26,23 +26,29 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
   },{names:Object.keys(mock.api),prod});await page.waitForFunction(()=>work.capability().available===true);await page.evaluate(()=>work.history().ready());
  };
  await boot();await page.evaluate(()=>{editorFiles.files[0].text='HAND_EDIT';document.querySelector('#local-code').value='HAND_EDIT';});const action=n=>page.locator('[data-release-action="'+n+'"]').first();
+ const switchChat=async()=>{const open=await action('smalltalk-open').getAttribute('aria-pressed');await action(open==='true'?'smalltalk-close':'smalltalk-open').click();};
+ assert.equal(await page.locator('.ktr-tools [data-release-action^="smalltalk-"]').count(),0);
+ assert.equal(await page.getByRole('group',{name:'チャットの種類'}).getByRole('button').count(),2);
+ assert.equal(await action('smalltalk-close').getAttribute('aria-pressed'),'true');
  await page.locator('#kt-release-input').fill(F.REQUEST);await action('send').click();await page.waitForFunction(()=>work.controller.getState().phase==='proposal');
  const fixed=await page.evaluate(()=>JSON.stringify(work.controller.getState()));await page.locator('#kt-release-input').fill('通常相談の未送信文');
- await action('code').click();await action('smalltalk-toggle').click();assert.equal(await page.locator('#local-code').inputValue(),'HAND_EDIT');assert.equal(calls.filter(c=>c.n==='smalltalk').length,0);assert.equal(await action('documents').isDisabled(),true);assert.equal(await action('adopt').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.requestDocument('資料を作って')),false);
+ await action('code').click();await switchChat();assert.equal(await page.locator('#local-code').inputValue(),'HAND_EDIT');assert.equal(calls.filter(c=>c.n==='smalltalk').length,0);assert.equal(await action('documents').isDisabled(),true);assert.equal(await action('adopt').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.requestDocument('資料を作って')),false);
  await page.locator('[data-release-panel="smalltalk-quota"] summary').click();assert.match(await page.locator('[data-release-panel="smalltalk-quota"]').innerText(),/月300回/);assert.match(await page.locator('[data-release-panel="smalltalk-quota"]').innerText(),/1日制限はありません/);
+ assert.match(await page.getByRole('group',{name:'チャットの種類'}).innerText(),/クレジット消費なし・月300回まで（契約全体）/);
+ const beforeSelection=calls.length;await action('smalltalk-open').click();assert.equal(await action('smalltalk-open').getAttribute('aria-pressed'),'true');assert.equal(calls.length,beforeSelection);
  const reads=mock.calls.length;await page.locator('#kt-smalltalk-input').fill('その案について少し話そう');await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().turns[0]?.reply);
  assert.ok((await page.locator('[data-release-panel="smalltalk-quota"]').innerText()).includes("今月 36/300回"));assert.equal(await page.evaluate(()=>work.smalltalk.getState().usage.monthly.remaining),264);
  const sent=calls.find(c=>c.n==='smalltalk').input;assert.deepEqual(Object.keys(sent).sort(),['history','requestId','signal','text']);assert.ok(!JSON.stringify(sent).includes('PRIVATE_ADMIN_NOTE'));assert.ok(!JSON.stringify(sent).includes('HAND_EDIT'));assert.equal(mock.calls.length,reads);assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),fixed);
  await action('smalltalk-handoff').click();assert.equal(await page.evaluate(()=>work.view.getDraft()),'通常相談の未送信文');assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);
- await action('smalltalk-toggle').click();assert.equal(await page.locator('#kt-release-input').inputValue(),'通常相談の未送信文');await page.locator('#kt-release-input').fill('');await action('smalltalk-toggle').click();await action('smalltalk-handoff').click();assert.match(await page.locator('#kt-release-input').inputValue(),/未採用/);assert.equal(calls.filter(c=>c.n==='propose').length,1);
- await action('smalltalk-toggle').click();await page.locator('#kt-smalltalk-input').fill('雑談の下書き');await page.evaluate(()=>work.history().flush());
+ await switchChat();assert.equal(await page.locator('#kt-release-input').inputValue(),'通常相談の未送信文');await page.locator('#kt-release-input').fill('');await switchChat();await action('smalltalk-handoff').click();assert.match(await page.locator('#kt-release-input').inputValue(),/未採用/);assert.equal(calls.filter(c=>c.n==='propose').length,1);
+ await switchChat();await page.locator('#kt-smalltalk-input').fill('雑談の下書き');await page.evaluate(()=>work.history().flush());
  const saved=await page.evaluate(()=>work.history().exportCurrent());assert.equal(saved.smalltalk.draft,'雑談の下書き');assert.ok(saved.draft.includes('未採用'));await boot();
  assert.equal(await page.locator('#kt-smalltalk-input').inputValue(),'雑談の下書き');assert.equal(await page.locator('[aria-label="雑談の記録"]').getByText('具体的な変更は、アプリの相談で設定を確認できます。').count(),1);assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);assert.equal(await page.evaluate(()=>editorFiles.files[0].text),'HAND_EDIT');
  await action('code').click();assert.equal(await page.locator('#local-code').inputValue(),'HAND_EDIT');
  // Pending smalltalk blocks paid actions and session switching; cancellation never adopts.
- hold=true;await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().pending);assert.equal(await action('smalltalk-toggle').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.canSwitchSession()),false);await action('smalltalk-cancel').click();held();await page.waitForFunction(()=>!work.smalltalk.getState().pending);
+ hold=true;await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().pending);assert.equal(await action('smalltalk-open').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.canSwitchSession()),false);await action('smalltalk-cancel').click();held();await page.waitForFunction(()=>!work.smalltalk.getState().pending);
  const out=path.join(__dirname,'.build/release-smalltalk');fs.mkdirSync(out,{recursive:true});await page.screenshot({path:path.join(out,'smalltalk.png'),fullPage:true});await page.setViewportSize({width:800,height:900});await page.screenshot({path:path.join(out,'smalltalk-narrow.png'),fullPage:true});
- health.smalltalk.available=false;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('smalltalk-send').isDisabled(),true);await action('smalltalk-toggle').click();assert.equal(await action('send').isEnabled(),true);
+ health.smalltalk.available=false;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('smalltalk-send').isDisabled(),true);await switchChat();assert.equal(await action('send').isEnabled(),true);
  assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
  }finally{await browser.close();}
 });
