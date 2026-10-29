@@ -19,7 +19,7 @@ test('共通クレジットはサーバーの残数を使い、確保分を二�
     assert.match(V.usageHtml(malformed), /残り 未確認/);
   }
   assert.equal(W.usageOf({ ...usage(), credits: null }).credits, null);
-  assert.equal(W.usageOf({ version: 4, credits: value.credits }), null);
+  assert.equal(W.usageOf({ version: 5, credits: value.credits }), null);
 });
 
 test('共通残数ゼロは相談と作成の両方を止め、確保中と消費済みを区別する', () => {
@@ -81,4 +81,83 @@ test('成功応答の共通usageをクライアントが維持する', () => {
   assert.deepEqual(result.usage, value);
   assert.equal(W.usageBlocked(W.usageOf(result.usage), 'consultation'), true);
   assert.equal(W.usageBlocked(W.usageOf(result.usage), 'creation'), true);
+});
+
+const bundledUsage = (remaining = 97, reserved = 0, limit = 100) => ({
+  ...usage(remaining, reserved, limit), version: 4,
+  price: { monthlyJpy: limit === 250 ? 2980 : 1480, taxIncluded: true },
+  operationCosts: { consultation: 1, document: 2, final: 3 }
+});
+
+test('新方式だけ相談1・資料2・最終案一式3と案内し、旧方式の説明は読み替えない', async () => {
+  const details = V.usageDetailsHtml(bundledUsage());
+  assert.match(details, /相談・仮案.*1回につき1クレジット/);
+  assert.match(details, /資料の作成や修正.*1回につき2クレジット/);
+  assert.match(details, /最終案一式で3クレジット/);
+  assert.match(details, /JavaScriptの本数による追加消費はありません/);
+  assert.match(details, /計画ができた時点で3クレジットが確定/);
+  assert.match(details, /1会話全体が定額という意味ではありません/);
+  assert.doesNotMatch(details, /生成ごとに1件|必要な生成件数|米ドル|gpt-/i);
+  assert.match(V.usageDetailsHtml(usage()), /処理1件につき共通の1クレジット/);
+  assert.doesNotMatch(V.usageDetailsHtml(usage()), /最終案一式で3クレジット/);
+  const f = F.fixture(W); await f.controller.send(F.REQUEST);
+  const base = { connected: true, available: true, canPlan: true, canConsult: true, canDocument: true, canCreate: true, usage: bundledUsage() };
+  const proposal = V.render(f.controller.getState(), { connection: base });
+  assert.match(proposal, /送信ごとに1クレジット/);
+  assert.match(proposal, /最終案の作成は3クレジット/);
+  assert.doesNotMatch(proposal, /必要なクレジットは計画の内容で変わります/);
+  const document = V.render({ ...f.controller.getState(), requestPurpose: 'document' }, { connection: base });
+  assert.match(document, /送信ごとに2クレジット/);
+});
+
+test('新方式の資料と最終案は必要残数ごとに止め、残数があるときは使い切ったと表示しない', async () => {
+  const f = F.fixture(W); await f.controller.send(F.REQUEST);
+  const state = f.controller.getState();
+  const base = { connected: true, available: true, canPlan: true, canConsult: true };
+  let connection = { ...base, canDocument: false, canCreate: false, usage: bundledUsage(1) };
+  let html = V.render(state, { connection });
+  assert.equal(disabled(html, 'send'), false);
+  assert.equal(disabled(html, 'adopt'), true);
+  assert.match(html, /この操作には3クレジット必要です。残りは1クレジットです/);
+  html = V.render({ ...state, requestPurpose: 'document' }, { connection });
+  assert.equal(disabled(html, 'send'), true);
+  assert.match(html, /この操作には2クレジット必要です。残りは1クレジットです/);
+  assert.doesNotMatch(html, /今月のクレジットの上限です/);
+  connection = { ...base, canDocument: true, canCreate: false, usage: bundledUsage(2) };
+  html = V.render({ ...state, requestPurpose: 'document' }, { connection });
+  assert.equal(disabled(html, 'send'), false, '残2では資料を作れても最終案は作れない');
+  assert.equal(disabled(html, 'adopt'), true);
+  assert.match(html, /送信ごとに2クレジット/);
+});
+
+test('新方式は資料に必要な分が確保中なら、残1でも月替わり待ちと表示しない', async () => {
+  const f = F.fixture(W); await f.controller.send(F.REQUEST);
+  const html = V.render({ ...f.controller.getState(), requestPurpose: 'document' }, {
+    connection: { connected: true, available: true, canPlan: true, canConsult: true, canDocument: false, canCreate: false, usage: bundledUsage(1, 2) }
+  });
+  assert.match(html, /処理中の分を確保しています/);
+  assert.doesNotMatch(html, /この操作には2クレジット必要|今月のクレジットの上限です/);
+});
+
+test('同じ最終案の再開はサービスの判定で許可し、新しい作成の残数不足だけで止めない', async () => {
+  const f = F.fixture(W, { generate: async () => { throw Object.assign(new Error('一時的な接続エラー'), { code: 'NETWORK_ERROR' }); } });
+  await f.controller.send(F.REQUEST); await f.controller.adopt();
+  const state = f.controller.getState();
+  assert.equal(state.phase, 'incomplete');
+  const connection = { connected: true, available: true, canPlan: true, canConsult: false, canDocument: false, canCreate: false, canResume: true, usage: bundledUsage(0) };
+  assert.equal(disabled(V.render(state, { connection }), 'resume'), false);
+  assert.equal(disabled(V.render(state, { connection: { ...connection, canResume: false } }), 'resume'), true);
+  assert.equal(disabled(V.render(state, { connection: { ...connection, canResume: undefined } }), 'resume'), true, '旧方式はcanCreateを引き継ぐ');
+});
+
+test('新方式の接続表示はサーバーの税込価格と月枠を使い、不明な価格を補完しない', () => {
+  const starter = V.usageHtml(bundledUsage(97));
+  assert.match(starter, /月額 1,480円（税込）/);
+  assert.match(starter, /残り 97 \/ 月 100/);
+  const standard = V.usageHtml({ ...bundledUsage(248, 0, 250), plan: 'toolkit-standard' });
+  assert.match(standard, /スタンダード/);
+  assert.match(standard, /月額 2,980円（税込）/);
+  assert.match(standard, /残り 248 \/ 月 250/);
+  assert.doesNotMatch(V.usageHtml({ ...bundledUsage(), price: null }), /data-usage-price|1,480|2,980/);
+  assert.doesNotMatch(V.usageHtml({ ...usage(), price: { monthlyJpy: 1480, taxIncluded: true } }), /data-usage-price|円/);
 });

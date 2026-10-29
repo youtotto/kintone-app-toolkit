@@ -17,6 +17,12 @@ const KTReleaseWorkspace = (() => {
   function usageOf(value) {
     if (!value || typeof value !== 'object') return null;
     const common = { plan: typeof value.plan === 'string' ? value.plan : '', yyyymm: typeof value.yyyymm === 'string' ? value.yyyymm : '', resetsAt: typeof value.resetsAt === 'string' && Number.isFinite(Date.parse(value.resetsAt)) ? value.resetsAt : null, timeZone: 'Asia/Tokyo' };
+    if (value.version === 4) {
+      const costs = value.operationCosts;
+      if (!costs || costs.consultation !== 1 || costs.document !== 2 || costs.final !== 3) return null;
+      const price = value.price && countOf(value.price.monthlyJpy) != null && value.price.taxIncluded === true ? { monthlyJpy: value.price.monthlyJpy, taxIncluded: true } : null;
+      return { version: 4, ...common, credits: usageCountsOf(value.credits), operationCosts: { consultation: 1, document: 2, final: 3 }, price };
+    }
     if (value.version === 3) return { version: 3, ...common, credits: usageCountsOf(value.credits) };
     if (value.version === 2 && value.buckets && typeof value.buckets === 'object') {
       const buckets = {};
@@ -32,18 +38,29 @@ const KTReleaseWorkspace = (() => {
     return { version: 1, ...common, monthlyLimit: limit, usedThisMonth: used, remainingThisMonth: remaining ?? (limit != null && used != null ? Math.max(0, limit - used) : null) };
   }
   const usageExpired = (usage, now = Date.now()) => !!usage?.resetsAt && Date.parse(usage.resetsAt) <= now;
-  const usageBucket = (usage, bucket) => usage?.version === 3 ? usage.credits : usage?.version === 2 ? usage.buckets?.[bucket] : null;
-  const usageBlocked = (usage, bucket, now) => !usageExpired(usage, now) && (usage?.version === 1 ? usage.remainingThisMonth === 0 : usageBucket(usage, bucket)?.remaining === 0);
-  const usageReserved = (usage, bucket) => { const b = usageBucket(usage, bucket); return b?.remaining === 0 && b.used != null && b.limit != null && b.used < b.limit && b.reserved > 0; };
+  const usageBucket = (usage, bucket) => [3, 4].includes(usage?.version) ? usage.credits : usage?.version === 2 ? usage.buckets?.[bucket === 'document' || bucket === 'final' ? 'creation' : bucket] : null;
+  const creditCost = (usage, bucket) => usage?.version === 4 ? usage.operationCosts?.[bucket === 'creation' ? 'final' : bucket === 'credits' ? 'consultation' : bucket] ?? null : 1;
+  const usageBlocked = (usage, bucket, now) => {
+    if (usageExpired(usage, now)) return false;
+    if (usage?.version === 1) return usage.remainingThisMonth === 0;
+    const remaining = usageBucket(usage, bucket)?.remaining, required = creditCost(usage, bucket);
+    return remaining != null && required != null && remaining < required;
+  };
+  const finalBundleAvailable = (plan, now = Date.now()) => plan?.finalBundle?.version === 1 && typeof plan.finalBundle.id === 'string' && !!plan.finalBundle.id && Date.parse(plan.finalBundle.expiresAt) > now;
+  const usageReserved = (usage, bucket) => { const b = usageBucket(usage, bucket), needed = creditCost(usage, bucket); return b?.remaining != null && needed != null && b.remaining < needed && b.used != null && b.limit != null && b.limit - b.used >= needed && b.reserved > 0; };
   const quotaErrorDetail = error => error?.details?.error?.detail || error?.detail?.error?.detail || error?.details || error?.detail || {};
-  const isReservedError = error => { const detail = quotaErrorDetail(error); return detail.reason === 'QUOTA_RESERVED' || usageReserved(usageOf(detail.usage), detail.bucket); };
+  const isReservedError = error => { const detail = quotaErrorDetail(error); return detail.reason === 'QUOTA_RESERVED' || usageReserved(usageOf(detail.usage), detail.operation || detail.bucket); };
   const usageResetText = usage => usage?.resetsAt ? new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(usage.resetsAt)) + '（日本時間）' : '未確認';
-  const usagePlanLabel = usage => ({ 'toolkit-light': usage?.version === 3 ? 'スターター' : 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
+  const usagePlanLabel = usage => ({ 'toolkit-light': [3, 4].includes(usage?.version) ? 'スターター' : 'ライト', 'toolkit-standard': 'スタンダード' })[usage?.plan] || '契約プラン';
   function monthlyLimitText(error) {
     const detail = quotaErrorDetail(error);
-    const usage = usageOf(detail.usage), shared = usage?.version === 3 || detail.bucket === 'credits';
+    const usage = usageOf(detail.usage), shared = [3, 4].includes(usage?.version) || detail.bucket === 'credits';
     const label = shared ? 'クレジット' : ({ consultation: '相談', creation: '作成' }[detail.bucket] || 'AI利用') + '回数', reset = shared ? '利用枠' : '回数';
     if (isReservedError(error)) return `${label}は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
+    if (usage?.version === 4 && usage.credits?.remaining > 0) {
+      const needed = countOf(detail.requiredCredits) ?? creditCost(usage, detail.operation || detail.bucket);
+      return `この操作に必要な${needed == null ? '' : needed}${label}が足りません（残り${usage.credits.remaining}クレジット）。［接続］で利用状況を確認してください。会話・作成済みの内容は残っています。`;
+    }
     return `今月の${label}の上限に達しました。${usage?.resetsAt ? reset + 'の更新は' + usageResetText(usage) + 'です。' : '［接続］で' + reset + 'の更新日を確認してください。'}会話・作成済みの内容は残っています。コピー・保存・反映・元に戻す操作は引き続き利用できます。`;
   }
   const stampOf = base => base?.stamp?.fingerprint || base?.stamp || base?.fingerprint || null;
@@ -104,7 +121,7 @@ const KTReleaseWorkspace = (() => {
     const saved = historyData(pick(state, savedStateKeys));
     saved.proposal = historyData(pick(state.proposal, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
-    saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact']));
+    saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact', 'planId', 'finalBundle', 'generationInput']));
     saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId'])));
     saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted'])));
     saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
@@ -269,13 +286,14 @@ const KTReleaseWorkspace = (() => {
     }
     async function build(signal, live) {
       const all = state.plan.customizations || [];
+      const input = state.plan.generationInput || { answers: state.answers, requests: changeRequests().map(m => m.text), version: state.version };
       for (const c of all) {
         if (!live()) return;
         const old = state.artifacts.find(a => a.customizationId === c.customizationId);
         if (old?.result?.artifactOutcome?.state === 'ready') continue;
         set({ progress: c.requirement || 'JavaScriptを作成しています。' });
         try {
-          const result = await services.generate({ customization: clone(c), plan: clone(state.plan), proposal: clone(state.adopted), answers: clone(state.answers), requests: changeRequests().map(m => m.text), version: state.version, base, signal,
+          const result = await services.generate({ customization: clone(c), plan: clone(state.plan), proposal: clone(state.adopted), answers: clone(input.answers), requests: clone(input.requests), version: input.version, base, signal,
             onProgress: p => { if (live() && p?.stage) set({ progress: p.stage === 'repair' ? 'JavaScriptを修正しています。' : p.stage === 'verify' ? 'JavaScriptを確認しています。' : c.requirement }); } });
           if (!live()) return;
           const artifact = await validateArtifact(result, c);
@@ -479,6 +497,8 @@ const KTReleaseWorkspace = (() => {
         const plan = response?.plan;
         if (!plan || !Array.isArray(plan.steps) || !Array.isArray(plan.customizations || [])) throw new Error('変更の計画を受け取れませんでした。');
         state.plan = mainPlan(plan);
+        // Resume the adopted request, even after a separate explanation or document.
+        state.plan.generationInput = { answers: clone(state.answers), requests: changeRequests().map(m => m.text), version: state.version };
         if (state.plan.questions.some(q => q && q.blocking !== false)) { set({ phase: 'blocked', progress: '', error: { code: 'PLAN_QUESTION', message: '変更案を作るために確認が必要です。内容を相談で伝えてください。' } }); return; }
         await build(signal, live);
       }, 'incomplete');
@@ -649,7 +669,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, usageResetText, usagePlanLabel, monthlyLimitText };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

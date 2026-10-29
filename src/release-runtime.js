@@ -7,7 +7,9 @@ function mountReleaseWorkspace(host, d) {
   const budget = d.budget || KTAiBudget.create();
   let capability = { available: false, features: {} }, healthAt = 0, healthPromise = null, latestBase = null, view = null;
   let baseQueue = Promise.resolve();
-  let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false;
+  let connectionError = '', initialHealth = d.initialHealth || null, connectionSettingsFailed = false, creditContractInvalid = false, bundledCreditsRequired = false;
+  const creditOutdated = () => creditContractInvalid || capability.usage?.version === 3;
+  const creditUpdateMessage = 'AIサービスのクレジット方式がこのToolkitと一致しません。サービスを更新してから［接続を更新］してください。';
   const esc = KTReleaseView.escape;
   const usageTools = KTReleaseWorkspace;
   let usageRevision = 0, usageResetTimer = null;
@@ -22,10 +24,18 @@ function mountReleaseWorkspace(host, d) {
       if (session.status().connected) refreshCapability(true);
     }, Math.min(delay, 2147483647));
   }
-  const updateUsage = value => { usageRevision++; capability = { ...capability, usage: usageTools.usageOf(value) }; scheduleUsageReset(); view?.render(); updateConnections(); };
-  async function requestWithUsage(bucket, request) {
+  function usageForContract(value) {
+    const next = usageTools.usageOf(value);
+    creditContractInvalid = (value?.version != null && ![1, 2, 3, 4].includes(value.version)) ||
+      (value?.version === 4 && !next) || (bundledCreditsRequired && next?.version !== 4);
+    if (next?.version === 4) bundledCreditsRequired = true;
+    return creditContractInvalid ? capability.usage : next;
+  }
+  const updateUsage = value => { usageRevision++; capability = { ...capability, usage: usageForContract(value) }; scheduleUsageReset(); view?.render(); updateConnections(); };
+  async function requestWithUsage(bucket, request, { included = false } = {}) {
     if (usageTools.usageExpired(capability.usage)) await refreshCapability(true);
-    if (usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket: capability.usage?.version === 3 ? 'credits' : bucket, usage: capability.usage } } } });
+    if (creditOutdated()) throw new KTAiClient.AiClientError({ code: 'CAPABILITY_OUTDATED', message: creditUpdateMessage });
+    if (!(included && capability.usage?.version === 4) && usageTools.usageBlocked(capability.usage, bucket)) throw new KTAiClient.AiClientError({ code: 'MONTHLY_LIMIT_EXCEEDED', details: { error: { detail: { bucket: [3, 4].includes(capability.usage?.version) ? 'credits' : bucket, operation: bucket, requiredCredits: usageTools.creditCost(capability.usage, bucket), usage: capability.usage } } } });
     try { const result = await request(); updateUsage(result?.usage); return result; }
     catch (error) { const usage = error?.details?.error?.detail?.usage; if (usage) updateUsage(usage); throw error; }
   }
@@ -70,10 +80,10 @@ function mountReleaseWorkspace(host, d) {
   }
   const connection = () => {
     const status = session.status(), generator = capability.features?.[KTAiClient.FEATURE_GENERATOR];
-    const available = supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
-    return { connected: status.connected, available, usage: capability.usage || null, canConsult: !usageTools.usageBlocked(capability.usage, 'consultation'), canCreate: !usageTools.usageBlocked(capability.usage, 'creation'), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
+    const available = !creditOutdated() && supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
+    return { connected: status.connected, available, usage: capability.usage || null, canConsult: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'consultation'), canDocument: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'document'), canCreate: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'creation'), canResume: !creditOutdated() && (capability.usage?.version === 4 ? usageTools.finalBundleAvailable(controller.getState().plan) : !usageTools.usageBlocked(capability.usage, 'creation')), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
-      message: connectionError || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
+      message: connectionError || (creditOutdated() ? creditUpdateMessage : '') || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
   };
   async function refreshCapability(force = false) {
     if (connectionSettingsFailed) return capability;
@@ -87,8 +97,8 @@ function mountReleaseWorkspace(host, d) {
         // Boot's probe returns its own packet; a direct health refresh remains the same auth path.
         const health = probe?.health || (probe?.ok === true ? probe : await session.client.getHealth());
         const next = KTAiClient.capabilityFromHealth(health);
-        // A health request started earlier must not replace a newer completed request's counts.
-        capability = { ...next, usage: usageBeforeHealth === usageRevision ? usageTools.usageOf(next.usage) : capability.usage };
+        // A health request started earlier must not replace newer counts or contract checks.
+        capability = { ...next, usage: usageBeforeHealth === usageRevision ? usageForContract(next.usage) : capability.usage };
         scheduleUsageReset();
         healthAt = Date.now(); connectionError = '';
       } catch (e) {
@@ -101,6 +111,7 @@ function mountReleaseWorkspace(host, d) {
   }
   async function requireFeature(feature) {
     await refreshCapability();
+    if (creditOutdated()) throw Object.assign(new Error(creditUpdateMessage), { code: 'CAPABILITY_OUTDATED' });
     const cap = capability.features?.[feature];
     if (!supportsRelease(feature, cap)) {
       throw Object.assign(new Error('接続先のAIサービスが、この作業に必要な機能に対応していません。接続先とサービスの更新を確認してください。'), { code: 'CAPABILITY_OUTDATED' });
@@ -125,18 +136,20 @@ function mountReleaseWorkspace(host, d) {
       await requireFeature(KTAiClient.FEATURE);
       await requireFeature(KTAiClient.FEATURE_PLANNER);
       const ctx = KTReleaseContext.proposal(input, dependencyTools);
-      const r = await requestWithUsage(input.requestPurpose === 'document' ? 'creation' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
+      const r = await requestWithUsage(input.requestPurpose === 'document' ? 'document' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
       return { ...r, facts: ctx.facts };
     },
     async plan(input) {
       await requireFeature(KTAiClient.FEATURE_PLANNER);
       const r = await requestWithUsage('creation', () => client.plan({ ctx: KTReleaseContext.plan(input, dependencyTools), signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] }));
+      if (capability.usage?.version === 4 && !usageTools.finalBundleAvailable(r)) throw Object.assign(new Error('最終案の利用記録を受け取れませんでした。接続先を確認してください。'), { code: 'CREDIT_BUNDLE_REQUIRED' });
       return { plan: r };
     },
     async generate(input) {
       await requireFeature(KTAiClient.FEATURE_GENERATOR);
+      if (capability.usage?.version === 4 && !usageTools.finalBundleAvailable(input.plan)) throw Object.assign(new Error('この案のコード作成を続けられる期間を過ぎたか、利用記録がありません。内容を確認し、改めて最終案を作成してください。'), { code: 'CREDIT_BUNDLE_EXPIRED' });
       try {
-        const r = await requestWithUsage('creation', () => client.generate({ ctx: KTReleaseContext.generator(input), signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] }));
+        const r = await requestWithUsage('creation', () => client.generate({ ctx: KTReleaseContext.generator(input), finalBundleId: input.plan?.finalBundle?.id, signal: input.signal, onEvent: input.onProgress, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_GENERATOR] }), { included: !!input.plan?.finalBundle?.id });
         return { generated: r, verification: r.verification, artifactOutcome: r.artifactOutcome };
       } catch (error) {
         const outcome = error?.details?.artifactOutcome;
@@ -221,7 +234,7 @@ function mountReleaseWorkspace(host, d) {
     };
     const render = () => {
       el.querySelector('[data-usage]').innerHTML = KTReleaseView.usageHtml(capability.usage);
-      el.querySelector('[data-usage-help-title]').textContent = capability.usage?.version === 3 ? 'クレジットの数え方' : '回数の数え方';
+      el.querySelector('[data-usage-help-title]').textContent = [3, 4].includes(capability.usage?.version) ? 'クレジットの数え方' : '回数の数え方';
       el.querySelector('[data-usage-help]').innerHTML = KTReleaseView.usageDetailsHtml(capability.usage);
       el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
       el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
@@ -299,8 +312,8 @@ function mountReleaseWorkspace(host, d) {
     let pending = false;
     const update = () => {
       el.querySelector('[data-document-create]').disabled = pending || !canRequest();
-      const shared = capability.usage?.version === 3, unit = shared ? 'クレジット' : '作成回数';
-      el.querySelector('[data-document-status]').textContent = connection().canCreate === false && usageTools.usageReserved(capability.usage, 'creation') ? unit + 'は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canCreate === false ? '今月の' + unit + 'の上限に達しています。［接続］で更新日を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : shared ? '［AIで作成］を押すと、1クレジットを使います。' : '［AIで作成］を押すと、作成回数を1回使います。';
+      const shared = [3, 4].includes(capability.usage?.version), unit = shared ? 'クレジット' : '作成回数';
+      el.querySelector('[data-document-status]').textContent = creditOutdated() ? creditUpdateMessage : connection().canDocument === false && usageTools.usageReserved(capability.usage, 'document') ? unit + 'は処理中の要求などのため確保されています。完了後に［接続を更新］で残数を確認してください。' : connection().canDocument === false ? (capability.usage?.version === 4 && capability.usage.credits?.remaining > 0 ? '資料の作成に必要な2クレジットが足りません。' : '今月の' + unit + 'の上限に達しています。') + '［接続］で利用状況を確認してください。設定資料の書き出しは引き続き利用できます。' : !canRequest() ? '作成するには、接続と現在の作業の状態を確認してください。処理中の場合は、完了してから作成できます。' : (hasDraft() ? '相談欄の入力は送信せず、そのまま残します。' : '') + (capability.usage?.version === 4 ? '［AIで作成］を押すと、2クレジットを使います。' : shared ? '［AIで作成］を押すと、1クレジットを使います。' : '［AIで作成］を押すと、作成回数を1回使います。');
     };
     update();
     const unsubscribe = controller.subscribe(update);
@@ -512,7 +525,7 @@ function mountReleaseWorkspace(host, d) {
       await refreshCapability();
       if (!view.canRequestDocument()) {
         connectionDialog();
-        return { ok: false, message: 'AIへの説明依頼は送信していません。接続と' + (capability.usage?.version === 3 ? 'クレジット' : '作成回数') + 'を確認してください。' };
+        return { ok: false, message: 'AIへの説明依頼は送信していません。接続と' + ([3, 4].includes(capability.usage?.version) ? 'クレジット' : '作成回数') + 'を確認してください。' };
       }
       const ok = await view.requestDocument('運用環境へ未反映の変更を説明してください。運用環境から動作テスト環境への変更内容と、反映前に確認する点を整理してください。取得できない範囲と手元の未登録編集は分けてください。変更案の作成・採用・反映は依頼していません。',
         { consultationTarget: null, environmentComparison: { key: KTReleaseEnvironmentView.keyOf(result), localEdits } });
