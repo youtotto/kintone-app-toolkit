@@ -37,7 +37,9 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
  assert.match(await page.getByRole('group',{name:'チャットの種類'}).innerText(),/クレジット消費なし・月300回まで（契約全体）/);
  const beforeSelection=calls.length;await action('smalltalk-open').click();assert.equal(await action('smalltalk-open').getAttribute('aria-pressed'),'true');assert.equal(calls.length,beforeSelection);
  const reads=mock.calls.length;await page.locator('#kt-smalltalk-input').fill('その案について少し話そう');await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().turns[0]?.reply);
+ assert.equal(await page.locator('#kt-smalltalk-input').evaluate(el=>el===document.activeElement),true);
  assert.ok((await page.locator('[data-release-panel="smalltalk-quota"]').innerText()).includes("今月 36/300回"));assert.equal(await page.evaluate(()=>work.smalltalk.getState().usage.monthly.remaining),264);
+ assert.equal(await page.getByText('雑談ではアプリの設定を確認していません。設定に合わせた変更案は、この画面の［アプリの相談］で作れます。',{exact:true}).isVisible(),true);
  const sent=calls.find(c=>c.n==='smalltalk').input;assert.deepEqual(Object.keys(sent).sort(),['history','requestId','signal','text']);assert.ok(!JSON.stringify(sent).includes('PRIVATE_ADMIN_NOTE'));assert.ok(!JSON.stringify(sent).includes('HAND_EDIT'));assert.equal(mock.calls.length,reads);assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),fixed);
  await action('smalltalk-handoff').click();assert.equal(await page.evaluate(()=>work.view.getDraft()),'通常相談の未送信文');assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);
  await switchChat();assert.equal(await page.locator('#kt-release-input').inputValue(),'通常相談の未送信文');await page.locator('#kt-release-input').fill('');await switchChat();await action('smalltalk-handoff').click();assert.match(await page.locator('#kt-release-input').inputValue(),/未採用/);assert.equal(calls.filter(c=>c.n==='propose').length,1);
@@ -48,6 +50,12 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
  // Pending smalltalk blocks paid actions and session switching; cancellation never adopts.
  hold=true;await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().pending);assert.equal(await action('smalltalk-open').isDisabled(),true);assert.equal(await page.evaluate(()=>work.view.canSwitchSession()),false);await action('smalltalk-cancel').click();held();await page.waitForFunction(()=>!work.smalltalk.getState().pending);
  const out=path.join(__dirname,'.build/release-smalltalk');fs.mkdirSync(out,{recursive:true});await page.screenshot({path:path.join(out,'smalltalk.png'),fullPage:true});await page.setViewportSize({width:800,height:900});await page.screenshot({path:path.join(out,'smalltalk-narrow.png'),fullPage:true});
+ // Enter submission also returns focus, while editing elsewhere during the wait keeps that focus.
+ await page.locator('#kt-smalltalk-input').fill('続けて話そう');await page.locator('#kt-smalltalk-input').press('Enter');await page.waitForFunction(()=>!work.smalltalk.getState().pending);
+ assert.equal(await page.locator('#kt-smalltalk-input').evaluate(el=>el===document.activeElement),true);
+ hold=true;await page.locator('#kt-smalltalk-input').fill('待っている間に編集する');await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().pending);
+ await page.locator('#local-code').click();held();await page.waitForFunction(()=>!work.smalltalk.getState().pending);
+ assert.equal(await page.locator('#local-code').evaluate(el=>el===document.activeElement),true);
  health.smalltalk.available=false;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('smalltalk-send').isDisabled(),true);await switchChat();assert.equal(await action('send').isEnabled(),true);
  assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
  }finally{await browser.close();}

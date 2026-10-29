@@ -319,7 +319,7 @@ const KTReleaseView = (() => {
     const exhausted=quota&&quota.monthly.remaining===0;
     const resets=exhausted ? new Date(quota.monthly.resetsAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）から利用できます。' : '';
     return '<p class="ktr-note">アプリの設定は送りません。入力した文章と直近3往復までの雑談をAIへ送ります。</p><details data-release-panel="smalltalk-quota"><summary>無料枠について</summary><p>'+esc(count)+'</p><p>'+esc(resets)+'</p></details>'+
-      '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
+      '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?'<p class="ktr-note">雑談ではアプリの設定を確認していません。設定に合わせた変更案は、この画面の［アプリの相談］で作れます。</p>'+button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
       (s.error?'<p class="ktr-error" role="alert">'+esc(s.error)+'</p>':'')+(exhausted?'<p class="ktr-note">'+esc(resets)+'</p>':'')+
       (conn.canSmalltalk!==true?'<p class="ktr-note">雑談には対応したAIサービスと有効なToolkit契約での接続が必要です。</p>':'')+
       '<div class="ktr-composer"><label for="kt-smalltalk-input">雑談（100文字以内）</label><textarea id="kt-smalltalk-input" '+(s.pending?'disabled':'')+' placeholder="ちょっとひと息、話してみましょう">'+esc(s.draft)+'</textarea><div class="ktr-compose-actions"><span>100文字以内・クレジット消費なし</span>'+button(s.pending?'smalltalk-cancel':'smalltalk-send',s.pending?'中断する':'送信',{primary:!s.pending,disabled:!s.pending&&disabled})+'</div></div>';
@@ -481,7 +481,7 @@ const KTReleaseView = (() => {
         if (action === 'smalltalk-open' && !options.smalltalk?.getState().open) return options.smalltalk?.toggle();
         return;
       }
-      if(action==='smalltalk-send')return options.smalltalk?.submit();
+      if(action==='smalltalk-send')return sendSmalltalk();
       if(action==='smalltalk-handoff'){
         if(sending||busy.has(state.phase))return;
         if(draft.trim()){notice='元の相談欄の入力は残しています。内容を整理してから移してください。';draw();return;}
@@ -574,6 +574,22 @@ const KTReleaseView = (() => {
       const handlers = { connect: options.onConnect, 'refresh-connection': options.onRefreshConnection, details: options.onDetails, preview: options.onOpenPreview };
       if (typeof handlers[action] === 'function') { await handlers[action](); draw(); }
     }
+    async function sendSmalltalk() {
+      const doc = host.ownerDocument;
+      let returnFocus = true;
+      const movedAway = event => {
+        if (!event.target?.closest?.('#kt-smalltalk-input,[data-release-action="smalltalk-send"]')) returnFocus = false;
+      };
+      // Only return focus for this send; do not interrupt another interaction while waiting.
+      for (const name of ['pointerdown', 'focusin', 'keydown']) doc.addEventListener(name, movedAway);
+      try {
+        const sent = await options.smalltalk?.submit();
+        const input = host.querySelector?.('#kt-smalltalk-input');
+        if (sent && returnFocus && !disposed && options.smalltalk?.getState().open && input && !input.disabled && input.getClientRects().length && doc.visibilityState !== 'hidden' && doc.hasFocus()) input.focus({ preventScroll: true });
+      } finally {
+        for (const name of ['pointerdown', 'focusin', 'keydown']) doc.removeEventListener(name, movedAway);
+      }
+    }
     function closeNotice() {
       const panel = host.querySelector?.('[data-release-panel="header-notice"]');
       if (panel) { panel.open = false; expanded.delete('header-notice'); panel.querySelector('summary')?.focus?.({ preventScroll: true }); }
@@ -590,7 +606,7 @@ const KTReleaseView = (() => {
       if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || switching || selectedRunId) return;
       controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
     }
-    function keydown(event) { if(event.target?.id==='kt-smalltalk-input'&&event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault?.();options.smalltalk?.submit();return;} if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); send().catch(error => { notice = error.message; draw(); }); } }
+    function keydown(event) { if(event.target?.id==='kt-smalltalk-input'&&event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault?.();sendSmalltalk();return;} if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); send().catch(error => { notice = error.message; draw(); }); } }
     function toggled(event) { const key = event.target?.dataset?.releasePanel; if (key) { if (event.target.open) expanded.add(key); else expanded.delete(key); } }
     host.addEventListener('click', clicked);
     host.addEventListener('input', inputChanged);
