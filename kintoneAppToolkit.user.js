@@ -16279,6 +16279,8 @@
     // or additional approval steps; only identical strings are deduplicated.
     function noticesHtml(state) {
       const seen = new Set((state.adopted?.cannot || []).concat(state.adopted?.assumptions || []).map(textOf));
+      const unknowns = [...new Set((state.plan?.unknowns || []).map(textOf).filter(text => text && !seen.has(text)))];
+      for (const text of unknowns) seen.add(text);
       const notes = new Map(), customizations = state.plan?.customizations || [];
       const platformOf = c => (c.platform || []).map(p => ({ desktop: 'PC', mobile: 'モバイル' }[p] || p)).join('・');
       for (const c of customizations) {
@@ -16294,7 +16296,7 @@
       // Impact descriptions also contain change summaries. Keep their original text
       // available without repeating it as a warning or interpreting its meaning.
       const impact = (state.plan?.impact || []).map(item => typeof item === 'string' ? item : item.description || item.message || '').filter(Boolean);
-      return `${notes.size ? `<section><h3>前提と注意点</h3><ul>${[...notes].map(([text, sources]) => `<li><span>${esc(text)}</span><p class="ktr-note">説明元：${esc([...sources].join('／'))}</p></li>`).join('')}</ul></section>` : ''}${impact.length ? `<details data-release-panel="plan-explanation"><summary>計画の説明を見る</summary>${list(impact)}</details>` : ''}`;
+      return `${unknowns.length ? `<section class="ktr-explanation-unknowns"><h3>確認できていないこと</h3>${list(unknowns)}</section>` : ''}${notes.size ? `<section><h3>前提と注意点</h3><ul>${[...notes].map(([text, sources]) => `<li><span>${esc(text)}</span><p class="ktr-note">説明元：${esc([...sources].join('／'))}</p></li>`).join('')}</ul></section>` : ''}${impact.length ? `<details data-release-panel="plan-explanation"><summary>計画の説明を見る</summary>${list(impact)}</details>` : ''}`;
     }
     function declineHtml(artifacts) {
       return artifacts.filter(a => a.result?.error?.detail).map(a => {

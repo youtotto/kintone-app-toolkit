@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { KTReleaseWorkspace } = require('../src/release-workspace.js');
 const { KTReleaseView } = require('../src/release-view.js');
-const { fixture, REQUEST, proposal, deferred } = require('./helpers/release-workspace-fixture.js');
+const { fixture, REQUEST, proposal, plan, deferred } = require('./helpers/release-workspace-fixture.js');
 const clone = value => JSON.parse(JSON.stringify(value));
 const normal = html => String(html).replace(/<details\b[\s\S]*?<\/details>/g, '').replace(/<style>[\s\S]*?<\/style>/g, '');
 const decode = value => String(value).replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
@@ -84,6 +84,63 @@ test('作成後に届いた前提と注意点も通常表示に残し、新し�
   assert.doesNotMatch(shown, /<script>/);
   assert.equal((shown.match(/data-release-action="apply"/g) || []).length, 1);
   assert.equal(JSON.stringify(state), before);
+});
+
+
+test('計画の未確認範囲を反映前に表示し、不可逆な削除の確認と反映可否は変えない', async () => {
+  const p = plan({ platforms: [] });
+  p.steps = [{ id: 'P1', title: '紹介経路を削除', actionType: 'DELETE_FIELD', targetKind: 'FIELD', targetRef: 'referral', spec: {}, dependsOn: [] }];
+  const caveat = '紹介経路を参照する他アプリやプラグインの内部は未確認です。削除前に担当者が利用状況を確認してください。';
+  p.unknowns = [caveat, caveat, '<script>動的な参照は未確認</script>'];
+  const confirmation = { key: 'IRREVERSIBLE_FIELD_DELETE', message: '紹介経路を削除します。この画面から自動では元に戻せません。' };
+  const f = await mounted({ fixture: { plan: p, prepare: async () => ({ ok: true, changes: [{ title: '紹介経路を削除' }], confirmations: [confirmation], reasons: [], signature: 'delete-review' }) } });
+  await finishProposal(f);
+  const state = f.controller.getState(), before = JSON.stringify(state), shown = normal(f.host.innerHTML);
+  assert.match(shown, /<h3>確認できていないこと<\/h3>/);
+  assert.equal(shown.split(caveat).length - 1, 1);
+  assert.match(shown, /&lt;script&gt;動的な参照は未確認&lt;\/script&gt;/);
+  assert.doesNotMatch(shown, /<script>/);
+  assert.deepEqual(state.prepared.confirmations, [confirmation]);
+  assert.match(shown, /この画面から自動では元に戻せません/);
+  assert.equal(state.prepared.ok, true); assert.deepEqual(state.prepared.reasons, []);
+  assert.equal(buttonOf(f.host, 'apply').disabled, false);
+  assert.equal(f.writes.length, 0); assert.equal(f.count('plan'), 1);
+  assert.equal(JSON.stringify(f.controller.getState()), before);
+  const blocked = clone(state); blocked.prepared.ok = false; blocked.prepared.reasons = [{ message: '既存の停止理由' }];
+  assert.match(KTReleaseView.render(blocked), /data-release-action="apply"[^>]*\sdisabled/);
+});
+
+test('未確認範囲は保存から開き直しても保持し、最新設定で確認し直すと再表示する', async () => {
+  const p = plan({ platforms: [] }); p.unknowns = ['保存されているレコードは取得していないため、削除前に必要なデータを保管してください。'];
+  const f = await mounted({ fixture: { plan: p } }); await finishProposal(f);
+  const saved = f.controller.exportSession(), next = await mounted();
+  assert.deepEqual(saved.state.plan.unknowns, p.unknowns);
+  assert.equal(await next.controller.restoreSession(saved), true);
+  assert.deepEqual(next.controller.getState().plan.unknowns, p.unknowns);
+  await click(next.host, 'reprepare');
+  assert.equal(next.controller.getState().phase, 'review');
+  assert.match(normal(next.host.innerHTML), /保存されているレコードは取得していないため/);
+  assert.equal(next.count('propose'), 0); assert.equal(next.count('plan'), 0); assert.equal(next.count('generate'), 0);
+  assert.equal(next.writes.length, 0);
+});
+
+test('削除を取り消した新しい計画では古い未確認範囲を残さず、注意の完全一致だけを重複表示しない', async () => {
+  const p = plan(), caveat = '他アプリから紹介経路への参照は未確認です。';
+  p.steps.push({ id: 'P2', title: '紹介経路を削除', actionType: 'DELETE_FIELD', targetKind: 'FIELD', targetRef: 'referral', spec: {}, dependsOn: [] });
+  p.unknowns = [caveat]; p.customizations[0].risks = [caveat, '既存の入力チェックは動作テストで確認してください。'];
+  let turn = 0;
+  const f = await mounted({ fixture: { makePlan: async () => ({ plan: turn++ === 0 ? p : plan() }) } });
+  await finishProposal(f);
+  const shown = normal(f.host.innerHTML);
+  assert.equal(shown.split(caveat).length - 1, 1);
+  assert.match(shown, /既存の入力チェックは動作テストで確認してください/);
+  await type(f.host, '紹介経路の削除は取り消します。'); await click(f.host, 'send');
+  assert.doesNotMatch(normal(f.host.innerHTML), /確認できていないこと|他アプリから紹介経路への参照/);
+  await click(f.host, 'adopt');
+  assert.equal(f.controller.getState().plan.steps.some(step => step.actionType === 'DELETE_FIELD'), false);
+  assert.deepEqual(f.controller.getState().plan.unknowns, []);
+  assert.doesNotMatch(normal(f.host.innerHTML), /確認できていないこと|他アプリから紹介経路への参照/);
+  assert.equal(f.writes.length, 0); assert.equal(f.count('plan'), 2);
 });
 
 test('反映内容の長い見出しや計画の要約を注意点に重ねず、条件と確認事項は残す', async () => {
