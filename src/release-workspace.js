@@ -80,7 +80,20 @@ const KTReleaseWorkspace = (() => {
     if (!object(value)) throw new Error('保存できない内容があります。');
     return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, historyData(item)]));
   }
-  const savedError = error => historyData(pick(error, ['code', 'message', 'operation']));
+  const savedError = error => {
+    const saved = historyData(pick(error, ['code', 'message', 'operation']));
+    if (error?.code !== 'MODEL_OUTPUT_INVALID') return saved;
+    const detail = error.detail?.error?.detail || error.detail;
+    // Persist validation identifiers, never response bodies, transport headers or model text.
+    const identifier = (value, pattern, max) => typeof value === 'string' && value.length <= max && pattern.test(value) ? value : null;
+    const code = value => identifier(value, /^[A-Z][A-Z0-9_]*$/, 100);
+    const rows = values => (Array.isArray(values) ? values : []).slice(0, 30).map(row => ({
+      code: code(row?.code), path: identifier(row?.path, /^[A-Za-z0-9_.$\[\]-]+$/, 200)
+    })).filter(row => row.code || row.path);
+    const diagnostic = { errors: rows(detail?.errors), warnings: rows(detail?.warnings), reason: code(detail?.reason) };
+    if (diagnostic.errors.length || diagnostic.warnings.length || diagnostic.reason) saved.detail = diagnostic;
+    return saved;
+  };
   const savedGenerated = result => {
     if (!result) return null;
     const value = historyData(pick(result, ['strategy', 'targetFile', 'summary', 'code', 'body', 'patch', 'events', 'fields', 'apis', 'assumptions', 'warnings', 'coverage', 'verification', 'artifactOutcome', 'error', 'decline']));

@@ -120,6 +120,15 @@ const KTReleaseView = (() => {
     if (document.unknowns?.length) lines.push('## 確認できていないこと', '', ...document.unknowns.map(item => '- ' + markdownText(item).replace(/\r?\n/g, '\n  ')), '');
     return lines.join('\n').trimEnd() + '\n';
   }
+  // A selected diagnosis is a draft, not a document export or adopted requirements.
+  // Keep its structured content; old evidence IDs belong only to the original diagnosis.
+  function diagnosisExcerpt(document, section) {
+    const table = section.table;
+    return [section.heading, ...(section.paragraphs || []), ...(section.items || []),
+      ...(table?.columns?.length ? [table.columns.join(' / '), ...(table.rows || []).map(row => table.columns.map((_, i) => row[i] ?? '').join(' / '))] : []),
+      ...(document.unknowns?.length ? ['確認できていないこと', ...document.unknowns] : [])]
+      .filter(Boolean).join('\n\n');
+  }
   function explanationNavigation(state, explanation, historical) {
     const documents = state.explanations || [], latest = documents.at(-1);
     if (!latest) return '';
@@ -293,16 +302,18 @@ const KTReleaseView = (() => {
     const detail = error.detail?.error?.detail || error.detail;
     const rows = [...(Array.isArray(detail?.errors) ? detail.errors : []), ...(Array.isArray(detail?.warnings) ? detail.warnings : [])]
       .map(row => ['code', 'path', 'message'].map(key => typeof row?.[key] === 'string' ? row[key] : '').filter(Boolean).join('：')).filter(Boolean);
+    if (typeof detail?.reason === 'string') rows.unshift(detail.reason);
     return rows.length ? '<details data-release-panel="response-diagnostics"><summary>問題の詳細（技術者向け）</summary>' + list(rows) + '</details>' : '';
   }
+  const errorInHeader = (state, historical, codePanel) => !!(state.error?.message && !historical && (codePanel.open || !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message))));
   function headerNoticeHtml(state, options, conn, historical, codePanel) {
     const rows = [];
-    if (state.error?.message && !historical && (codePanel.open || !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message)))) rows.push({ kind: 'error', code: state.error.code, message: state.error.message });
+    if (errorInHeader(state, historical, codePanel)) rows.push({ kind: 'error', code: state.error.code, message: state.error.message });
     if (conn.connected === false || conn.available === false) rows.push({ kind: 'connection', message: conn.message || 'AIサービスへ接続してください。' });
     if (options.notice) rows.push({ kind: 'notice', message: options.notice });
     if (!rows.length) return '';
     const first = rows[0], label = first.kind === 'error' ? first.code === 'MONTHLY_LIMIT_EXCEEDED' ? 'AIの利用状況を確認してください' : first.code === 'BUDGET_EXCEEDED' ? 'AIの利用上限に達しました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
-    return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
+    return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'error' ? diagnosticHtml(state.error) : ''}${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
   }
   function chatModeHtml(state, options, smalltalk) {
     if (!options.smalltalk) return '<h2 class="ktr-pane-title">相談</h2>';
@@ -345,7 +356,7 @@ const KTReleaseView = (() => {
     else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
     else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
-    const support = historical || explanation ? '' : `${diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
+    const support = historical || explanation ? '' : `${errorInHeader(state, historical, codePanel) ? '' : diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
     const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
     return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><nav class="ktr-tools" aria-label="接続とアプリ情報"><span class="ktr-connection-status">${esc(conn.connected === false ? '未接続' : conn.available === false ? 'AIを利用できません' : conn.connected === true ? 'AIに接続済み' : '接続を確認してください')}</span>${button('connect', '接続')}<details class="ktr-more" data-release-panel="header-more"><summary>その他</summary><div class="ktr-more-content">${button('details', 'アプリの情報を見る')}</div></details></nav></div></header>
       <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><div class="ktr-conversation-tools">${chatModeHtml(state, options, smalltalk)}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</div>${smalltalk?.open ? smalltalkHtml(smalltalk, conn) : `${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div><nav class="ktr-compose-tools" aria-label="相談を始める">${button('diagnose', 'アプリを診断', { disabled: !!smalltalk?.open || busy.has(state.phase) || conn.connected === false || conn.available === false || conn.canConsult === false || conn.canDiagnose !== true || !!options.sending || !!historical, extra: ' title="' + (conn.canDiagnose !== true ? '診断には対応したAIサービスへの接続が必要です' : sharedCredits(conn.usage) ? '現在の設定をAIで確認します（1クレジット）' : '現在の設定をAIで確認します（相談1回）') + '"' })}${button('documents', '資料を作る', {disabled: !!smalltalk?.open})}</nav>${composer(state, { ...options, historical: !!historical })}`}</section><section class="ktr-detail-pane" aria-label="案とコード"><nav class="ktr-pane-tools" aria-label="右ペインの表示">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}</nav><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></section></div></div></div>`;
@@ -504,10 +515,10 @@ const KTReleaseView = (() => {
         const document = state.explanations.find(e => e.id === id), index = Number(target.dataset?.releaseSection);
         const section = Number.isInteger(index) && index >= 0 ? document?.sections?.[index] : null;
         if (!document?.diagnosisSource || !section?.evidenceIds?.length) return;
-        const excerpt = explanationMarkdown({ title: section.heading, sections: [section], unknowns: document.unknowns, facts: document.facts });
+        const excerpt = diagnosisExcerpt(document, section);
         controller.setConsultationTarget(null);
         controller.setRequestPurpose('consultation');
-        setDraft('次の診断項目について改善を相談したいです。まだ変更は採用していません。現在の設定を確認し、変更範囲・順序・未確認事項・変更後の確認項目を整理してください。ほかの診断項目は取り込まないでください。\n\n' + '診断の取得元：動作テスト環境・アプリ ' + document.diagnosisSource.appId + '・設定の版 ' + (document.diagnosisSource.revision ?? '不明') + '。取得後の変更は未確認です。\n\n' + excerpt);
+        setDraft('次の診断項目について改善を相談したいです。まだ変更は採用していません。現在の設定を確認し、変更範囲・順序・未確認事項・変更後の確認項目を整理してください。ほかの診断項目は取り込まないでください。\n\n' + '診断の取得元：動作テスト環境・アプリ ' + document.diagnosisSource.appId + '・設定の版 ' + (document.diagnosisSource.revision ?? '不明') + '。取得後の変更は未確認です。以下は診断時の説明です。根拠は今回取得する設定で確認してください。\n\n' + excerpt);
         host.querySelector?.('#kt-release-input')?.focus?.(); return;
       }
       if (action === 'adopt' && connectionOf(options).canCreate === false) return;

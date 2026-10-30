@@ -258,3 +258,30 @@ test('設定確認を待つ間に外側の編集が変わった場合は、開�
   assert.deepEqual(f.calls.slice(calls).map(call => call.method), ['loadBase']);
   assert.equal(f.writes.length, 0); assert.equal(f.rollbackWrites.length, 0);
 });
+
+
+test('応答検証の理由は診断を残した画面と保存復旧で読めるが、生の応答や認証情報は保存しない', async () => {
+  const View = require('../src/release-view.js').KTReleaseView;
+  const f=fixture(Workspace,{propose:async()=>document()});
+  await f.controller.send('診断してください',{requestPurpose:'ideation',diagnosis:true});
+  const old=clone(state(f).explanations);
+  f.services.propose=async()=>{throw Object.assign(new Error('invalid'),{code:'MODEL_OUTPUT_INVALID',details:{error:{detail:{
+    reason:'SCHEMA_INVALID',errors:[{code:'EXPLANATION_MUTATION_CONFLICT',path:'explanation',message:'PRIVATE_MODEL_TEXT',raw:'PRIVATE_MODEL_BODY'},
+      {code:'not an identifier PRIVATE_TOKEN',path:'contains private value'}],warnings:[],headers:{Authorization:'PRIVATE_TOKEN'}
+  }}}});};
+  assert.equal(await f.controller.send('この項目の改善を相談したい'),false);
+  const saved=f.controller.exportSession();
+  assert.deepEqual(saved.state.error.detail,{errors:[{code:'EXPLANATION_MUTATION_CONFLICT',path:'explanation'}],warnings:[],reason:'SCHEMA_INVALID'});
+  assert.doesNotMatch(JSON.stringify(saved),/PRIVATE_|not an identifier|contains private/);
+  const restored=fixture(Workspace);assert.equal(await restored.controller.restoreSession(saved),true);
+  assert.deepEqual(state(restored).explanations,old);
+  const html=View.render(state(restored));assert.equal(html.split('data-release-panel="response-diagnostics"').length-1,1);
+  assert.match(html,/EXPLANATION_MUTATION_CONFLICT/);assert.match(html,/SCHEMA_INVALID/);
+  const incomplete={...state(restored),phase:'incomplete',explanationId:null,artifacts:[{customizationId:'C1',title:'備考',error:state(restored).error}]};
+  const incompleteHtml=View.render(incomplete);
+  assert.equal(incompleteHtml.split('data-release-panel="response-diagnostics"').length-1,1);
+  assert.match(incompleteHtml,/EXPLANATION_MUTATION_CONFLICT/);
+
+  assert.equal(await restored.controller.adopt(),false);zeroActivity(restored);
+  assert.equal(f.count('propose'),1);assert.equal(f.count('plan'),0);assert.equal(f.writes.length,0);
+});

@@ -32,7 +32,7 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
     if(failNext){failNext=false;throw new Error('資料作成の固定の通信失敗です。');}
     documentCount++;
     const answer=E.response('アプリの診断'),memo=ctx.facts.find(f=>f.field?.code==='memo');
-    answer.explanation.sections=[{heading:'確認：備考の扱いを確認できます',paragraphs:['備考は複数行の文字列です。'],items:['入力の手順を確かめます。'],table:null,evidenceIds:[]},{heading:'参考：引継ぎを見つけやすくできそうです',paragraphs:['備考を一覧に追加する案です。'],items:['必要な場合だけ相談できます。'],table:null,evidenceIds:[]}];
+    answer.explanation.sections=[{heading:'確認：備考の扱いを確認できます',paragraphs:['備考は複数行の文字列です。'],items:['入力の手順を確かめます。'],table:null,evidenceIds:[]},{heading:'参考：引継ぎを見つけやすくできそうです',paragraphs:['shared-file.jsの備考の扱いを確認する案です。'],items:['必要な場合だけ相談できます。'],table:null,evidenceIds:[]}];
     answer.explanation.unknowns=['実際の画面の動きは未確認です。'];
     assert.ok(memo);answer.explanation.sections.forEach(s=>s.evidenceIds=[memo.id]);
     if(holdNext){holdNext=false;await new Promise(resolve=>{releaseHold=resolve;});}
@@ -73,6 +73,9 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
   await page.locator('#kt-release-input').fill('');
   await page.locator('[data-release-action="consult-diagnosis"]').nth(1).click();
   const draft=await page.locator('#kt-release-input').inputValue();assert.match(draft,/参考：引継ぎ/);assert.doesNotMatch(draft,/確認：備考の扱い/);assert.match(draft,/まだ変更は採用していません/);assert.match(draft,/未確認/);assert.equal(countPaid(),1);
+  assert.equal(draft.split('参考：引継ぎを見つけやすくできそうです').length-1,1);
+  assert.ok(draft.includes('shared-file.js'));assert.ok(!draft.includes('shared\\-file\\.js'));
+  assert.doesNotMatch(draft,/E\d+[：:]|### 根拠/);assert.match(draft,/今回取得する設定/);
   assert.equal(await page.evaluate(()=>work.controller.getState().requestPurpose),'consultation');
   assert.equal(await page.evaluate(()=>JSON.stringify({proposal:work.controller.getState().proposal,plan:work.controller.getState().plan,artifacts:work.controller.getState().artifacts})),before);
   assert.equal(await page.locator('[data-release-action="apply"]').count(),0);
