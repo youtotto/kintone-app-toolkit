@@ -4,6 +4,8 @@
 'use strict';
 
 const KTReleaseWorkspace = (() => {
+  const business = () => typeof KTBusinessContract !== 'undefined' ? KTBusinessContract : require('./release-business-contract.js').KTBusinessContract;
+  const businessView = () => typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView;
   const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
   async function hash(value) {
@@ -136,7 +138,7 @@ const KTReleaseWorkspace = (() => {
     saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact', 'planId', 'finalBundle', 'generationInput']));
     saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId'])));
-    saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource'])));
+    saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource', 'kind', 'schemaVersion', 'snapshot', 'businessUnderstanding'])));
     saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
     saved.error = savedError(state.error);
     saved.runs = state.runs.map(savedRun);
@@ -155,6 +157,7 @@ const KTReleaseWorkspace = (() => {
     if (s.messages.some(m => !object(m) || !integer(m.id) || !m.id || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !arrays(m, ['facts']))) return false;
     if (s.explanations.some(e => !object(e) || !/^explanation-[1-9][0-9]*$/.test(e.id) || typeof e.title !== 'string' || !Array.isArray(e.sections))) return false;
     if (s.explanations.some(e => !arrays(e, ['unknowns', 'facts']) || e.sections.some(section => !object(section) || !arrays(section, ['paragraphs', 'items', 'evidenceIds']) || (section.table != null && (!object(section.table) || !Array.isArray(section.table.columns) || !Array.isArray(section.table.rows)))))) return false;
+    if (s.explanations.some(e => e.kind === 'business-understanding' && (business().validateSnapshot(e.snapshot, { generatable: false }).length || (e.businessUnderstanding != null && business().validateOutput(e.businessUnderstanding, e.snapshot).length)))) return false;
     if (new Set(s.messages.map(m => m.id)).size !== s.messages.length || new Set(s.explanations.map(e => e.id)).size !== s.explanations.length) return false;
     if (s.explanationId !== null && !s.explanations.some(e => e.id === s.explanationId)) return false;
     for (const key of ['consultationTarget', 'proposalTarget', 'adoptedTarget']) if (s[key] !== null && consultationTargetOf(s[key]) === false) return false;
@@ -215,7 +218,7 @@ const KTReleaseWorkspace = (() => {
     plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
     return plan;
   }
-  const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
+  const explanationBody = e => e?.kind === 'business-understanding' ? businessView().historyBody(e) : e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
   // A selected identifier is an explicit UI reference, not an interpretation of the request.
   function consultationTargetOf(value) {
     if (value == null) return null;
@@ -362,16 +365,18 @@ const KTReleaseWorkspace = (() => {
       const request = suggestionRequest(state);
       return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
-    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false } = {}) {
+    async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false, businessSnapshot = null } = {}) {
       const value = String(text || '').trim(); if (!value || !available()) return false;
       if (state.runs.some(r => r.status === 'running')) return false;
       if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
       if (environmentComparison && requestPurpose !== 'document') return false;
+      if (businessSnapshot && (requestPurpose !== 'document' || diagnosis || environmentComparison || business().validateSnapshot(businessSnapshot).length)) return false;
+      if (businessSnapshot) businessSnapshot = clone(businessSnapshot);
       if (diagnosis && (requestPurpose !== 'ideation' || environmentComparison || consultationTarget)) return false;
       const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
       const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
       const operationLabel = diagnosis ? 'アプリの診断' : ideation ? 'アイディア出し' : '資料の作成';
-      if (!diagnosis) state.requestPurpose = requestPurpose;
+      if (!diagnosis && !businessSnapshot) state.requestPurpose = requestPurpose;
       let resolvedTarget = null, userMessage = null, baseScopeMatched = false;
       const unresolved = state.proposalPending;
       // Suspend actions before any consultation. Restore only when the service
@@ -432,15 +437,15 @@ const KTReleaseWorkspace = (() => {
         try {
           await activity('consulting', async (signal, live) => {
             try {
-              fresh = await getBase('consult');
+              fresh = businessSnapshot ? null : await getBase('consult');
               if (!live()) return;
-              const response = await requestProposal(signal, fresh);
+              const response = businessSnapshot ? await services.propose({ text: value, requestPurpose: 'document', businessSnapshot, signal }) : await requestProposal(signal, fresh);
               if (!live()) return;
               if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
-                  !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
+                  (businessSnapshot ? response.explanation != null || business().validateOutput(response.businessUnderstanding, businessSnapshot).length || response.adoptQuote || ['ops','answers','requirementOps'].some(k => !Array.isArray(response.turn?.[k]) || response.turn[k].length) : !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length)) {
                 throw Object.assign(new Error(diagnosis ? 'AIサービスから診断結果を受け取れませんでした。もう一度診断してください。' : ideation ? 'AIサービスからアイディアを受け取れませんでした。もう一度依頼してください。' : 'AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: ideation ? 'IDEATION_RESPONSE_INVALID' : 'DOCUMENT_RESPONSE_INVALID' });
               }
-              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false, ...(diagnosis ? { diagnosisSource: { appId: String(fresh.appId), environment: fresh.env, revision: fresh.revision?.preview ?? null, loadedAt: fresh.loadedAt ?? null } } : {}) };
+              const explanation = { ...(businessSnapshot ? { kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(businessSnapshot), businessUnderstanding: clone(response.businessUnderstanding), title: '業務ルールの候補', sections: [], unknowns: [] } : clone(response.explanation)), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false, ...(diagnosis ? { diagnosisSource: { appId: String(fresh.appId), environment: fresh.env, revision: fresh.revision?.preview ?? null, loadedAt: fresh.loadedAt ?? null } } : {}) };
               state.explanations.push(explanation);
               message('assistant', response.reply, response.facts); state.messages.at(-1).requestPurpose = requestPurpose;
               state.messages.at(-1).explanationId = explanation.id;
@@ -468,7 +473,7 @@ const KTReleaseWorkspace = (() => {
         if (response.proposalUnchanged === true && ['question', 'smalltalk', 'unclear'].includes(response.intent)) {
           let explanationId = state.explanationId;
           if (response.explanation) {
-            const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
+            const explanation = { ...(businessSnapshot ? { kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(businessSnapshot), businessUnderstanding: clone(response.businessUnderstanding), title: '業務ルールの候補', sections: [], unknowns: [] } : clone(response.explanation)), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
             state.explanations.push(explanation); explanationId = explanation.id;
             state.messages.at(-1).explanationId = explanation.id;
           }
@@ -664,6 +669,11 @@ const KTReleaseWorkspace = (() => {
     }
     return {
       getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+      saveBusinessSnapshot(snapshot) {
+        if (!available() || business().validateSnapshot(snapshot, { generatable: false }).length) return false;
+        const doc = { id: 'explanation-' + (++sequence), kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(snapshot), businessUnderstanding: null, title: '業務ルールを読み解くための設定一覧', sections: [], unknowns: [], facts: [], createdAt: now(), version: state.version, requestPurpose: 'document', accepted: false };
+        state.explanations.push(doc); set({ explanationId: doc.id }); return true;
+      },
       exportSession, restoreSession, send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
       setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
       setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },

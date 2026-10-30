@@ -84,6 +84,7 @@ function mountReleaseWorkspace(host, d) {
     const available = !creditOutdated() && supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
     return { connected: status.connected, available, usage: capability.usage || null, canConsult: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'consultation'), canDocument: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'document'), canCreate: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'creation'), canResume: !creditOutdated() && (capability.usage?.version === 4 ? usageTools.finalBundleAvailable(controller.getState().plan) : !usageTools.usageBlocked(capability.usage, 'creation')), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
       canSmalltalk: session.status().connected && smalltalkCapability?.version === 1 && smalltalkCapability.available === true,
+      canUnderstandBusiness: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('businessUnderstandingV1') === true,
       canDiagnose: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('appDiagnosis') === true,
       canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
       message: connectionError || (creditOutdated() ? creditUpdateMessage : '') || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
@@ -141,7 +142,8 @@ function mountReleaseWorkspace(host, d) {
       await requireFeature(KTAiClient.FEATURE);
       await requireFeature(KTAiClient.FEATURE_PLANNER);
       if (input.diagnosis && !connection().canDiagnose) throw new Error('アプリの診断にはAIサービスの更新が必要です。');
-      const ctx = KTReleaseContext.proposal(input, dependencyTools);
+      if (input.businessSnapshot && !connection().canUnderstandBusiness) throw new Error('業務ルールの推測にはAIサービスの更新が必要です。');
+      const ctx = input.businessSnapshot ? KTBusinessContract.context(input.businessSnapshot, input.text) : KTReleaseContext.proposal(input, dependencyTools);
       const r = await requestWithUsage(input.requestPurpose === 'document' ? 'document' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
       return { ...r, facts: ctx.facts };
     },
@@ -306,6 +308,44 @@ function mountReleaseWorkspace(host, d) {
     el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); else flow = null; connectionDialogs.delete(render); offState(); offBudget(); window.removeEventListener('storage', render); });
     render();
   }
+  function businessDialog() {
+    const el=dialog('業務ルールを読み解く','<label>対象環境<select data-business-environment><option value="production">運用環境</option><option value="preview">動作テスト環境</option></select></label><p>選択した環境の取得時点の設定を使います。設定の確認・保存ではAIを呼びません。</p><div class="ktr-actions"><button type="button" data-business-read>設定を確認</button><button type="button" data-business-cancel disabled>取得を中断</button><button type="button" data-business-generate disabled>業務ルール候補を作成</button></div><p data-business-status role="status"></p><div data-business-inventory class="ktr-explanation"></div>',{wide:true});
+    let snapshot=null,pending=false,generating=false,abort=null,notice='';
+    const select=el.querySelector('[data-business-environment]'),status=el.querySelector('[data-business-status]'),body=el.querySelector('[data-business-inventory]');
+    const update=()=>{
+      if(!el.open)return;
+      el.querySelector('[data-business-read]').disabled=pending||generating||!view.canFocusConsultation();
+      el.querySelector('[data-business-cancel]').disabled=!pending;
+      select.disabled=pending||generating;
+      const reasons=snapshot?KTBusinessContract.validateSnapshot(snapshot):['設定を確認してください'];
+      if(snapshot&&!reasons.length)try{KTBusinessContract.context(snapshot);}catch(e){reasons.push(e.message);}
+      const supported=connection().canUnderstandBusiness;
+      el.querySelector('[data-business-generate]').disabled=pending||generating||!supported||!view.canRequestDocument()||reasons.length>0;
+      status.textContent=notice|| (generating?'業務ルール候補を作成しています。':pending?'設定を取得しています。':reasons.length?reasons[0]:!supported?'設定一覧は保存できます。AIでの作成には対応したサービスへの接続が必要です。':!view.canRequestDocument()?'作成するには接続・利用枠と現在の作業状態を確認してください。':'この取得結果を使用します（'+snapshot.startedAt+'）。'+(capability.usage?.version===4?'作成は2クレジットです。':'作成には既存の資料作成の利用枠を使います。'));
+    };
+    select.addEventListener('change',()=>{snapshot=null;notice='';body.innerHTML=KTBusinessView.inventoryHtml(null);update();});
+    el.querySelector('[data-business-read]').addEventListener('click',async()=>{
+      if(pending||generating||!view.canFocusConsultation())return;
+      pending=true;snapshot=null;notice='';abort=new AbortController();update();
+      try{
+        const result=await KTBusinessSettings.collect({appId:String(d.appId),environment:select.value,get:d.getBusinessSettings||((path,params)=>kGet(path,params)),signal:abort.signal,onProgress:s=>{if(el.open){body.innerHTML=KTBusinessView.inventoryHtml(s);}}});
+        if(!el.open)return;snapshot=result;body.innerHTML=KTBusinessView.inventoryHtml(snapshot);
+        if(!controller.saveBusinessSnapshot(snapshot))notice='設定一覧を会話に保存できませんでした。処理が終わってから再取得してください。';
+      }catch(e){if(el.open)notice=e.message||'設定を取得できませんでした。';}
+      finally{pending=false;update();}
+    });
+    el.querySelector('[data-business-cancel]').addEventListener('click',()=>abort?.abort());
+    el.querySelector('[data-business-generate]').addEventListener('click',async()=>{
+      if(pending||generating||!snapshot||!connection().canUnderstandBusiness||!view.canRequestDocument()||KTBusinessContract.validateSnapshot(snapshot).length)return;
+      generating=true;update();
+      try{const ok=await view.requestDocument('通知・プロセス・アクセス権の設定を横断して、業務ルール候補と確認事項を整理してください。',{businessSnapshot:KTBusinessContract.clone(snapshot),consultationTarget:null});if(ok&&el.open){generating=false;el.close();}}
+      finally{generating=false;update();}
+    });
+    const unsub=controller.subscribe(update);connectionDialogs.add(update);
+    el.addEventListener('close',()=>{abort?.abort();if(generating)controller.cancel();unsub();connectionDialogs.delete(update);},{once:true});
+    body.innerHTML=KTBusinessView.inventoryHtml(null);update();
+  }
+
   function documents({ request, canRequest, hasDraft }) {
     const templates = [
       { id: 'overview', title: 'アプリの概要', description: '初めて使う人に、主な入力項目や自動処理を説明します。', prompt: 'このアプリの概要を、初めて使う人にも分かるように説明してください。主な入力項目、画面の使い方、自動計算・自動入力、プロセス管理の流れを整理してください。' },
@@ -314,7 +354,8 @@ function mountReleaseWorkspace(host, d) {
       { id: 'handover', title: '引継ぎ資料', description: '後任者に、設定や自動処理、確認すべき点を伝えます。', prompt: 'このアプリを後任の担当者へ引き継ぐ資料を作成してください。この会話で説明した内容も踏まえ、主な入力項目、計算式・自動入力、プロセス管理、アクセス権、PCとモバイルの違い、運用上の確認事項を整理してください。' },
       { id: 'changes', title: '変更内容のまとめ', description: '相談で決めた内容と、反映済み・未反映の違いを整理します。', prompt: 'この会話の変更内容を資料にまとめてください。最新の修正・取り消しを反映した採用内容、変更前後、反映や復元の結果、未反映の内容を区別してください。採用した案や実行の記録がない場合は、その旨を明記し、仮案を採用済みや反映済みとして書かないでください。' }
     ];
-    const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+    const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><button type="button" data-business-open>業務ルールを読み解く</button><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+    el.querySelector('[data-business-open]').addEventListener('click', () => { el.close(); businessDialog(); });
     let pending = false;
     const update = () => {
       el.querySelector('[data-document-create]').disabled = pending || !canRequest();

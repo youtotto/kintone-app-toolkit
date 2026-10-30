@@ -196,6 +196,8 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         const ai = await inspect(page, aiSelectors);
         await page.screenshot({ path: path.join(output, label + '-ai.png'), fullPage: true });
         await page.locator('[data-release-action="documents"]').click();
+        // Compare normal colors: opening the dialog may put a button under the pointer.
+        await page.mouse.move(0, 0);
         const dialog = await inspect(page, dialogSelectors);
         await page.screenshot({ path: path.join(output, label + '-dialog.png'), fullPage: true });
         await page.locator('dialog[open] [data-close]').click();

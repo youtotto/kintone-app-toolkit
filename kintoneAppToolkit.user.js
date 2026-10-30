@@ -14805,12 +14805,344 @@
     return { create, signature, hasContent };
   })();
 
+  /* Shared structural contract. No interpretation or rewriting of natural-language output. */
+  'use strict';
+  const KTBusinessContract = (() => {
+    const CATEGORIES = ['fields','notification_general','notification_record','notification_reminder','process','acl_app','acl_record','acl_field'];
+    const PATHS = ['app/form/fields','app/notifications/general','app/notifications/perRecord','app/notifications/reminder','app/status','app/acl','record/acl','field/acl'];
+    const LABELS = ['フィールド','アプリの条件通知','レコードの条件通知','リマインダー','プロセス管理','アプリのアクセス権','レコードのアクセス権','フィールドのアクセス権'];
+    const EVENTS = ['recordAdded','recordEdited','commentAdded','statusChanged','fileImported'];
+    const APP_RIGHTS = ['appEditable','recordViewable','recordAddable','recordEditable','recordDeletable','recordImportable','recordExportable'];
+    const ACQUISITIONS = ['not_requested','loading','success','forbidden','failed','cancelled'];
+    const obj = x => !!x && typeof x === 'object' && !Array.isArray(x);
+    const clone = x => JSON.parse(JSON.stringify(x));
+    const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+    const pick = (v,keys) => Object.fromEntries(keys.filter(k=>Object.hasOwn(v||{},k)).map(k=>[k,clone(v[k])]));
+    const escPointer = s => String(s).replace(/~/g,'~0').replace(/\//g,'~1');
+    function pointer(value,p) {
+      if(p===null || p==='') return value;
+      if(typeof p!=='string'||!p.startsWith('/')||/~(?![01])/u.test(p)) return undefined;
+      let v=value;
+      for(const raw of p.slice(1).split('/')) {
+        const k=raw.replace(/~1/g,'/').replace(/~0/g,'~');
+        if(!v || !Object.hasOwn(v,k) || ['__proto__','prototype','constructor'].includes(k)) return undefined;
+        v=v[k];
+      }
+      return v;
+    }
+    function project(kind,v) {
+      if(!obj(v)) throw new Error('設定の構造を確認できません');
+      const entity=e=>{if(!obj(e)||typeof e.type!=='string'||!(typeof e.code==='string'||e.code===null))throw new Error('対象者の構造を確認できません');return pick(e,['type','code']);};
+      const targets=a=>{if(!Array.isArray(a))throw new Error('対象者一覧を確認できません');return a.map(t=>{if(!obj(t)||typeof t.includeSubs!=='boolean')throw new Error('対象者の指定を確認できません');return {...pick(t,['includeSubs']),entity:entity(t.entity)};});};
+      const strings=(keys)=>{for(const k of keys)if(typeof v[k]!=='string')throw new Error('設定の文字列を確認できません');};
+      const bools=(value,keys)=>{for(const k of keys)if(typeof value[k]!=='boolean')throw new Error('許可または有効状態を確認できません');};
+      if(kind==='field'){strings(['code','label','type']);return pick(v,['code','label','type','parent']);}
+      if(kind==='notification_general'){bools(v,['includeSubs',...EVENTS]);return {...pick(v,['includeSubs',...EVENTS]),entity:entity(v.entity)};}
+      if(kind==='comment_notification'){bools(v,['notifyToCommenter']);return pick(v,['notifyToCommenter']);}
+      if(kind==='notification_record'||kind==='notification_reminder'){
+        strings(['filterCond','title']);const o={filterCond:v.filterCond,title:v.title,targets:targets(v.targets)};
+        if(kind==='notification_reminder'){if(!obj(v.timing)||typeof v.timing.code!=='string'||typeof v.timing.daysLater!=='string')throw new Error('通知日時を確認できません');for(const k of ['hoursLater','time'])if(Object.hasOwn(v.timing,k)&&typeof v.timing[k]!=='string')throw new Error('通知日時の形式が不正です');o.timing=pick(v.timing,['code','daysLater','hoursLater','time']);if(Object.hasOwn(v,'timezone')){if(typeof v.timezone!=='string')throw new Error('タイムゾーンが不正です');o.timezone=v.timezone;}}
+        return o;
+      }
+      if(kind==='process_state'){strings(['name','index']);if(!obj(v.assignee)||typeof v.assignee.type!=='string')throw new Error('作業者方式を確認できません');return {name:v.name,index:v.index,assignee:{type:v.assignee.type,entities:targets(v.assignee.entities)}};}
+      if(kind==='process_action'){strings(['name','from','to','filterCond']);const o=pick(v,['name','from','to','filterCond','type']);if(v.executableUser!=null)o.executableUser={entities:targets(v.executableUser.entities)};return o;}
+      if(kind==='acl_app'){bools(v,['includeSubs',...APP_RIGHTS]);return {...pick(v,['includeSubs',...APP_RIGHTS]),entity:entity(v.entity)};}
+      if(kind==='acl_record'||kind==='acl_field'){
+        strings(kind==='acl_record'?['filterCond']:['code']);
+        if(!Array.isArray(v.entities))throw new Error('アクセス権対象を確認できません');
+        return {...pick(v,kind==='acl_record'?['filterCond']:['code']),entities:v.entities.map(t=>{
+          bools(t,['includeSubs',...(kind==='acl_record'?['viewable','editable','deletable']:[])]);
+          if(kind==='acl_field'&&typeof t.accessibility!=='string')throw new Error('フィールド権限を確認できません');
+          return {...pick(t,kind==='acl_record'?['includeSubs','viewable','editable','deletable']:['includeSubs','accessibility']),entity:entity(t.entity)};
+        })};
+      }
+      throw new Error('対応していない設定の種類です');
+    }
+    function issues(kind,v) {
+      const out=[];
+      function walk(x){if(!obj(x)&&!Array.isArray(x))return;if(obj(x)&&x.entity&&!['USER','GROUP','ORGANIZATION','FIELD_ENTITY','CREATOR','CUSTOM_FIELD'].includes(x.entity.type))out.push('対象者の指定方式を解釈できません：'+x.entity.type);for(const y of Object.values(x))walk(y);}
+      walk(v);
+      if(kind==='process_state'&&!['ONE','ALL','ANY'].includes(v.assignee.type))out.push('作業者方式を解釈できません');
+      if(kind==='process_action'&&!['PRIMARY','SECONDARY'].includes(v.type))out.push('アクションの実行対象を解釈できません');
+      if(kind==='process_action'&&v.type==='SECONDARY'&&!v.executableUser)out.push('実行対象の指定を確認できません');
+      if(kind==='acl_field'&&v.entities.some(e=>!['READ','WRITE','NONE'].includes(e.accessibility)))out.push('フィールドの許可を解釈できません');
+      return out;
+    }
+    const categoryOf = kind => typeof kind!=='string'?null:kind==='field'?'fields':kind.startsWith('process_')?'process':kind==='comment_notification'?'notification_general':kind;
+    const eligible = e => e.category!=='fields'&&e.active!==false&&!issues(e.kind,e.value).length;
+    function validateSnapshot(s,{generatable=true}={}) {
+      const errors=[];const fail=m=>errors.push(m);
+      if(!obj(s)||s.schemaVersion!=='business-snapshot-1'||typeof s.snapshotId!=='string'||!s.snapshotId||typeof s.appId!=='string'||!s.appId||!['production','preview'].includes(s.environment))return ['設定の取得元が不正です'];
+      const keys=['schemaVersion','snapshotId','appId','environment','startedAt','completedAt','consistency','revision','categories','evidence','limitations'];
+      if(Object.keys(s).some(k=>!keys.includes(k))||keys.some(k=>!Object.hasOwn(s,k)))fail('取得結果の項目が不正です');
+      if(!['verified','unverified','mismatch'].includes(s.consistency)||!Number.isFinite(Date.parse(s.startedAt))||(s.completedAt!==null&&!Number.isFinite(Date.parse(s.completedAt))))fail('取得日時・版の確認状態が不正です');
+      if(generatable&&(!s.completedAt||s.consistency!=='verified'||typeof s.revision!=='string'||!s.revision))fail('同じ設定の版を確認してから作成してください');
+      if(!Array.isArray(s.categories)||s.categories.length!==8||new Set(s.categories.map(c=>c?.category)).size!==8)return [...errors,'設定カテゴリが不足しています'];
+      for(const c of s.categories) {
+        if(!obj(c)||!CATEGORIES.includes(c.category)||!ACQUISITIONS.includes(c.acquisition)||!['present','empty','unknown'].includes(c.presence)||!['enabled','disabled','not_applicable','unknown'].includes(c.activation)||!Array.isArray(c.interpretationIssues)||c.interpretationIssues.some(x=>typeof x!=='string')){fail('取得状態が不正です');continue;}
+        if(Object.keys(c).some(k=>!['category','acquisition','presence','activation','itemCount','revision','fetchedAt','error','interpretationIssues'].includes(k)))fail('未知の取得属性です');
+        if(c.acquisition==='success'){
+          if(!Number.isInteger(c.itemCount)||c.itemCount<0||!Number.isFinite(Date.parse(c.fetchedAt)))fail('取得件数・日時が不正です');
+          if(c.presence!==(c.itemCount?'present':'empty')||c.error!==null||(c.category==='process'?!['enabled','disabled'].includes(c.activation):c.activation!=='not_applicable'))fail('設定の有無・有効状態が不正です');
+          if(s.consistency==='verified'&&c.revision!==s.revision)fail('設定の版が一致しません');
+        } else if(c.itemCount!==null||c.presence!=='unknown'||c.activation!=='unknown')fail('取得失敗を空の設定にできません');
+        if(generatable&&['loading','not_requested','cancelled'].includes(c.acquisition))fail('取得が完了していません');
+        if(c.error!==null&&(!obj(c.error)||Object.keys(c.error).some(k=>!['code','message'].includes(k))||typeof c.error.message!=='string'))fail('エラー情報が不正です');
+      }
+      if(errors.length)return errors;
+      if(s.revision!==null&&(typeof s.revision!=='string'||!s.revision))fail('設定の版が不正です');
+      if(s.consistency==='verified'&&(typeof s.revision!=='string'||!s.revision))fail('確認済みの版が必要です');
+      if(s.consistency==='verified'&&s.categories.find(c=>c.category==='fields')?.acquisition!=='success')fail('フィールドの版を確認できません');
+      if(!Array.isArray(s.evidence)||!Array.isArray(s.limitations))return [...errors,'根拠・確認範囲が必要です'];
+      if(generatable&&s.evidence.length>500)fail('根拠が500件を超えています');
+      const ids=new Set();
+      for(const [i,e] of s.evidence.entries()) {
+        if(!obj(e)||e.evidenceId!=='B'+(i+1)||ids.has(e.evidenceId)||e.snapshotId!==s.snapshotId){fail('根拠IDが不正です');continue;}ids.add(e.evidenceId);
+        if(Object.keys(e).some(k=>!['evidenceId','snapshotId','category','kind','source','label','active','value','linkedEvidenceIds','unresolvedReferences'].includes(k)))fail('未知の根拠属性です');
+        const c=s.categories.find(c=>c.category===e.category);
+        if(!c||c.acquisition!=='success'||categoryOf(e.kind)!==e.category||!obj(e.source)||Object.keys(e.source).some(k=>!['pointer','revision','fetchedAt'].includes(k))||typeof e.source.pointer!=='string'||e.source.revision!==c.revision||e.source.fetchedAt!==c.fetchedAt||typeof e.label!=='string'||![true,false,null].includes(e.active))fail('根拠の取得元が一致しません');
+        if(e.category!=='process'&&e.active!==null)fail('対象外の有効状態です');
+        if(e.category==='process'&&e.active!==(c?.activation==='enabled'))fail('プロセスの有効状態が一致しません');
+        if(!Array.isArray(e.linkedEvidenceIds)||!Array.isArray(e.unresolvedReferences)||e.unresolvedReferences.some(x=>typeof x!=='string'))fail('参照情報が不正です');
+        try {if(!same(project(e.kind,e.value),e.value))fail('許可していない設定属性です');}catch(_){fail('設定の構造が不正です');}
+      }
+      if(errors.length)return errors;
+      for(const c of s.categories)if(c.acquisition==='success'&&c.itemCount!==s.evidence.filter(e=>e.category===c.category).length)fail('設定件数が一致しません');
+      for(const e of s.evidence)if(e.linkedEvidenceIds?.some(id=>!ids.has(id)))fail('未知の関連設定です');
+      for(const l of s.limitations)if(!obj(l)||Object.keys(l).some(k=>!['limitationId','kind','categories','evidenceIds','message'].includes(k))||typeof l.limitationId!=='string'||!['acquisition','interpretation','excluded_scope'].includes(l.kind)||!Array.isArray(l.categories)||l.categories.some(c=>!CATEGORIES.includes(c))||!Array.isArray(l.evidenceIds)||l.evidenceIds.some(id=>!ids.has(id))||typeof l.message!=='string')fail('確認範囲が不正です');
+      if(generatable&&!s.evidence.some(e=>{try{return eligible(e);}catch(_){return false;}}))fail('業務ルールを推測できる設定がありません');
+      return errors;
+    }
+    const str=maxLength=>({type:'string',maxLength});
+    const arr=(items,maxItems,minItems=0)=>({type:'array',items,maxItems,minItems});
+    const object=properties=>({type:'object',properties,required:Object.keys(properties),additionalProperties:false});
+    const refSchema=object({evidenceId:str(80),pointer:{type:['string','null'],maxLength:1000}});
+    const relationNames=['notification_target','assignee','action_executor','view_allowed','edit_allowed','other_permission'];
+    const stepSchema=object({interpretation:str(600),evidenceRefs:arr(refSchema,20)});
+    const OUTPUT_SCHEMA=object({
+      schemaVersion:{type:'string',enum:['business-understanding-1']},snapshotId:str(200),
+      rules:arr(object({ruleId:str(40),inference:str(600),basis:{type:'string',enum:['single_setting','cross_setting']},evidenceRefs:arr(refSchema,20,1),reasoning:str(600),
+        participants:arr(object({roleHypothesis:str(120),settingRelations:arr(object({relation:{type:'string',enum:relationNames},evidenceRef:refSchema}),8,1)}),8),
+        trigger:stepSchema,nextAction:stepSchema,questions:arr(object({question:str(300),whyItMatters:str(300),relatedEvidenceRefs:arr(refSchema,20)}),5)}),8),
+      unassignedEvidence:arr(object({evidenceId:str(80),reason:{type:'string',enum:['insufficient_clues','conflicting_clues','context_only','output_limit']}}),500),
+      noRuleReason:{type:['string','null'],maxLength:600}
+    });
+    function schemaErrors(v,s,path='$',out=[]) {
+      const types=Array.isArray(s.type)?s.type:[s.type];const t=v===null?'null':Array.isArray(v)?'array':typeof v;
+      if(!types.includes(t)){out.push(path+': 型が不正です');return out;}
+      if(s.enum&&!s.enum.includes(v))out.push(path+': 語彙が不正です');
+      if(t==='string'&&((s.maxLength&&v.length>s.maxLength)||!v.trim()))out.push(path+': 文字列が空か上限を超えています');
+      if(t==='array'){if(v.length>s.maxItems||v.length<(s.minItems||0))out.push(path+': 件数が不正です');v.forEach((x,i)=>schemaErrors(x,s.items,path+'['+i+']',out));}
+      if(t==='object'){if(Object.keys(v).some(k=>!Object.hasOwn(s.properties,k))||s.required.some(k=>!Object.hasOwn(v,k)))out.push(path+': 項目が不正です');for(const [k,sub]of Object.entries(s.properties))if(Object.hasOwn(v,k))schemaErrors(v[k],sub,path+'.'+k,out);}
+      return out;
+    }
+    function relationValid(rel,e,p) {
+      const v=pointer(e.value,p); if(!obj(v))return false;
+      if(rel==='notification_target')return (['notification_record','notification_reminder'].includes(e.kind)&&/^\/targets\/[0-9]+$/.test(p)&&obj(v.entity))||(e.kind==='notification_general'&&p===null);
+      if(rel==='assignee')return e.kind==='process_state'&&/^\/assignee\/entities\/[0-9]+$/.test(p)&&obj(v.entity);
+      if(rel==='action_executor')return e.kind==='process_action'&&e.value.type==='SECONDARY'&&/^\/executableUser\/entities\/[0-9]+$/.test(p)&&obj(v.entity);
+      const acl=e.kind==='acl_app'&&p===null||['acl_record','acl_field'].includes(e.kind)&&/^\/entities\/[0-9]+$/.test(p);
+      if(!acl||!obj(v.entity))return false;
+      if(rel==='view_allowed')return e.kind==='acl_app'?v.recordViewable===true:e.kind==='acl_record'?v.viewable===true:['READ','WRITE'].includes(v.accessibility);
+      if(rel==='edit_allowed')return e.kind==='acl_app'?v.recordEditable===true:e.kind==='acl_record'?v.editable===true:v.accessibility==='WRITE';
+      return rel==='other_permission';
+    }
+    function validateOutput(o,s) {
+      const errors=schemaErrors(o,OUTPUT_SCHEMA);if(errors.length)return errors;
+      if(o.snapshotId!==s.snapshotId)errors.push('根拠の取得回が異なります');
+      if((o.rules.length===0)!==(o.noRuleReason!==null))errors.push('候補ゼロの理由が不正です');
+      const map=new Map(s.evidence.map(e=>[e.evidenceId,e])), used=new Set(),unassigned=new Set();
+      const check=(refs,allowed=null)=>{const seen=new Set();for(const r of refs){const e=map.get(r.evidenceId),key=JSON.stringify(r);if(!e||!eligible(e)||pointer(e.value,r.pointer)===undefined||seen.has(key)||(allowed&&!allowed.has(r.evidenceId)))errors.push('根拠参照が不正です');seen.add(key);}};
+      let chars=0;const count=v=>{if(typeof v==='string')chars+=v.length;else if(v&&typeof v==='object')for(const [k,x]of Object.entries(v))if(!['evidenceId','pointer','snapshotId','schemaVersion','ruleId','basis','reason','relation'].includes(k))count(x);};
+      count(o);if(chars>8000)errors.push('説明全体が8000文字を超えています');
+      o.rules.forEach((r,i)=>{
+        if(r.ruleId!=='R'+(i+1))errors.push('候補IDが不正です');
+        check(r.evidenceRefs);const ids=new Set(r.evidenceRefs.map(x=>x.evidenceId));ids.forEach(id=>used.add(id));
+        if(r.basis!==(ids.size>1?'cross_setting':'single_setting'))errors.push('根拠の種類が一致しません');
+        check(r.trigger.evidenceRefs,ids);check(r.nextAction.evidenceRefs,ids);r.questions.forEach(q=>check(q.relatedEvidenceRefs,ids));
+        r.participants.forEach(p=>p.settingRelations.forEach(t=>{check([t.evidenceRef],ids);const e=map.get(t.evidenceRef.evidenceId);if(!e||!relationValid(t.relation,e,t.evidenceRef.pointer))errors.push('関係者の設定参照が一致しません');}));
+      });
+      for(const u of o.unassignedEvidence){const e=map.get(u.evidenceId);if(!e||!eligible(e)||used.has(u.evidenceId)||unassigned.has(u.evidenceId))errors.push('未整理の根拠が不正です');unassigned.add(u.evidenceId);}
+      for(const e of s.evidence.filter(eligible))if(!used.has(e.evidenceId)&&!unassigned.has(e.evidenceId))errors.push('説明されていない根拠があります');
+      return errors;
+    }
+    function context(snapshot,question='設定を横断して業務ルールの候補を整理してください。') {
+      const errors=validateSnapshot(snapshot);if(errors.length)throw new Error(errors[0]);
+      const ctx={contextVersion:'1',releaseContract:'release-workspace-1',clientCapabilities:['appExplanation','businessUnderstandingV1'],requestPurpose:'document',question,
+        app:{id:snapshot.appId,name:null},focus:{resolution:'resolved',target:{type:'business-understanding',id:snapshot.appId},candidates:[]},
+        facts:[],coverage:{fields:true,dependencies:false,javascript:false,incoming:false,plugins:false,recordData:false,adminNotes:false},truncation:{applied:false,sections:[]},
+        businessSnapshot:clone(snapshot),conversation:{mode:'proposal',proposal:null,requirements:[],decisions:[],discussion:[]}};
+      if(new TextEncoder().encode(JSON.stringify(ctx)).length>256*1024)throw new Error('設定が送信上限を超えています。設定一覧は保存できます。');
+      return ctx;
+    }
+    return {CATEGORIES,PATHS,LABELS,EVENTS,APP_RIGHTS,project,issues,categoryOf,eligible,validateSnapshot,validateOutput,OUTPUT_SCHEMA,context,pointer,escPointer,clone};
+  })();
+
+  /* Read-only settings collection. No records, files, memberships or administrator notes. */
+  'use strict';
+  const KTBusinessSettings = (() => {
+    const C=typeof KTBusinessContract!=='undefined'?KTBusinessContract:require('./release-business-contract.js').KTBusinessContract;
+    const {clone}=C;
+    const invalid=()=>{throw new Error('INVALID_SETTING');};
+    const object=x=>!!x&&typeof x==='object'&&!Array.isArray(x);
+    const empty=(appId,environment,now,id)=>({schemaVersion:'business-snapshot-1',snapshotId:id,appId:String(appId),environment,startedAt:now(),completedAt:null,consistency:'unverified',revision:null,
+      categories:C.CATEGORIES.map(category=>({category,acquisition:'not_requested',presence:'unknown',activation:'unknown',itemCount:null,revision:null,fetchedAt:null,error:null,interpretationIssues:[]})),evidence:[],limitations:[]});
+    function entries(category,raw) {
+      if(!object(raw))invalid();
+      const out=[];
+      const extra=(raw,projected)=>object(raw)?Object.keys(raw).some(k=>!Object.hasOwn(projected||{},k)||extra(raw[k],projected[k])):Array.isArray(raw)?raw.some((v,i)=>extra(v,projected?.[i])):false;
+      const add=(kind,pointer,label,value,active=null)=>{const projected=C.project(kind,value);out.push({kind,pointer,label,value:projected,active,unknownAttributes:kind!=='field'&&extra(value,projected)});};
+      if(category==='fields'){
+        if(!object(raw.properties))invalid();
+        const visit=(fields,path,parent=null)=>{for(const [key,f]of Object.entries(fields)){add('field',path+'/'+C.escPointer(key),f.label,{...f,...(parent?{parent}:{})});if(f.type==='SUBTABLE'){if(!object(f.fields))invalid();visit(f.fields,path+'/'+C.escPointer(key)+'/fields',f.code);}}};visit(raw.properties,'/properties');
+      } else if(category==='process'){
+        if(typeof raw.enable!=='boolean'||!(raw.states===null||object(raw.states))||!(raw.actions===null||Array.isArray(raw.actions)))invalid();
+        for(const [name,state]of Object.entries(raw.states||{}))add('process_state','/states/'+C.escPointer(name),'ステータス：'+name,state,raw.enable);
+        (raw.actions||[]).forEach((a,i)=>add('process_action','/actions/'+i,'アクション：'+a.name,a,raw.enable));
+      } else if(category.startsWith('notification_')){
+        if(!Array.isArray(raw.notifications))invalid();
+        raw.notifications.forEach((n,i)=>add(category,'/notifications/'+i,(C.LABELS[C.CATEGORIES.indexOf(category)])+' '+(i+1),category==='notification_reminder'?{...n,...(raw.timezone!==undefined?{timezone:raw.timezone}:{})}:n));
+        if(category==='notification_general'){if(typeof raw.notifyToCommenter!=='boolean')invalid();if(raw.notifyToCommenter)add('comment_notification','/notifyToCommenter','コメント投稿者への通知',{notifyToCommenter:true});}
+      } else {
+        if(!Array.isArray(raw.rights))invalid();
+        raw.rights.forEach((right,i)=>add(category,'/rights/'+i,category==='acl_field'?'項目の権限：'+right.code:C.LABELS[C.CATEGORIES.indexOf(category)]+' '+(i+1),right));
+      }
+      return out;
+    }
+    async function collect({appId,environment='production',get,signal=null,onProgress=null,now=()=>new Date().toISOString(),snapshotId=null,queryParser=typeof KTQueryCheck!=='undefined'?KTQueryCheck:null}) {
+      if(!['production','preview'].includes(environment)||typeof get!=='function'||!String(appId))throw new Error('設定の取得先を確認してください');
+      const s=empty(appId,environment,now,snapshotId||'business-'+globalThis.crypto.randomUUID()), rows=new Map();
+      const path=key=>'/k/v1/'+(environment==='preview'?'preview/':'')+key;
+      const notify=()=>onProgress?.(clone(s));
+      const stopped=()=>signal?.aborted===true;
+      const error=(e)=>({code:typeof e?.code==='string'&&/^[A-Z0-9_]{1,80}$/.test(e.code)?e.code:null,message:(e?.status===403||e?.code==='CB_NO02')?'設定を読む権限がありません':'設定を取得できませんでした'});
+      async function read(i) {
+        const c=s.categories[i];if(stopped()){c.acquisition='cancelled';notify();return null;}
+        c.acquisition='loading';notify();
+        try {
+          const raw=await get(path(C.PATHS[i]),{app:String(appId)});
+          if(stopped()){c.acquisition='cancelled';return null;}
+          const r=entries(c.category,raw);rows.set(c.category,r);
+          c.acquisition='success';c.presence=r.length?'present':'empty';c.activation=c.category==='process'?(raw.enable?'enabled':'disabled'):'not_applicable';
+          c.itemCount=r.length;c.revision=typeof raw.revision==='string'?raw.revision:null;c.fetchedAt=now();
+          const topKeys=c.category==='fields'?['properties','revision']:c.category==='process'?['enable','states','actions','revision']:c.category==='notification_general'?['notifications','notifyToCommenter','revision']:c.category==='notification_reminder'?['notifications','timezone','revision']:c.category==='notification_record'?['notifications','revision']:['rights','revision'];
+          c.interpretationIssues=[...new Set([...r.flatMap(e=>C.issues(e.kind,e.value)),...(r.some(e=>e.unknownAttributes)||Object.keys(raw).some(k=>!topKeys.includes(k))?['未対応の設定属性を検出しました。該当属性は送信せず、業務上の意味を解釈していません。']:[])])];
+          return raw;
+        }catch(e){c.acquisition=stopped()?'cancelled':(e?.status===403||e?.code==='CB_NO02')?'forbidden':'failed';c.error=stopped()?null:error(e);return null;}
+        finally{notify();}
+      }
+      // Bracket concurrent category reads with the field-definition revision.
+      const first=await read(0);
+      await Promise.all(C.CATEGORIES.slice(1).map((_,i)=>read(i+1)));
+      let last=null;
+      if(!stopped())try{last=await get(path(C.PATHS[0]),{app:String(appId)});entries('fields',last);}catch(_){last=null;}
+      if(stopped())for(const c of s.categories)if(['loading','not_requested'].includes(c.acquisition))c.acquisition='cancelled';
+      const revs=[first?.revision,last?.revision,...s.categories.filter(c=>c.acquisition==='success').map(c=>c.revision)];
+      if(!stopped()&&revs.every(r=>typeof r==='string'&&r.length)) {
+        s.consistency=new Set(revs).size===1?'verified':'mismatch';s.revision=s.consistency==='verified'?revs[0]:null;
+      }
+      for(const c of s.categories)for(const r of rows.get(c.category)||[]){
+        s.evidence.push({evidenceId:'B'+(s.evidence.length+1),snapshotId:s.snapshotId,category:c.category,kind:r.kind,
+          source:{pointer:r.pointer,revision:c.revision,fetchedAt:c.fetchedAt},label:r.label,active:r.active,value:r.value,linkedEvidenceIds:[],unresolvedReferences:[]});
+      }
+      const fieldMap=new Map(s.evidence.filter(e=>e.kind==='field').map(e=>[e.value.code,e.evidenceId]));
+      const stateMap=new Map(s.evidence.filter(e=>e.kind==='process_state').map(e=>[e.value.name,e.evidenceId]));
+      for(const e of s.evidence){
+        const link=(name,map,type)=>{const id=map.get(name);if(id)e.linkedEvidenceIds.push(id);else e.unresolvedReferences.push(type+'：'+name);};
+        const walk=v=>{if(!object(v)&&!Array.isArray(v))return;if(v.entity?.type==='FIELD_ENTITY')link(v.entity.code,fieldMap,'対象フィールドを未解決');for(const x of Object.values(v))walk(x);};walk(e.value);
+        if(e.kind==='process_action'){link(e.value.from,stateMap,'遷移元を未解決');link(e.value.to,stateMap,'遷移先を未解決');}
+        if(e.kind==='acl_field')link(e.value.code,fieldMap,'権限対象フィールドを未解決');
+        if(e.kind==='notification_reminder')link(e.value.timing.code,fieldMap,'基準日時フィールドを未解決');
+        if(e.value.filterCond){
+          try{
+            if(!queryParser)throw new Error('No parser');
+            const parsed=queryParser.parse(queryParser.tokenize(e.value.filterCond));
+            for(const cond of parsed.conds){
+              link(cond.field,fieldMap,'条件の参照フィールドを未解決');
+              const field=s.evidence.find(f=>f.kind==='field'&&f.value.code===cond.field);
+              if(field?.value.type==='STATUS')for(const v of (cond.value.kind==='list'?cond.value.items:[cond.value]))if(v.kind==='str')link(v.v,stateMap,'条件のステータスを未解決');
+            }
+          }catch(_){e.unresolvedReferences.push('条件式は原文を保持しています。条件内の参照を解析できていません。');}
+        }
+        e.linkedEvidenceIds=[...new Set(e.linkedEvidenceIds)];
+      }
+      const limitation=(kind,categories,evidenceIds,message)=>{const prior=s.limitations.find(l=>l.kind===kind&&l.message===message);if(prior){prior.categories=[...new Set([...prior.categories,...categories])];prior.evidenceIds=[...new Set([...prior.evidenceIds,...evidenceIds])];}else s.limitations.push({limitationId:'L'+(s.limitations.length+1),kind,categories,evidenceIds,message});};
+      for(const c of s.categories){
+        if(c.acquisition!=='success')limitation('acquisition',[c.category],[],C.LABELS[C.CATEGORIES.indexOf(c.category)]+'：'+({forbidden:'権限不足で取得不可',cancelled:'取得中断',failed:'取得失敗',not_requested:'未取得',loading:'取得中'}[c.acquisition]));
+        if(c.interpretationIssues.length)limitation('interpretation',[c.category],s.evidence.filter(e=>e.category===c.category&&C.issues(e.kind,e.value).length).map(e=>e.evidenceId),c.interpretationIssues.join('。'));
+      }
+      for(const e of s.evidence)for(const message of e.unresolvedReferences)limitation('interpretation',[e.category],[e.evidenceId],message);
+      for(const message of ['実レコード値と実際の操作・通知の配信実績は未確認です。','対象者の所属と個人別の実効権限は未確認です。','JavaScript・プラグインによる補助処理は対象外です。','他アプリの設定とアプリ外の運用は未確認です。'])limitation('excluded_scope',[],[],message);
+      s.completedAt=now();notify();return s;
+    }
+    return {collect,entries,empty};
+  })();
+
+  /* Deterministic display/export of settings and structured hypotheses. */
+  'use strict';
+  const KTBusinessView = (() => {
+    const C=typeof KTBusinessContract!=='undefined'?KTBusinessContract:require('./release-business-contract.js').KTBusinessContract;
+    const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const md=s=>String(s??'').replace(/[\\\x60*_{}\[\]()#+.!|<>-]/g,c=>'\\'+c);
+    const status=c=>({not_requested:'未取得',loading:'取得中',success:'取得済み',forbidden:'権限不足で取得不可',failed:'取得失敗',cancelled:'取得中断'}[c.acquisition]||'不明')+
+      (c.acquisition==='success'?'・'+({present:'設定あり',empty:'明示設定なし',unknown:'内容不明'}[c.presence])+(c.activation==='disabled'?'・無効':c.activation==='enabled'?'・有効':''):'');
+    const env=s=>s.environment==='production'?'運用環境':'動作テスト環境（未反映の設定を含む場合があります）';
+    const source=s=>env(s)+'・アプリ '+s.appId+'・設定の版 '+(s.revision??'未確認')+'・取得日時 '+s.startedAt+'。取得時点の設定であり、実際の業務を確認したものではありません。';
+    const entity=x=>x?(x.type==='FIELD_ENTITY'?'フィールドで指定：':({USER:'ユーザー：',GROUP:'グループ：',ORGANIZATION:'組織：',CREATOR:'アプリ作成者',CUSTOM_FIELD:'カスタマイズ項目：'}[x.type]||x.type+'：'))+(x.code??''):'対象未確認';
+    const target=t=>entity(t.entity)+(t.includeSubs?'（下位組織を含む）':'');
+    const eventLabels=['追加','編集','コメント追加','ステータス更新','ファイル読み込み'];
+    const rightsLabels=['アプリ設定変更','閲覧','追加','編集','削除','読み込み','書き出し'];
+    const boolText=(v,keys,labels)=>keys.map((k,i)=>labels[i]+'：'+(v[k]===true?'許可':v[k]===false?'不許可':'不明')).join('、');
+    function description(e) {
+      const v=e.value;let condition='',action='',people='';
+      if(e.kind==='field'){condition=v.label+'（'+v.code+'）';action=v.type+(v.parent?'／テーブル '+v.parent:'');}
+      if(e.kind==='notification_general'){condition=C.EVENTS.filter(k=>v[k]).map(k=>eventLabels[C.EVENTS.indexOf(k)]).join('・')||'通知する操作の指定なし';action='通知文は適用対象外';people=target(v);}
+      if(e.kind==='comment_notification'){condition='コメント追加';action='コメント投稿者へ通知';people='そのレコードのコメント投稿者';}
+      if(['notification_record','notification_reminder'].includes(e.kind)){condition=v.filterCond||'追加の絞り込み条件なし';action='通知文：'+(v.title||'設定なし');people=v.targets.map(target).join('、')||'通知先の指定なし';if(v.timing){condition+='／基準 '+v.timing.code+'、'+v.timing.daysLater+'日後'+(v.timing.hoursLater!==undefined?'、'+v.timing.hoursLater+'時間後':'')+(v.timing.time!==undefined?'、時刻 '+v.timing.time:'')+(v.timezone?'、'+v.timezone:'');}}
+      if(e.kind==='process_state'){condition=v.name;action='作業者方式：'+({ONE:'候補から選択',ALL:'全員',ANY:'いずれか一人'}[v.assignee.type]||'未解釈');people=v.assignee.entities.map(target).join('、')||'作業者の指定なし';}
+      if(e.kind==='process_action'){condition=v.from+' → '+v.to+'／実行条件：'+(v.filterCond||'追加条件なし');action=v.name+'／'+({PRIMARY:'作業者のアクション',SECONDARY:'作業者以外でも実行できるアクション'}[v.type]||'実行対象は未解釈');people=v.executableUser?v.executableUser.entities.map(target).join('、')||'レコードを閲覧できる利用者':'実行前ステータスの作業者設定を参照';}
+      if(e.kind==='acl_app'){condition='アプリ全体';action=boolText(v,C.APP_RIGHTS,rightsLabels);people=target(v);}
+      if(e.kind==='acl_record'||e.kind==='acl_field'){condition=e.kind==='acl_record'?v.filterCond||'追加の絞り込み条件なし':v.code;action=v.entities.map((t,i)=>(i+1)+'. '+target(t)+'：'+(e.kind==='acl_record'?boolText(t,['viewable','editable','deletable'],['閲覧','編集','削除']):({READ:'閲覧のみ',WRITE:'閲覧・編集',NONE:'閲覧・編集不可'}[t.accessibility]||'未解釈'))).join('\n');people='設定順を保持（個人別の実効権限は未検証）';}
+      return {condition,action,people};
+    }
+    function evidenceHtml(e,prefix='business') {
+      const d=description(e);
+      return '<details id="'+escape(prefix+'-'+e.evidenceId)+'" data-business-evidence="'+escape(e.evidenceId)+'"><summary>'+escape(e.label)+(e.active===false?'（無効）':'')+'</summary><p>'+escape(d.condition)+'</p><p style="white-space:pre-wrap">'+escape(d.action)+'</p><p>'+escape(d.people)+'</p><p>取得元：'+escape(e.source.pointer)+'／設定の版 '+escape(e.source.revision??'未確認')+'</p><pre class="ktr-fact-value">'+escape(JSON.stringify(e.value,null,2))+'</pre></details>';
+    }
+    function inventoryHtml(s) {
+      if(!s)return '<p>［設定を確認］で取得した設定を表示します。AIは呼びません。</p>';
+      return '<p>'+escape(source(s))+'</p><div class="ktr-table-scroll"><table><thead><tr><th>種類</th><th>取得状態・有効状態</th><th>件数</th></tr></thead><tbody>'+s.categories.map(c=>'<tr><td>'+escape(C.LABELS[C.CATEGORIES.indexOf(c.category)])+'</td><td>'+escape(status(c))+'</td><td>'+escape(c.itemCount??'未確認')+'</td></tr>').join('')+'</tbody></table></div><h3>設定から確認できたこと</h3><div class="ktr-table-scroll" tabindex="0"><table><thead><tr><th>種類</th><th>対象・条件</th><th>通知内容・動作・許可</th><th>対象者</th><th>取得状態・有効状態</th></tr></thead><tbody>'+s.evidence.map(e=>{const d=description(e);return '<tr><td>'+escape(e.label)+'</td><td>'+escape(d.condition)+'</td><td style="white-space:pre-wrap">'+escape(d.action)+'</td><td>'+escape(d.people)+'</td><td>'+escape(status(s.categories.find(c=>c.category===e.category)))+'</td></tr>';}).join('')+'</tbody></table></div><details><summary>設定の原文を確認</summary>'+s.evidence.map(e=>evidenceHtml(e)).join('')+'</details><h3>確認できていない範囲</h3><ul>'+s.limitations.map(l=>'<li>'+escape(l.message)+'</li>').join('')+'</ul>';
+    }
+    const relationLabel={notification_target:'通知先',assignee:'作業者候補',action_executor:'アクション実行可能者',view_allowed:'閲覧許可対象',edit_allowed:'編集許可対象',other_permission:'権限の設定対象'};
+    function relations(p,s){return p.settingRelations.map(r=>{const e=s.evidence.find(e=>e.evidenceId===r.evidenceRef.evidenceId),v=e&&C.pointer(e.value,r.evidenceRef.pointer);return relationLabel[r.relation]+'：'+(v?.entity?target(v):'対象未確認');}).join('、');}
+    function outputHtml(o,s) {
+      if(!o)return '';
+      return '<h3>推測した業務ルール候補</h3>'+(o.noRuleReason?'<p>'+escape(o.noRuleReason)+'</p>':'')+o.rules.map(r=>'<section class="ktr-explanation-section"><h4>'+escape(r.inference)+'</h4><p>推測の理由：'+escape(r.reasoning)+'</p><h4>関係者・役割</h4>'+r.participants.map(p=>'<p>役割の候補：'+escape(p.roleHypothesis)+'<br>設定上の関係：'+escape(relations(p,s))+'</p>').join('')+'<h4>発生条件・次の行動</h4><p>'+escape(r.trigger.interpretation)+'</p><p>'+escape(r.nextAction.interpretation)+'</p><h4>確認事項</h4><ul>'+r.questions.map(q=>'<li>'+escape(q.question)+'<br>'+escape(q.whyItMatters)+'</li>').join('')+'</ul><details data-business-rule="'+escape(r.ruleId)+'"><summary>根拠を見る</summary>'+[...new Set(r.evidenceRefs.map(x=>x.evidenceId))].map(id=>evidenceHtml(s.evidence.find(e=>e.evidenceId===id),r.ruleId)).join('')+'</details></section>').join('')+
+      (o.unassignedEvidence.length?'<details><summary>候補に整理していない設定（'+o.unassignedEvidence.length+'件）</summary><ul>'+o.unassignedEvidence.map(u=>'<li>'+escape(s.evidence.find(e=>e.evidenceId===u.evidenceId)?.label)+'：'+escape({insufficient_clues:'推測材料が不足',conflicting_clues:'材料の整合性が未確認',context_only:'補助資料',output_limit:'出力上限のため未整理'}[u.reason])+'</li>').join('')+'</ul></details>':'');
+    }
+    function markdown(doc) {
+      const s=doc.snapshot,o=doc.businessUnderstanding;const lines=['# '+md(doc.title||'業務ルールの確認'),'',md(source(s)),'','## 設定の取得状態',''];
+      for(const c of s.categories)lines.push('- '+md(C.LABELS[C.CATEGORIES.indexOf(c.category)]+'：'+status(c)+'／件数 '+(c.itemCount??'未確認')));
+      lines.push('','## 設定から確認できたこと','');
+      for(const e of s.evidence){const d=description(e);lines.push('### '+md(e.evidenceId+' '+e.label+(e.active===false?'（無効）':'')),'',md(d.condition),'',md(d.action),'',md(d.people),'','取得元：'+md(e.source.pointer)+'／設定の版 '+md(e.source.revision),'','原文：','',...JSON.stringify(e.value,null,2).split('\n').map(l=>'    '+l),'');}
+      if(o){lines.push('## 推測した業務ルール候補','');if(o.noRuleReason)lines.push(md(o.noRuleReason),'');for(const r of o.rules){lines.push('### '+md(r.inference),'','推測の理由：'+md(r.reasoning),'','根拠：'+md(r.evidenceRefs.map(x=>x.evidenceId+(x.pointer||'')).join('、')),'','関係者・役割：',...r.participants.map(p=>'- '+md(p.roleHypothesis+'（役割の候補）。設定上の関係：'+relations(p,s))),'','発生条件：'+md(r.trigger.interpretation),'','次の行動：'+md(r.nextAction.interpretation),'','確認事項：',...r.questions.map(q=>'- '+md(q.question+' '+q.whyItMatters)),'');}if(o.unassignedEvidence.length)lines.push('## 候補に整理していない設定','',...o.unassignedEvidence.map(u=>'- '+md(u.evidenceId+' '+s.evidence.find(e=>e.evidenceId===u.evidenceId)?.label+'：'+({insufficient_clues:'推測材料が不足',conflicting_clues:'整合性が未確認',context_only:'補助資料',output_limit:'出力上限のため未整理'}[u.reason]))),'');}
+      lines.push('## 確認できていない範囲','',...s.limitations.map(l=>'- '+md(l.message)),'');return lines.join('\n');
+    }
+    function historyBody(doc){
+      const o=doc.businessUnderstanding,s=doc.snapshot;
+      return {title:'過去の業務ルール候補（'+env(s)+'・版 '+s.revision+'）',sections:o?.rules.length?o.rules.map(r=>({heading:'推測：'+r.ruleId,paragraphs:[r.inference,r.reasoning,r.trigger.interpretation,r.nextAction.interpretation],items:[...r.participants.map(p=>p.roleHypothesis),...r.questions.map(q=>q.question)],table:null,evidenceIds:[]})):[{heading:'取得時点の記録',paragraphs:[o?.noRuleReason||'設定一覧を保存しました。業務ルール候補は未生成です。'],items:[],table:null,evidenceIds:[]}],unknowns:['過去の候補であり、現在の設定や業務上の確定事項ではありません。']};
+    }
+    return {escape,description,source,inventoryHtml,outputHtml,markdown,historyBody};
+  })();
+
   /* Release workspace: explicit user actions, service outcomes, and one execution record.
    * No requirement-text interpretation or verification-case aggregation belongs here.
    */
   'use strict';
 
   const KTReleaseWorkspace = (() => {
+    const business = () => typeof KTBusinessContract !== 'undefined' ? KTBusinessContract : require('./release-business-contract.js').KTBusinessContract;
+    const businessView = () => typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView;
     const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
     async function hash(value) {
@@ -14943,7 +15275,7 @@
       saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
       saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact', 'planId', 'finalBundle', 'generationInput']));
       saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId'])));
-      saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource'])));
+      saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource', 'kind', 'schemaVersion', 'snapshot', 'businessUnderstanding'])));
       saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
       saved.error = savedError(state.error);
       saved.runs = state.runs.map(savedRun);
@@ -14962,6 +15294,7 @@
       if (s.messages.some(m => !object(m) || !integer(m.id) || !m.id || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !arrays(m, ['facts']))) return false;
       if (s.explanations.some(e => !object(e) || !/^explanation-[1-9][0-9]*$/.test(e.id) || typeof e.title !== 'string' || !Array.isArray(e.sections))) return false;
       if (s.explanations.some(e => !arrays(e, ['unknowns', 'facts']) || e.sections.some(section => !object(section) || !arrays(section, ['paragraphs', 'items', 'evidenceIds']) || (section.table != null && (!object(section.table) || !Array.isArray(section.table.columns) || !Array.isArray(section.table.rows)))))) return false;
+      if (s.explanations.some(e => e.kind === 'business-understanding' && (business().validateSnapshot(e.snapshot, { generatable: false }).length || (e.businessUnderstanding != null && business().validateOutput(e.businessUnderstanding, e.snapshot).length)))) return false;
       if (new Set(s.messages.map(m => m.id)).size !== s.messages.length || new Set(s.explanations.map(e => e.id)).size !== s.explanations.length) return false;
       if (s.explanationId !== null && !s.explanations.some(e => e.id === s.explanationId)) return false;
       for (const key of ['consultationTarget', 'proposalTarget', 'adoptedTarget']) if (s[key] !== null && consultationTargetOf(s[key]) === false) return false;
@@ -15022,7 +15355,7 @@
       plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
       return plan;
     }
-    const explanationBody = e => e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
+    const explanationBody = e => e?.kind === 'business-understanding' ? businessView().historyBody(e) : e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
     // A selected identifier is an explicit UI reference, not an interpretation of the request.
     function consultationTargetOf(value) {
       if (value == null) return null;
@@ -15169,16 +15502,18 @@
         const request = suggestionRequest(state);
         return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
       }
-      async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false } = {}) {
+      async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false, businessSnapshot = null } = {}) {
         const value = String(text || '').trim(); if (!value || !available()) return false;
         if (state.runs.some(r => r.status === 'running')) return false;
         if (!['consultation', 'document', 'ideation'].includes(requestPurpose)) return false;
         if (environmentComparison && requestPurpose !== 'document') return false;
+        if (businessSnapshot && (requestPurpose !== 'document' || diagnosis || environmentComparison || business().validateSnapshot(businessSnapshot).length)) return false;
+        if (businessSnapshot) businessSnapshot = clone(businessSnapshot);
         if (diagnosis && (requestPurpose !== 'ideation' || environmentComparison || consultationTarget)) return false;
         const selectedTarget = consultationTargetOf(consultationTarget); if (selectedTarget === false) return false;
         const readOnly = requestPurpose !== 'consultation', ideation = requestPurpose === 'ideation';
         const operationLabel = diagnosis ? 'アプリの診断' : ideation ? 'アイディア出し' : '資料の作成';
-        if (!diagnosis) state.requestPurpose = requestPurpose;
+        if (!diagnosis && !businessSnapshot) state.requestPurpose = requestPurpose;
         let resolvedTarget = null, userMessage = null, baseScopeMatched = false;
         const unresolved = state.proposalPending;
         // Suspend actions before any consultation. Restore only when the service
@@ -15239,15 +15574,15 @@
           try {
             await activity('consulting', async (signal, live) => {
               try {
-                fresh = await getBase('consult');
+                fresh = businessSnapshot ? null : await getBase('consult');
                 if (!live()) return;
-                const response = await requestProposal(signal, fresh);
+                const response = businessSnapshot ? await services.propose({ text: value, requestPurpose: 'document', businessSnapshot, signal }) : await requestProposal(signal, fresh);
                 if (!live()) return;
                 if (!response || typeof response.reply !== 'string' || response.intent !== 'question' || response.proposalUnchanged !== true ||
-                    !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length) {
+                    (businessSnapshot ? response.explanation != null || business().validateOutput(response.businessUnderstanding, businessSnapshot).length || response.adoptQuote || ['ops','answers','requirementOps'].some(k => !Array.isArray(response.turn?.[k]) || response.turn[k].length) : !response.explanation || typeof response.explanation.title !== 'string' || !Array.isArray(response.explanation.sections) || !response.explanation.sections.length)) {
                   throw Object.assign(new Error(diagnosis ? 'AIサービスから診断結果を受け取れませんでした。もう一度診断してください。' : ideation ? 'AIサービスからアイディアを受け取れませんでした。もう一度依頼してください。' : 'AIサービスから資料の本文を受け取れませんでした。資料の作成をもう一度依頼してください。'), { code: ideation ? 'IDEATION_RESPONSE_INVALID' : 'DOCUMENT_RESPONSE_INVALID' });
                 }
-                const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false, ...(diagnosis ? { diagnosisSource: { appId: String(fresh.appId), environment: fresh.env, revision: fresh.revision?.preview ?? null, loadedAt: fresh.loadedAt ?? null } } : {}) };
+                const explanation = { ...(businessSnapshot ? { kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(businessSnapshot), businessUnderstanding: clone(response.businessUnderstanding), title: '業務ルールの候補', sections: [], unknowns: [] } : clone(response.explanation)), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false, ...(diagnosis ? { diagnosisSource: { appId: String(fresh.appId), environment: fresh.env, revision: fresh.revision?.preview ?? null, loadedAt: fresh.loadedAt ?? null } } : {}) };
                 state.explanations.push(explanation);
                 message('assistant', response.reply, response.facts); state.messages.at(-1).requestPurpose = requestPurpose;
                 state.messages.at(-1).explanationId = explanation.id;
@@ -15275,7 +15610,7 @@
           if (response.proposalUnchanged === true && ['question', 'smalltalk', 'unclear'].includes(response.intent)) {
             let explanationId = state.explanationId;
             if (response.explanation) {
-              const explanation = { ...clone(response.explanation), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
+              const explanation = { ...(businessSnapshot ? { kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(businessSnapshot), businessUnderstanding: clone(response.businessUnderstanding), title: '業務ルールの候補', sections: [], unknowns: [] } : clone(response.explanation)), id: 'explanation-' + (++sequence), facts: clone(response.facts || []), createdAt: now(), version: state.version, requestPurpose, accepted: false };
               state.explanations.push(explanation); explanationId = explanation.id;
               state.messages.at(-1).explanationId = explanation.id;
             }
@@ -15471,6 +15806,11 @@
       }
       return {
         getState: () => clone(state), subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+        saveBusinessSnapshot(snapshot) {
+          if (!available() || business().validateSnapshot(snapshot, { generatable: false }).length) return false;
+          const doc = { id: 'explanation-' + (++sequence), kind: 'business-understanding', schemaVersion: 'business-understanding-1', snapshot: clone(snapshot), businessUnderstanding: null, title: '業務ルールを読み解くための設定一覧', sections: [], unknowns: [], facts: [], createdAt: now(), version: state.version, requestPurpose: 'document', accepted: false };
+          state.explanations.push(doc); set({ explanationId: doc.id }); return true;
+        },
         exportSession, restoreSession, send, selectSuggestion, updateSuggestions, adopt, resume, reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
         setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
         setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
@@ -16267,6 +16607,7 @@
       return `<details data-release-panel="explanation-facts-${esc(document.id)}-${index}"><summary>この説明の根拠</summary><p class="ktr-note">説明作成時の設定です。現在の設定とは異なる場合があります。</p><ul>${facts.map((fact, at) => `<li><strong>${esc(fact.id)}</strong> ${esc(textOf(fact) || fact.statement || fact.summary || '')}${fact.value != null ? `<details data-release-panel="explanation-value-${esc(document.id)}-${index}-${at}"><summary>設定の内容</summary><pre class="ktr-fact-value">${esc(typeof fact.value === 'string' ? fact.value : JSON.stringify(fact.value, null, 2))}</pre></details>` : ''}</li>`).join('')}</ul></details>`;
     }
     function explanationHtml(document) {
+      if (document.kind === 'business-understanding') { const v = typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView; return '<article class="ktr-section ktr-explanation"><h2>' + esc(document.title) + '</h2><div class="ktr-actions">' + button('copy-explanation', '本文をコピー', { id: document.id }) + button('download-explanation', 'Markdownで保存', { id: document.id }) + '</div>' + v.outputHtml(document.businessUnderstanding, document.snapshot) + v.inventoryHtml(document.snapshot) + '</article>'; }
       return `<article class="ktr-section ktr-explanation" data-release-explanation="${esc(document.id)}"><h2>${esc(document.title || 'アプリの説明')}</h2><div class="ktr-actions">${button('copy-explanation', '本文をコピー', { id: document.id })}${button('download-explanation', 'Markdownで保存', { id: document.id })}</div>${document.diagnosisSource ? `<p class="ktr-note">動作テスト環境・アプリ ${esc(document.diagnosisSource.appId)}・設定の版 ${esc(document.diagnosisSource.revision ?? "不明")}（${esc(document.diagnosisSource.loadedAt ?? "取得時刻不明")}）の診断です。手元の未登録編集や実際の画面の動作は含みません。選んだ項目は相談欄に入り、送信するまでAIを呼びません。</p>` : ""}${(document.sections || []).map((section, index) => {
         const table = section.table;
         const tableHtml = table?.columns?.length ? `<div class="ktr-table-scroll" tabindex="0" role="region" aria-label="${esc(section.heading || '説明の表')}"><table><thead><tr>${table.columns.map(column => `<th scope="col">${esc(column)}</th>`).join('')}</tr></thead><tbody>${(table.rows || []).map(row => `<tr>${table.columns.map((_, at) => `<td>${esc(row[at])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
@@ -16276,6 +16617,7 @@
     // Export structured display content as Markdown; do not ask AI to rewrite it.
     const markdownText = value => String(value ?? '').replace(/[\\`*_{}\[\]()#+.!|<>-]/g, ch => '\\' + ch);
     function explanationMarkdown(document) {
+      if (document?.kind === 'business-understanding') return (typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView).markdown(document);
       if (!document) return '';
       const lines = ['# ' + markdownText(document.title || 'アプリの説明').replace(/\r?\n/g, ' '), ''];
       if (document.diagnosisSource) lines.push('動作テスト環境・アプリ ' + markdownText(document.diagnosisSource.appId) + '・設定の版 ' + markdownText(document.diagnosisSource.revision ?? '不明') + '（' + markdownText(document.diagnosisSource.loadedAt ?? '取得時刻不明') + '）の診断。実際の動作と手元の未登録編集は未確認です。', '');
@@ -17354,6 +17696,7 @@
       const available = !creditOutdated() && supportsRelease(KTAiClient.FEATURE, capability.features?.[KTAiClient.FEATURE]) && supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]);
       return { connected: status.connected, available, usage: capability.usage || null, canConsult: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'consultation'), canDocument: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'document'), canCreate: !creditOutdated() && !usageTools.usageBlocked(capability.usage, 'creation'), canResume: !creditOutdated() && (capability.usage?.version === 4 ? usageTools.finalBundleAvailable(controller.getState().plan) : !usageTools.usageBlocked(capability.usage, 'creation')), canPlan: supportsRelease(KTAiClient.FEATURE_PLANNER, capability.features?.[KTAiClient.FEATURE_PLANNER]),
         canSmalltalk: session.status().connected && smalltalkCapability?.version === 1 && smalltalkCapability.available === true,
+        canUnderstandBusiness: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('businessUnderstandingV1') === true,
         canDiagnose: capability.features?.[KTAiClient.FEATURE]?.conversation?.includes('appDiagnosis') === true,
         canGenerate: supportsRelease(KTAiClient.FEATURE_GENERATOR, generator),
         message: connectionError || (creditOutdated() ? creditUpdateMessage : '') || (!status.connected ? 'AIサービスへ接続してください。' : available ? 'AIサービスに接続しています。' : 'AIサービスを利用できません。接続とサービスの更新を確認してください。') };
@@ -17411,7 +17754,8 @@
         await requireFeature(KTAiClient.FEATURE);
         await requireFeature(KTAiClient.FEATURE_PLANNER);
         if (input.diagnosis && !connection().canDiagnose) throw new Error('アプリの診断にはAIサービスの更新が必要です。');
-        const ctx = KTReleaseContext.proposal(input, dependencyTools);
+        if (input.businessSnapshot && !connection().canUnderstandBusiness) throw new Error('業務ルールの推測にはAIサービスの更新が必要です。');
+        const ctx = input.businessSnapshot ? KTBusinessContract.context(input.businessSnapshot, input.text) : KTReleaseContext.proposal(input, dependencyTools);
         const r = await requestWithUsage(input.requestPurpose === 'document' ? 'document' : 'consultation', () => client.propose({ ctx, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE] }));
         return { ...r, facts: ctx.facts };
       },
@@ -17576,6 +17920,44 @@
       el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); else flow = null; connectionDialogs.delete(render); offState(); offBudget(); window.removeEventListener('storage', render); });
       render();
     }
+    function businessDialog() {
+      const el=dialog('業務ルールを読み解く','<label>対象環境<select data-business-environment><option value="production">運用環境</option><option value="preview">動作テスト環境</option></select></label><p>選択した環境の取得時点の設定を使います。設定の確認・保存ではAIを呼びません。</p><div class="ktr-actions"><button type="button" data-business-read>設定を確認</button><button type="button" data-business-cancel disabled>取得を中断</button><button type="button" data-business-generate disabled>業務ルール候補を作成</button></div><p data-business-status role="status"></p><div data-business-inventory class="ktr-explanation"></div>',{wide:true});
+      let snapshot=null,pending=false,generating=false,abort=null,notice='';
+      const select=el.querySelector('[data-business-environment]'),status=el.querySelector('[data-business-status]'),body=el.querySelector('[data-business-inventory]');
+      const update=()=>{
+        if(!el.open)return;
+        el.querySelector('[data-business-read]').disabled=pending||generating||!view.canFocusConsultation();
+        el.querySelector('[data-business-cancel]').disabled=!pending;
+        select.disabled=pending||generating;
+        const reasons=snapshot?KTBusinessContract.validateSnapshot(snapshot):['設定を確認してください'];
+        if(snapshot&&!reasons.length)try{KTBusinessContract.context(snapshot);}catch(e){reasons.push(e.message);}
+        const supported=connection().canUnderstandBusiness;
+        el.querySelector('[data-business-generate]').disabled=pending||generating||!supported||!view.canRequestDocument()||reasons.length>0;
+        status.textContent=notice|| (generating?'業務ルール候補を作成しています。':pending?'設定を取得しています。':reasons.length?reasons[0]:!supported?'設定一覧は保存できます。AIでの作成には対応したサービスへの接続が必要です。':!view.canRequestDocument()?'作成するには接続・利用枠と現在の作業状態を確認してください。':'この取得結果を使用します（'+snapshot.startedAt+'）。'+(capability.usage?.version===4?'作成は2クレジットです。':'作成には既存の資料作成の利用枠を使います。'));
+      };
+      select.addEventListener('change',()=>{snapshot=null;notice='';body.innerHTML=KTBusinessView.inventoryHtml(null);update();});
+      el.querySelector('[data-business-read]').addEventListener('click',async()=>{
+        if(pending||generating||!view.canFocusConsultation())return;
+        pending=true;snapshot=null;notice='';abort=new AbortController();update();
+        try{
+          const result=await KTBusinessSettings.collect({appId:String(d.appId),environment:select.value,get:d.getBusinessSettings||((path,params)=>kGet(path,params)),signal:abort.signal,onProgress:s=>{if(el.open){body.innerHTML=KTBusinessView.inventoryHtml(s);}}});
+          if(!el.open)return;snapshot=result;body.innerHTML=KTBusinessView.inventoryHtml(snapshot);
+          if(!controller.saveBusinessSnapshot(snapshot))notice='設定一覧を会話に保存できませんでした。処理が終わってから再取得してください。';
+        }catch(e){if(el.open)notice=e.message||'設定を取得できませんでした。';}
+        finally{pending=false;update();}
+      });
+      el.querySelector('[data-business-cancel]').addEventListener('click',()=>abort?.abort());
+      el.querySelector('[data-business-generate]').addEventListener('click',async()=>{
+        if(pending||generating||!snapshot||!connection().canUnderstandBusiness||!view.canRequestDocument()||KTBusinessContract.validateSnapshot(snapshot).length)return;
+        generating=true;update();
+        try{const ok=await view.requestDocument('通知・プロセス・アクセス権の設定を横断して、業務ルール候補と確認事項を整理してください。',{businessSnapshot:KTBusinessContract.clone(snapshot),consultationTarget:null});if(ok&&el.open){generating=false;el.close();}}
+        finally{generating=false;update();}
+      });
+      const unsub=controller.subscribe(update);connectionDialogs.add(update);
+      el.addEventListener('close',()=>{abort?.abort();if(generating)controller.cancel();unsub();connectionDialogs.delete(update);},{once:true});
+      body.innerHTML=KTBusinessView.inventoryHtml(null);update();
+    }
+
     function documents({ request, canRequest, hasDraft }) {
       const templates = [
         { id: 'overview', title: 'アプリの概要', description: '初めて使う人に、主な入力項目や自動処理を説明します。', prompt: 'このアプリの概要を、初めて使う人にも分かるように説明してください。主な入力項目、画面の使い方、自動計算・自動入力、プロセス管理の流れを整理してください。' },
@@ -17584,7 +17966,8 @@
         { id: 'handover', title: '引継ぎ資料', description: '後任者に、設定や自動処理、確認すべき点を伝えます。', prompt: 'このアプリを後任の担当者へ引き継ぐ資料を作成してください。この会話で説明した内容も踏まえ、主な入力項目、計算式・自動入力、プロセス管理、アクセス権、PCとモバイルの違い、運用上の確認事項を整理してください。' },
         { id: 'changes', title: '変更内容のまとめ', description: '相談で決めた内容と、反映済み・未反映の違いを整理します。', prompt: 'この会話の変更内容を資料にまとめてください。最新の修正・取り消しを反映した採用内容、変更前後、反映や復元の結果、未反映の内容を区別してください。採用した案や実行の記録がない場合は、その旨を明記し、仮案を採用済みや反映済みとして書かないでください。' }
       ];
-      const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+      const el = dialog('資料を作る', '<p>テンプレートを選ぶと、AIがこのアプリの設定と相談内容をもとに資料を作ります。作成後も相談欄で内容を調整できます。</p><button type="button" data-business-open>業務ルールを読み解く</button><fieldset class="ktr-template-grid"><legend>資料の種類</legend>' + templates.map((t, i) => '<label class="ktr-template-choice"><input type="radio" name="document-template" value="' + t.id + '"' + (i === 0 ? ' checked' : '') + '><span><strong>' + t.title + '</strong><small>' + t.description + '</small></span></label>').join('') + '</fieldset><label>追加の希望（任意）<textarea data-document-extra rows="3" placeholder="例：初めて使う担当者向けに、専門用語を少なくしてください。"></textarea></label><p data-document-status role="status"></p><button type="button" data-document-create>AIで作成</button><details data-offline-materials><summary>AIを使わずに書き出す</summary><p>設定資料や、外部のAIへ渡す資料を作れます。Markdown・JSONなどの形式を選べます。</p><button type="button" data-offline-export>設定資料を書き出す</button></details>', { wide: true });
+      el.querySelector('[data-business-open]').addEventListener('click', () => { el.close(); businessDialog(); });
       let pending = false;
       const update = () => {
         el.querySelector('[data-document-create]').disabled = pending || !canRequest();
