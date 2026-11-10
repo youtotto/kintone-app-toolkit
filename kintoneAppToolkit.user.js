@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.1
+// @version      2.3.2
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.1';
+  const SCRIPT_VERSION = '2.3.2';
   // Published build identifier.
-  const KT_BUILD = '2.3.1';
+  const KT_BUILD = '2.3.2';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -11727,6 +11727,7 @@
         onAuthExpired: async () => { access = { token: null, expiresAt: null }; await refresh(); return true; },
       });
       const client = {
+        recover: (p) => authed().recover(p),
         getHealth: () => authed().getHealth(),
         smalltalk: (p) => authed().smalltalk(p),
         exchange: (p) => authed().exchange(p),
