@@ -2,8 +2,10 @@
 
 **kintone開発の標準化・効率化 for Developers**
 
-> 🚀 Latest: Toolkit v2.3.0 released
+> 🚀 Latest: Toolkit v2.3.1 released
 > 設定を「見る」ツールから、**依存関係と変更影響を「分析する」ツール**へ。
+
+**v2.3.1**：一般配布版から検証専用機能を取り除きました。[今回の修正と更新方法](docs/RELEASE-NOTES-2.3.1.md)をご覧ください。
 
 **v2.3.0**：無料の設定確認・Config Lensに加え、AIでアプリ診断・業務工程の整理・資料作成・開発の相談ができます。[変更点](docs/RELEASE-NOTES-2.3.0.md)と[使い方・確認範囲](docs/release-workspace.md)をご覧ください。
 

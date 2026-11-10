@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.0
+// @version      2.3.1
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.0';
-  // Phase 21: ビルドの識別（開発中の配信でコミットと本文の指紋に置き換える。公開版は 'dev' のまま。動作には使わない）
-  const KT_BUILD = 'dev';
+  const SCRIPT_VERSION = '2.3.1';
+  // Published build identifier.
+  const KT_BUILD = '2.3.1';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -10868,11 +10868,7 @@
   //   Toolkit 固有なのは envelope（product toolkit / feature assistant-qa / payload = KTContext）と
   //   応答の根拠ID 再検証だけに留める。
   //   クライアントに置かないもの: API キー・Worker secret・model 名・system prompt。
-  //   credential（Phase 5 / docs/contracts/14-ai-access-token.md）:
-  //     Customer Token（長寿命・契約証明）は「接続」時に 1 回だけ入力し、POST /v2/token/exchange で
-  //     短命 Access Token（memory のみ）＋ Refresh Token（localStorage・単回使用・rotation・scope 限定）に交換して捨てる。
-  //     /v2 の呼び出しは Access Token で行い、期限切れは Refresh で自動更新する。Customer Token は保存しない。
-  //     （kintone 同一オリジンの他 JavaScript は localStorage を読めるため、永続化するのは権限と寿命が小さい Refresh Token だけ）
+  //   会員承認による接続。短命Access Tokenはメモリー、Refresh Tokenのみ保存。
   // ==========================================
   const KTAiClient = (() => {
     const CONTRACT_VERSION = '2.1';
@@ -10884,9 +10880,8 @@
     const PROMPT_VERSION = '1';
     const PLANNER_PROMPT_VERSION = '1';
     const GENERATOR_PROMPT_VERSION = '1';
-    /** 公開エンドポイント（secret ではない）。設定で上書きできる */
+    /** 一般配布版の固定エンドポイント（secret ではない） */
     const DEFAULT_API_BASE = 'https://appinsight-ai-api.black-waterfall-157a.workers.dev';
-    const SETTINGS_KEY = 'ktAi.v1';          // 旧: Customer Token を保存していた（staging E2E 用。見つけたら 1 回だけ exchange して削除）
     const SESSION_KEY = 'ktAi.v2';           // 新: Refresh Token と scope のみ
     const CONSENT_KEY = 'ktAiConsent.v1';
     const HEALTH_TTL_MS = 10 * 60 * 1000;
@@ -11051,7 +11046,6 @@
 
     // ---- 設定（localStorage。token をコードに持たない）----
     function createSettingsStore({ storage = (typeof localStorage !== 'undefined' ? localStorage : null), host = (typeof location !== 'undefined' ? location.host : '') } = {}) {
-      const legacyKey = `${SETTINGS_KEY}.${host}`;
       const key = `${SESSION_KEY}.${host}`;
       return {
         /** 保存の名前（タブ間の refresh のロックの名前に使う。同じ kintone の画面どうしで同じ値） */
@@ -11059,7 +11053,9 @@
         /** 接続情報（Refresh Token・scope・期限）。Customer Token / Access Token は含めない */
         load() {
           try {
-            const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {};
+            const raw = storage?.getItem(key); let j = raw ? JSON.parse(raw) : {};
+            // Never forward credentials saved for another service. Keep the original record untouched.
+            if (j.apiBase && String(j.apiBase).trim().replace(/\/+$/, "") !== DEFAULT_API_BASE) j = {};
             const attempt = j.refreshAttempt && typeof j.refreshAttempt.requestId === 'string' ? { requestId: j.refreshAttempt.requestId, at: j.refreshAttempt.at || null } : null;
             return {
               apiBase: String(j.apiBase || DEFAULT_API_BASE),
@@ -11071,9 +11067,10 @@
           } catch (e) { return { apiBase: DEFAULT_API_BASE, refreshToken: '', refreshExpiresAt: null, scope: null, connectedAt: null }; }
         },
         save({ apiBase, refreshToken, refreshExpiresAt, scope, connectedAt, refreshAttempt = null }) {
+          if (apiBase && String(apiBase).trim().replace(/\/+$/, "") !== DEFAULT_API_BASE) return false;
           try {
             storage?.setItem(key, JSON.stringify({
-              apiBase: String(apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, ''),
+              apiBase: DEFAULT_API_BASE,
               refreshToken: String(refreshToken || ''), refreshExpiresAt: refreshExpiresAt || null, scope: scope || null, connectedAt: connectedAt || null,
               ...(refreshAttempt && refreshAttempt.requestId ? { refreshAttempt: { requestId: String(refreshAttempt.requestId), at: refreshAttempt.at || null } } : {}),
             }));
@@ -11081,25 +11078,14 @@
           } catch (e) { return false; }
         },
         clear() { try { storage?.removeItem(key); } catch (e) { } },
-        /**
-         * 接続情報（Refresh Token・scope・期限・進行中の refresh）だけを消し、接続先（apiBase）は残す。
-         * 2026-10-05 の実機: staging に接続していて Refresh が拒否されたとき clear() で接続先も消え、既定の production に戻ったまま
-         * ［Nest Rec AIに接続］が production へ送られた。接続先は利用者（運用者）が選んだ設定で、credential ではない
-         */
+        /** 本番接続だけを解除する。旧検証環境の記録は触らない。 */
         clearTokens() {
           try {
             const raw = storage?.getItem(key); const j = raw ? JSON.parse(raw) : {};
-            if (j && typeof j.apiBase === 'string' && j.apiBase) storage?.setItem(key, JSON.stringify({ apiBase: j.apiBase }));
+            if (j.apiBase && String(j.apiBase).trim().replace(/\/+$/, "") !== DEFAULT_API_BASE) return;
+            if (j && typeof j.apiBase === 'string' && j.apiBase) storage?.setItem(key, JSON.stringify({ apiBase: DEFAULT_API_BASE }));
             else storage?.removeItem(key);
           } catch (e) { try { storage?.removeItem(key); } catch (e2) { } }
-        },
-        /** 旧形式（Customer Token を localStorage に保存）を 1 回だけ取り出して削除する（exchange に使う） */
-        takeLegacyCustomerToken() {
-          try {
-            const raw = storage?.getItem(legacyKey); if (!raw) return null;
-            const j = JSON.parse(raw); storage?.removeItem(legacyKey);
-            return j?.customerToken ? { customerToken: String(j.customerToken), apiBase: String(j.apiBase || DEFAULT_API_BASE) } : null;
-          } catch (e) { return null; }
         },
         hasConsent(version = '1') { try { return storage?.getItem(`${CONSENT_KEY}.${host}`) === version; } catch (e) { return false; } },
         setConsent(on, version = '1') { try { if (on) storage?.setItem(`${CONSENT_KEY}.${host}`, version); else storage?.removeItem(`${CONSENT_KEY}.${host}`); } catch (e) { } },
@@ -11437,10 +11423,10 @@
     }
 
     /**
-     * @param {object} p apiBase（必須）/ customerToken（固定 token。staging 等）または getToken()（短命 Access Token の供給。async 可）/
+     * @param {object} p apiBase / accessToken or getToken (short-lived access token)
      *   onAuthExpired()（AUTH_TOKEN_EXPIRED のとき 1 回だけ呼んで再試行。Refresh に使う）/ hostname / transport / timeoutMs / pluginVersion
      */
-    function createAiClient({ apiBase, customerToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs: timeoutOpt = undefined, longTimeoutMs: longOpt = undefined, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
+    function createAiClient({ apiBase, accessToken = null, getToken = null, onAuthExpired = null, hostname = null, transport = null, timeoutMs: timeoutOpt = undefined, longTimeoutMs: longOpt = undefined, pluginVersion = SCRIPT_VERSION, nowFn = null } = {}) {
       // 既定: 質問・接続は 60 秒、計画・コード生成は 240 秒（Phase 21: 推論モデル）。timeoutMs だけを指定したときは両方その値（テスト・旧呼び出しの互換）
       const timeoutMs = timeoutOpt ?? 60000;
       //   §0f.3 の 3（2026-10-09）: 長い要求（仮案・逐次表示の質問・計画・生成）の打ち切り。明示した longTimeoutMs・timeoutMs を優先し（テスト・旧呼び出しの互換）、
@@ -11448,9 +11434,10 @@
       const longFor = (deadlineMs) => (longOpt != null ? longOpt : timeoutOpt != null ? timeoutOpt : (clientLimitFromDeadline(deadlineMs) ?? CLIENT_LIMIT_DEFAULT_MS));
       if (!apiBase || !String(apiBase).trim()) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'apiBase は必須です' });
       const base = String(apiBase).replace(/\/+$/, '');
+      if (!transport && base !== DEFAULT_API_BASE) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: '接続先を変更することはできません' });
       const send = transport || createDefaultTransport();
       const domain = hostname ?? (typeof location !== 'undefined' ? location.hostname : '');
-      const resolveToken = async () => (typeof getToken === 'function' ? await getToken() : customerToken);
+      const resolveToken = async () => (typeof getToken === 'function' ? await getToken() : accessToken);
       const headers = (withJson, token) => {
         const h = { 'X-Kintone-Domain': domain };
         if (token != null && token !== '') h['Authorization'] = `Bearer ${String(token).trim()}`;
@@ -11595,16 +11582,12 @@
         },
         /** GET /v2/health */
         getHealth: () => request({ path: '/v2/health', method: 'GET', body: '' }),
-        /**
-         * POST /v2/token/exchange（docs/contracts/14）。customer_token grant は Bearer に Customer Token、
-         * refresh_token grant は body に Refresh Token（Bearer 無し）。戻り値の token は呼び出し側が保持する
-         */
-        exchange: ({ grantType, customerToken: ct = null, refreshToken = null, product = PRODUCT, feature = FEATURES.join(','), requestId = null }) => rawRequest({
-          path: '/v2/token/exchange', method: 'POST',
-          token: grantType === 'customer_token' ? ct : null,
-          // requestId（Phase 8.5）: refresh 要求ごとの idempotency key。応答を受け取れなかった再送は同じ値を送ると同じ pair が返る
-          body: JSON.stringify({ grantType, product, feature, ...(grantType === 'refresh_token' ? { refreshToken, ...(requestId ? { requestId } : {}) } : {}) }),
-        }),
+        /** Refresh Tokenの更新。新規接続は会員承認フローを使う。 */
+        exchange: ({ grantType, refreshToken = null, product = PRODUCT, feature = FEATURES.join(','), requestId = null }) => {
+          if (grantType !== 'refresh_token') throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: 'Nest Recの会員認証から接続してください' });
+          return rawRequest({ path: '/v2/token/exchange', method: 'POST', token: null,
+            body: JSON.stringify({ grantType, product, feature, refreshToken, ...(requestId ? { requestId } : {}) }) });
+        },
         /** tokenless connect（docs/contracts/15）。start / status / complete は認証なし、disconnect は Refresh Token（body）*/
         connectStart: ({ codeChallenge, product = PRODUCT, feature = FEATURES.join(','), clientVersion = pluginVersion }) => rawRequest({
           path: '/v2/connect/start', method: 'POST', token: null,
@@ -11671,10 +11654,11 @@
     }
 
     /**
-     * 接続セッション（Phase 5）。Customer Token → exchange → Access Token（memory）＋ Refresh Token（store）。
+     * 会員承認による接続。短命Access Tokenはメモリー、Refresh Tokenはstore。
      * @param {object} p store（createSettingsStore 互換）/ hostname / transport / nowFn / apiBase（省略時は store の値）
      */
     function createSession({ store, hostname = null, transport = null, nowFn = null, apiBase = null, pluginVersion = SCRIPT_VERSION, timeoutMs = undefined, locks = undefined } = {}) {
+      if (apiBase && String(apiBase).replace(/\/+$/, "") !== DEFAULT_API_BASE) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: "接続先を変更することはできません" });
       const now = () => (nowFn ? nowFn() : Date.now());
       let access = { token: null, expiresAt: null };   // memory のみ
       let refreshing = null;                            // 同時更新の抑止（このタブの中）
@@ -11686,8 +11670,8 @@
       const withRefreshLock = (fn) => (lockApi ? lockApi.request(`ktAi.refresh:${store && store.name ? store.name : 'default'}`, { mode: 'exclusive' }, fn) : fn());
       // 接続情報を消すときも接続先（apiBase）は残す（消すと既定の production に戻る）
       const clearTokens = () => { if (typeof store.clearTokens === 'function') store.clearTokens(); else store.clear(); };
-      const cfg = () => store.load();
-      const base = () => apiBase || cfg().apiBase || DEFAULT_API_BASE;
+      const cfg = () => { const c = store.load(); return c.apiBase && String(c.apiBase).replace(/\/+$/, "") !== DEFAULT_API_BASE ? { apiBase: DEFAULT_API_BASE, refreshToken: "" } : c; };
+      const base = () => DEFAULT_API_BASE;
       const clientOpts = () => ({ apiBase: base(), hostname, transport, pluginVersion, ...(timeoutMs != null ? { timeoutMs } : {}) });
       const bare = () => createAiClient(clientOpts());
 
@@ -11754,22 +11738,9 @@
       return {
         /** connect flow（PKCE）で発行された pair を取り込む（Customer Token は存在しない） */
         adopt(ex, { apiBase: ab = null } = {}) {
-          if (ab) store.save({ ...cfg(), apiBase: ab });
+          if (ab && String(ab).replace(/\/+$/, "") !== DEFAULT_API_BASE) throw new AiClientError({ code: ERROR_CODES.INVALID_ENVELOPE, message: "接続先を変更することはできません" });
           persist(ex);
           return this.status();
-        },
-        /** 開発・運用者向け: Customer Token で接続（1 回だけ送り、保存しない。本番 UI には出さない） */
-        async connect(customerToken, { apiBase: ab = null } = {}) {
-          if (ab) store.save({ ...cfg(), apiBase: ab });
-          const ex = await bare().exchange({ grantType: 'customer_token', customerToken: String(customerToken || '').trim() });
-          persist(ex);
-          return this.status();
-        },
-        /** 旧形式（localStorage の Customer Token）があれば exchange して移行する。無ければ false */
-        async migrateLegacy() {
-          const legacy = store.takeLegacyCustomerToken();
-          if (!legacy) return false;
-          try { await this.connect(legacy.customerToken, { apiBase: legacy.apiBase }); return true; } catch (e) { return false; }
         },
         /** 接続解除: memory の Access・local の Refresh を消し、Gateway 側でも family を失効する（best-effort） */
         async disconnect() {
@@ -11806,10 +11777,6 @@
       return { verifier, challenge: b64url(new Uint8Array(digest)) };
     }
     const CONNECT_MAX_TRANSIENT = 5;
-    /** 開発モード（Customer Token 入力の旧方式を表示する）。本番 UI では非表示 */
-    function isDevMode() {
-      try { return typeof localStorage !== 'undefined' && localStorage.getItem('ktAi.devMode') === '1'; } catch (e) { return false; }
-    }
     /**
      * 接続フロー: start → 承認ページを別タブで開く → status を polling → complete（PKCE）→ session.adopt
      * @param {object} p session（createSession）/ hostname / transport / nowFn / sleep / openUrl(url) → opened:boolean / pluginVersion / cryptoObj
@@ -11886,670 +11853,9 @@
       createSettingsStore, createDefaultTransport,
       buildAskEnvelope, buildPlanEnvelope, buildGenerateEnvelope, capabilityFromHealth, limitsFromHealth, clientLimitFromDeadline, RECEIVE_MARGIN_MS, CLIENT_LIMIT_MAX_MS, CLIENT_LIMIT_DEFAULT_MS, LATE_TIMER_MS, RESUME_GRACE_MS, receive, CONVERSATION_MARKS, PLANNER_MARKS, GENERATOR_MARKS, createAiClient, createSession, newRequestId, isPurePlatformQuestion,
       FEATURE_GENERATOR, GENERATOR_PROMPT_VERSION,
-      createPkce, createConnectFlow, isDevMode,
+      createPkce, createConnectFlow,
     };
   })();
-
-  // ==========================================
-  // 3.5b 検証の費用の確保（KTAiBudget。設計 §0f.4・2026-10-09）
-  //   検証用の最小の制御（既定は無効で今と同じ動作。製品の料金体系ではない）。設定は localStorage の ktAi.budget.v1.<host> = { id, limitUsd, maxCalls, createdAt }
-  //   （configure で新規枠を設定。無ければ無効）。記録は ktAi.budgetLedger.v1.<host>.<id> に要求ごとの状態・確保額・token の数だけ（本文・Context・発言は入れない）。
-  //   送信の直前に「記録済みの費用 ＋ 進行中・終了不明の確保額 ＋ 次の要求の最大費用 ≤ limitUsd」と「同じく AI の呼び出しの回数（内部の呼び出しを含む最大）≤ maxCalls」を
-  //   判定し、超えるなら送らない（AiClientError BUDGET_EXCEEDED。会話は送信の停止 halt の budget）。最大費用は送る Context のバイト数・出力の上限（health の limits が
-  //   あればその値・無ければ表）・内部の呼び出しの最大・単価の表から保守的に見積もる（キャッシュ命中を前提にしない）。応答で精算し、使用量が分からない呼び出しの確保は解放しない。
-  //   設定があるのに記録を読めない・壊れているときは送らない。複数のタブは Web Locks で 1 つずつ判定する
-  // ==========================================
-  const KTAiBudget = (() => {
-    const { AiClientError, ERROR_CODES } = KTAiClient;
-    const CONFIG_PREFIX = 'ktAi.budget.v1', LEDGER_PREFIX = 'ktAi.budgetLedger.v1', LEDGER_VERSION = 1;
-    const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-    /** OpenAI Standard単価（2026-10-27、米ドル/100万token）。予約は読取割引に頼らず書込の最大単価を使う。 */
-    const PRICES = Object.freeze({
-      'gpt-6-astra': Object.freeze({ input: 10, output: 50, cachedInput: 1, cacheWrite30m: 12.5, cacheWrite12h: 25, longThreshold: 272000 }),
-      'gpt-6.1-sol': Object.freeze({ input: 2, output: 10, cachedInput: 0.1, cacheWrite30m: 2.5, cacheWrite12h: 5, longThreshold: 272000 }),
-      'gpt-6-luna': Object.freeze({ input: 0.1, output: 0.5, cachedInput: 0.01, cacheWrite30m: 0.125, cacheWrite12h: 0.25, longThreshold: 272000 }),
-      'gpt-6.1-terra': Object.freeze({ input: 1, output: 5, cachedInput: 0.05, cacheWrite30m: 1.25, cacheWrite12h: 2.5, longThreshold: 272000 }),
-    });
-    /** 送る要求の種類 → Gateway の feature（表に無い種類は送らない） */
-    const FEATURE_OF = Object.freeze({ ask: 'assistant-qa', propose: 'assistant-qa', plan: 'change-planner', generate: 'customization-generator' });
-    /** feature ごとのモデル（health の limits が無い古い Gateway のとき。staging の値） */
-    const DEFAULT_MODEL = Object.freeze({ 'assistant-qa': 'gpt-6.1-sol', 'change-planner': 'gpt-6.1-sol', 'customization-generator': 'gpt-6.1-sol' });
-    /** 出力の上限（staging の値: 会話 4,000・計画 48,000・生成 32,000）。health の limits.features[].maxOutputTokens があればその値（Gateway が実際に使う上限） */
-    const OUTPUT_LIMITS = Object.freeze({ 'assistant-qa': 4000, 'change-planner': 48000, 'customization-generator': 32000 });
-    /** 1 回の要求の中の AI の呼び出しの最大（会話・仮案 1・計画の全体 1・差分 2（差分 → 全体）・生成 1 ＋ 修復 2）。health の maxAiCalls があれば大きい方（計画の全体は 1 のまま） */
-    const MAX_CALLS = Object.freeze({ ask: 1, propose: 1, 'plan-full': 1, 'plan-patch': 2, generate: 3 });
-    /**
-     * Gatewayの固定指示とschemaのバイト数に余裕を足した推定。2026-10-27の固定素材測定を反映。
-     * 本文の実サイズはGatewayで確認する。Toolkit側の値を実際の入力上界と保証しない。
-     */
-    const PROMPT_BYTES = Object.freeze({ ask: 18000, propose: 55000, 'plan-full': 110000, 'plan-patch': 120000, generate: 40000 });
-    /** 送る Context は Gateway で字下げ・カタログが足される（計画で約 1.25 倍）。入力 token はバイト数 / 2（実機の計画で実際の約 2 倍）。修復の入力には前の出力と指摘が足される */
-    const CTX_FACTOR = 1.3, BYTES_PER_TOKEN = 2, REPAIR_EXTRA_TOKENS = 4000;
-    const STATUSES = Object.freeze(['in-flight', 'done', 'partial-unknown', 'unknown', 'released']);
-    const round6 = (x) => Math.round(Number(x) * 1e6) / 1e6;
-    const num = (v) => (v == null || v === '' || typeof v === 'boolean' || !Number.isFinite(Number(v)) ? null : Number(v));
-    const safeJson = (v) => { try { return JSON.stringify(v) || ''; } catch (e) { return ''; } };
-    const utf8Bytes = (s) => {
-      const t = String(s || '');
-      if (typeof TextEncoder !== 'undefined') { try { return new TextEncoder().encode(t).length; } catch (e) { } }
-      let n = 0; for (const ch of t) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n;
-    };
-    /** 単価（表のモデル名か、その日付つきの版 name-YYYY-MM-DD）。表に無ければ null */
-    function priceOf(model) {
-      const m = typeof model === 'string' ? model.trim() : '';
-      if (!m) return null;
-      if (own(PRICES, m)) return PRICES[m];
-      const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(m);
-      return d && own(PRICES, d[1]) ? PRICES[d[1]] : null;
-    }
-    /** healthで明示されたtierを使う。古いhealthの未指定だけStandardとして扱う。 */
-    const SERVICE_TIER_FACTORS = Object.freeze({ default: 1, fast: 2, priority: 2 });
-    function tierPriceOf(model, serviceTier = null) {
-      const price = priceOf(model), factor = serviceTier == null ? 1 : SERVICE_TIER_FACTORS[serviceTier];
-      if (!price || !factor || !own(SERVICE_TIER_FACTORS, serviceTier == null ? 'default' : serviceTier)) return null;
-      return factor === 1 ? price : { ...price, input: price.input * factor, output: price.output * factor,
-        cachedInput: price.cachedInput * factor, cacheWrite30m: price.cacheWrite30m * factor, cacheWrite12h: price.cacheWrite12h * factor };
-    }
-    const boundUsdOf = (price, input, output) => {
-      const long = input > price.longThreshold;
-      return Math.ceil(input * price.cacheWrite12h * (long ? 2 : 1) + output * price.output * (long ? 1.5 : 1)) / 1e6;
-    };
-    // Missing or inconsistent cache details are unknown, never zero-priced.
-    function usageCostUsd(price, c) {
-      if (!price || !c) return null;
-      const counts = [c.input, c.output, c.cached, c.cacheWrite, c.cacheWrite30m, c.cacheWrite12h];
-      if (!counts.every(n => Number.isSafeInteger(n) && n >= 0) || c.cached + c.cacheWrite > c.input || c.cacheWrite30m + c.cacheWrite12h !== c.cacheWrite || (c.reasoning != null && c.reasoning > c.output)) return null;
-      const long = c.input > price.longThreshold;
-      const inputCost = (c.input - c.cached - c.cacheWrite) * price.input + c.cached * price.cachedInput + c.cacheWrite30m * price.cacheWrite30m + c.cacheWrite12h * price.cacheWrite12h;
-      const micro = Math.ceil(inputCost * (long ? 2 : 1) + c.output * price.output * (long ? 1.5 : 1));
-      return Number.isSafeInteger(micro) ? micro / 1e6 : null;
-    }
-    /**
-     * 次の要求の最大費用（キャッシュの割引なし）。kind = ask / propose / plan / generate。ctx = 送る Context（バイト数だけを使う）。
-     *   limits = health の limits（limitsFromHealth の形。features[feature] の model・maxOutputTokens・maxAiCalls）。表に無いモデル・種類は ok: false
-     * @returns {{ ok:true, kind, feature, mode, model, price, maxOutputTokens, ctxBytes, calls:Array<{kind,input,output,usd}>, maxCalls, maxUsd, maxCallUsd } | { ok:false, reason, ... }}
-     */
-    function requestModelOf(feature, lf, ctx) {
-      const purpose = feature !== 'assistant-qa' ? null : ctx?.businessSnapshot || ctx?.focus?.target?.type === 'business-understanding' ? 'business' : ctx?.focus?.target?.type === 'app-diagnosis' ? 'diagnosis' : ['consultation', 'document', 'ideation'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
-      const model = purpose && lf?.modelsByPurpose?.[purpose] || lf?.model;
-      return typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_MODEL[feature];
-    }
-    function requestServiceTierOf(feature, lf, ctx) {
-      const purpose = feature !== 'assistant-qa' ? null : ctx?.businessSnapshot || ctx?.focus?.target?.type === 'business-understanding' ? 'business' : ctx?.focus?.target?.type === 'app-diagnosis' ? 'diagnosis' : ['consultation', 'document', 'ideation'].includes(ctx?.requestPurpose) ? ctx.requestPurpose : null;
-      const tier = purpose && lf?.serviceTiersByPurpose && own(lf.serviceTiersByPurpose, purpose) ? lf.serviceTiersByPurpose[purpose] : lf?.serviceTier;
-      return tier == null ? null : typeof tier === 'string' ? tier.trim() : '';
-    }
-    function estimate({ kind, ctx = null, limits = null, ctxBytes = null } = {}) {
-      const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
-      if (!feature) return { ok: false, reason: 'unknown-feature', kind: String(kind || '').slice(0, 40) };
-      const lfs = limits && limits.features && typeof limits.features === 'object' ? limits.features : null;
-      const lf = lfs && lfs[feature] && typeof lfs[feature] === 'object' ? lfs[feature] : null;
-      const model = requestModelOf(feature, lf, ctx);
-      if (!priceOf(model)) return { ok: false, reason: 'unknown-model', kind, feature, model: String(model || '').slice(0, 60) };
-      const serviceTier = requestServiceTierOf(feature, lf, ctx), price = tierPriceOf(model, serviceTier);
-      if (!price) return { ok: false, reason: 'unknown-service-tier', kind, feature, model, serviceTier };
-      //   レビューの指摘（2026-10-09・費用の見積もり）: 出力の上限は health の limits.features[feature].maxOutputTokens（Gateway が実際に使う上限）があればその値、
-      //   無ければ表の値（以前は大きい方）。応答の設定の上限がこの値を超えたら以後を止める（settle が見積もりに使った値と比べる）
-      const purpose = feature !== 'assistant-qa' ? null : ctx?.businessSnapshot || ctx?.focus?.target?.type === 'business-understanding' ? 'business' : ctx?.focus?.target?.type === 'app-diagnosis' ? 'diagnosis' : ctx?.requestPurpose;
-      const hOut = lf ? num(lf.maxOutputTokensByPurpose?.[purpose] ?? lf.maxOutputTokens) : null;
-      const maxOut = hOut && hOut > 0 ? Math.ceil(hOut) : OUTPUT_LIMITS[feature];
-      const hCallsRaw = lf ? num(lf.maxAiCalls) : null;
-      const hCalls = hCallsRaw && hCallsRaw > 0 ? Math.floor(hCallsRaw) : 0;
-      const bytes = num(ctxBytes) != null ? num(ctxBytes) : utf8Bytes(safeJson(aiInputOf(ctx)));
-      const inTok = (key) => Math.ceil((PROMPT_BYTES[key] + CTX_FACTOR * bytes) / BYTES_PER_TOKEN);
-      const patch = kind === 'plan' && !!(ctx && ctx.revision && ctx.revision.mode === 'patch');
-      const mode = kind === 'plan' ? (patch ? 'plan-patch' : 'plan-full') : kind;
-      let calls = [];
-      if (kind === 'generate') {
-        const n = Math.max(MAX_CALLS.generate, hCalls), i0 = inTok('generate');
-        calls.push({ kind: 'generate', input: i0, output: maxOut });
-        for (let i = 1; i < n; i++) calls.push({ kind: 'repair', input: i0 + maxOut + REPAIR_EXTRA_TOKENS, output: maxOut });
-      } else if (patch) {
-        const n = Math.max(MAX_CALLS['plan-patch'], hCalls);
-        calls.push({ kind: 'plan-patch', input: inTok('plan-patch'), output: maxOut });
-        for (let i = 1; i < n; i++) calls.push({ kind: 'plan-full', input: inTok('plan-full'), output: maxOut });
-      } else {
-        const n = kind === 'plan' ? MAX_CALLS['plan-full'] : Math.max(MAX_CALLS[kind], hCalls);
-        for (let i = 0; i < n; i++) calls.push({ kind: mode, input: inTok(mode), output: maxOut });
-      }
-      calls = calls.map(c => ({ ...c, usd: boundUsdOf(price, c.input, c.output) }));
-      return { ok: true, kind, feature, mode, model, serviceTier, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
-    }
-    /** Gateway の上界の式のメッセージ 1 つあたりのバイト数（worker の budget.mjs の MESSAGE_OVERHEAD_BYTES と同じ）と、1 回の呼び出しのメッセージの数（指示と本文） */
-    const MESSAGE_OVERHEAD_BYTES = 64, MESSAGES_PER_CALL = 2;
-    /** 修復・全体の作り直しの入力に足す前回の出力（出力の上限の token 数 × このバイト数）と、指摘・失敗の情報の余裕（バイト） */
-    const PREV_OUTPUT_BYTES_PER_TOKEN = 2, RETRY_EXTRA_BYTES = 8000;
-    /** 送る Context を Gateway が provider への本文に入れる形（字下げ 1 の JSON を、さらに本文の JSON の文字列として入れる）のバイト数。Toolkit の推定（Gateway は一部だけを入れることもある） */
-    /** 2026-10-21: 見積もりに使う Context（AI に渡す部分）。生成の Context の動作テストに使う既存 JS の本文（verification.relatedFiles[].text）は生成の AI の指示文に入らないので数えない
-     *   （Gateway の validate-generator-context が Context の上限から除くものと同じ。要求の大きさとは別。AI版 契約 20 §21） */
-    const aiInputOf = (ctx) => (ctx && typeof ctx === 'object' && ctx.verification && typeof ctx.verification === 'object' && Array.isArray(ctx.verification.relatedFiles) ? { ...ctx, verification: { ...ctx.verification, relatedFiles: ctx.verification.relatedFiles.map(f => (f && typeof f === 'object' && typeof f.text === 'string' ? { ...f, text: '' } : f)) } } : ctx);
-    const gatewayBodyBytesOf = (ctx) => { const c = aiInputOf(ctx); let s = ''; try { s = JSON.stringify(JSON.stringify(c === undefined ? null : c, null, 1)) || ''; } catch (e) { s = safeJson(c); } return utf8Bytes(s); };
-    /**
-     * 再検証前の確認（並行の要求・2026-10-10）: 印のある Gateway（enforcement gateway）に渡す allowanceUsd の上限にする「この要求の上界の見積もり」。
-     *   Gateway の上界の式（worker の budget.mjs: (provider に送る本文のバイト数 ＋ 64 × メッセージの数) × 入力の単価 / 1e6 ＋ 出力の上限 × 出力の単価 / 1e6）に寄せた
-     *   Toolkit の推定（Gateway が強制する値ではない。provider に送る本文を Toolkit は見られない）:
-     *   入力 = 送る Context を Gateway が本文に入れる形のバイト数（gatewayBodyBytesOf。1 token を 1 バイト以上とみる Gateway と同じく、バイト数をそのまま token 数とする）
-     *   ＋ 指示と出力の schema の大きさの保守的な定数（PROMPT_BYTES）＋ 64 × 2。出力 = 出力の上限（health の limits があればその値）。
-     *   呼び出し = 内部の呼び出しの最大（estimate と同じ: 計画の差分 → 全体の作り直し・生成 ＋ 修復）。修復・作り直しの入力には前回の出力（出力の上限 × 2 バイト）と余裕を足す。
-     *   キャッシュの割引なし。金額は呼び出しごとに 1e-6 米ドルへ切り上げ
-     * @returns {{ ok:true, kind, mode, model, maxOutputTokens, bodyBytes, calls:Array<{kind,inputBytes,output,usd}>, maxCalls, maxUsd } | { ok:false, reason }}
-     */
-    function gatewayBound({ kind, ctx = null, limits = null, bodyBytes = null } = {}) {
-      const e = estimate({ kind, ctx, limits, ctxBytes: 0 });
-      if (!e.ok) return e;
-      const price = tierPriceOf(e.model, e.serviceTier);
-      const body = num(bodyBytes) != null ? num(bodyBytes) : gatewayBodyBytesOf(ctx);
-      const patch = kind === 'plan' && !!(ctx && ctx.revision && ctx.revision.mode === 'patch');
-      const maxOut = e.maxOutputTokens;
-      const over = MESSAGE_OVERHEAD_BYTES * MESSAGES_PER_CALL;
-      const first = PROMPT_BYTES[e.mode] + body + over;
-      const retry = (base) => base + RETRY_EXTRA_BYTES;
-      const calls = [];
-      if (kind === 'generate') {
-        calls.push({ kind: 'generate', inputBytes: first });
-        for (let i = 1; i < e.maxCalls; i++) calls.push({ kind: 'repair', inputBytes: retry(first + maxOut * PREV_OUTPUT_BYTES_PER_TOKEN) });
-      } else if (patch) {
-        calls.push({ kind: 'plan-patch', inputBytes: first });
-        for (let i = 1; i < e.maxCalls; i++) calls.push({ kind: 'plan-full', inputBytes: retry(PROMPT_BYTES['plan-full'] + body + over) });
-      } else {
-        for (let i = 0; i < e.maxCalls; i++) calls.push({ kind: e.mode, inputBytes: first });
-      }
-      const out = calls.map(c => ({ ...c, output: maxOut, usd: boundUsdOf(price, c.inputBytes, maxOut) }));
-      return { ok: true, kind, mode: e.mode, model: e.model, serviceTier: e.serviceTier, maxOutputTokens: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
-    }
-    /** 検証の上限で送らない例外（BUDGET_EXCEEDED。details.budget = { reason, needUsd, remainingUsd, needCalls, remainingCalls, limitUsd, maxCalls, ... }） */
-    function budgetError(reason, info = {}) {
-      const budget = { reason, ...info };
-      return new AiClientError({ code: ERROR_CODES.BUDGET_EXCEEDED, message: KTAiClient.errorText(ERROR_CODES.BUDGET_EXCEEDED, { details: { budget } }), details: { budget } });
-    }
-    /**
-     * AI を呼ぶ前に止まった失敗か（確保を解放してよい）。認証・契約・版・送信データの拒否・月次の上限・Gateway 自身のレート制限（detail に制限の情報がある）・
-     *   Toolkit が送る前に止めたもの（検証の上限・Context が無い・接続が無い）。応答を受けた後の Toolkit の検証の失敗（details.errors）は AI を呼んだ後
-     */
-    const PRE_AI_CODES = new Set(['AUTH_INVALID_TOKEN', 'AUTH_TOKEN_EXPIRED', 'AUTH_DOMAIN_MISMATCH', 'PRODUCT_NOT_ENTITLED', 'FEATURE_NOT_ENTITLED', 'FEATURE_NOT_IMPLEMENTED', 'UNKNOWN_PROMPT_VERSION', 'UNSUPPORTED_CONTRACT_VERSION', 'INVALID_ENVELOPE', 'INVALID_CONTEXT', 'PAYLOAD_TOO_LARGE', 'MONTHLY_LIMIT_EXCEEDED', 'BUDGET_EXCEEDED', 'CONDITION_SOURCE_UNVERIFIABLE', 'REQUIRED_EFFECTS_UNRESOLVED', 'SANDBOX_OUTDATED', 'SANDBOX_UNAVAILABLE', 'NO_CONTEXT', 'SESSION_EXPIRED', 'NOT_CONNECTED', 'NO_CONFIG']);
-    /** Gateway のエラーの本文の error.detail（無ければ null） */
-    const gatewayDetailOf = (e) => { const d = e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error.detail : null; return d && typeof d === 'object' && !Array.isArray(d) ? d : null; };
-    /**
-     * 再検証前の確認（時間切れの記録・2026-10-10）: Gateway のエラーの本文の費用の記録（形を確かめる前の値）。error.detail.budget（detail が object のとき）と、
-     *   detail が文字列の応答（502 UPSTREAM_ERROR detail "timeout"。detail を変えないため）の error.budget の両方を読む（detail.budget を先に）。無ければ null
-     */
-    const gatewayBudgetRawOf = (e) => {
-      const d = gatewayDetailOf(e);
-      if (d && d.budget && typeof d.budget === 'object') return d.budget;
-      const er = e && e.details && e.details.error && typeof e.details.error === 'object' ? e.details.error : null;
-      return er && er.budget && typeof er.budget === 'object' && !Array.isArray(er.budget) ? er.budget : null;
-    };
-    /**
-     * 2026-10-10（再検証前の指示 §4）: Gateway の BUDGET_EXCEEDED が AI を呼んだ後のものか（stage が first でない＝計画の差分の後の全体の作り直しを止めたなど、
-     *   または費用の記録（detail.budget・error.budget）に呼び出しの記録がある）。AI を呼んだ後なら確保を解放しない（費用の記録で精算する）
-     */
-    const gatewayBudgetAfterAi = (e) => { const d = gatewayDetailOf(e); const b = gatewayBudgetRawOf(e); return !!((d && typeof d.stage === 'string' && d.stage !== 'first') || (b && Array.isArray(b.calls) && b.calls.length > 0)); };
-    function preAiOf(e) {
-      if (!e || typeof e !== 'object') return false;
-      const code = typeof e.code === 'string' ? e.code : '';
-      //   2026-10-15（ページ期限切れへの対応）: Access Token の取得・更新で止まった（KTAiClient の request が付ける tokenStage）。要求は Gateway へ送っていないので、
-      //   有料の呼び出しを 1 回実行した扱いにしない（確保を解放する）。ページの有効期限（PAGE_EXPIRED）での接続の更新の失敗もここに入る
-      if (e.tokenStage === true) return true;
-      if (e.details && Array.isArray(e.details.errors)) return false;
-      if (code === ERROR_CODES.BUDGET_EXCEEDED && gatewayBudgetAfterAi(e)) return false;
-      if (PRE_AI_CODES.has(code)) return true;
-      if (code === 'RATE_LIMITED') { const d = e.details && e.details.error ? e.details.error.detail : null; return !!(d && typeof d === 'object'); }
-      return false;
-    }
-    /** 検証の上限で送らなかった（Toolkit が止めた・Gateway が最初の呼び出しの前に止めた）。Gateway が AI を呼んだ後に止めたものは送った要求 */
-    const notSentOf = (e) => !!(e && typeof e === 'object' && e.code === ERROR_CODES.BUDGET_EXCEEDED && !gatewayBudgetAfterAi(e));
-    /**
-     * 再検証前の確認（並行の要求・2026-10-10）: Gateway が最初の呼び出しの前に、渡した allowanceUsd を上界が超えるので止めた（BUDGET_EXCEEDED・stage first・AI を呼んでいない）か。
-     *   渡した額を増やせば通りうるもの（理由が over-allowance か無い）だけ。表に無いモデル・上界を計算できない（unknown-model / unknown-bound）・Toolkit が止めたものは false
-     */
-    const gatewayFirstOverOf = (e) => {
-      if (!e || typeof e !== 'object' || e.code !== ERROR_CODES.BUDGET_EXCEEDED || gatewayBudgetAfterAi(e)) return false;
-      const d = gatewayDetailOf(e);
-      return !!(d && d.stage === 'first' && (d.reason == null || d.reason === 'over-allowance'));
-    };
-    /**
-     * 2026-10-10（再検証前の指示 §4）: Gateway の費用の記録 meta.budget（エラーの本文では error.detail.budget）= { allowanceUsd, spentUsd, complete, calls: [{ kind, boundUsd, costUsd|null }] }。
-     *   形が正しいときだけ返す（無ければ null）。金額は有限・0 以上
-     */
-    function budgetMetaOf(m) {
-      if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
-      const fin = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
-      if (!fin(m.spentUsd) || !Array.isArray(m.calls) || typeof m.complete !== 'boolean') return null;
-      const calls = m.calls.filter(c => c && typeof c === 'object').slice(0, 20).map(c => ({ kind: typeof c.kind === 'string' ? c.kind.slice(0, 40) : null, boundUsd: fin(c.boundUsd) ? c.boundUsd : null, costUsd: fin(c.costUsd) ? c.costUsd : null, ...(typeof c.model === 'string' ? { model: c.model.slice(0, 60) } : {}), ...serviceTierAuditOf(c), ...(typeof c.costReason === 'string' ? { costReason: c.costReason.slice(0, 80) } : {}), ...(c.usage ? { usage: tokensOfUsage(c.usage) } : {}), ...(KTReleaseUsageDiagnostics.sanitize(c.usageDiagnostics) ? { usageDiagnostics: KTReleaseUsageDiagnostics.sanitize(c.usageDiagnostics) } : {}) }));
-      return { allowanceUsd: fin(m.allowanceUsd) ? m.allowanceUsd : null, spentUsd: m.spentUsd, complete: m.complete === true && calls.every(c => c.costUsd != null), calls };
-    }
-    /**
-     * 2026-10-10（再検証前の指示 §4）: この要求の費用の上限を Gateway が強制できるか。health の limits.budgetAllowance（version 1）があり、その feature のモデル（limits.features の model、
-     *   無ければ表の既定）が印の models にあるときだけ 'gateway'（envelope に budget: { allowanceUsd } を付ける）。それ以外は 'estimate'（Toolkit の推定による送信制限だけ。上限の強制は無い）
-     */
-    function enforcementOf(limits, kind, ctx = null) {
-      const ba = limits && limits.budgetAllowance && typeof limits.budgetAllowance === 'object' ? limits.budgetAllowance : null;
-      if (!ba || ba.version !== 1 || !Array.isArray(ba.models)) return 'estimate';
-      const feature = typeof kind === 'string' && own(FEATURE_OF, kind) ? FEATURE_OF[kind] : null;
-      if (!feature) return 'estimate';
-      const lf = limits.features && limits.features[feature] && typeof limits.features[feature] === 'object' ? limits.features[feature] : null;
-      const model = requestModelOf(feature, lf, ctx);
-      const base = (m) => { const d = /^(.+)-\d{4}-\d{2}-\d{2}$/.exec(String(m || '')); return d ? d[1] : String(m || ''); };
-      return ba.models.some(m => m === model || base(m) === base(model)) ? 'gateway' : 'estimate';
-    }
-    /** Provider/Gatewayの使用量。欠けたキャッシュ内訳は0ではなくnull。 */
-    function tokensOfUsage(u) {
-      if (!u || typeof u !== 'object') return null;
-      const count = v => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
-      const pick = (o, keys) => { for (const key of keys) if (own(o, key)) return o[key]; };
-      const input = count(pick(u, ['input_tokens', 'prompt_tokens', 'inputTokens']));
-      const output = count(pick(u, ['output_tokens', 'completion_tokens', 'outputTokens']));
-      if (input == null || output == null) return null;
-      const d = u.input_tokens_details || u.prompt_tokens_details || {}, wd = d.cache_write_tokens_details || {};
-      const cached = count(own(d, 'cached_tokens') ? d.cached_tokens : pick(u, ['cache_read_input_tokens', 'cachedTokens']));
-      const cacheWrite = count(own(d, 'cache_write_tokens') ? d.cache_write_tokens : u.cacheWriteTokens);
-      const ttlCount = (key, alias) => own(wd, key) ? count(wd[key]) : own(u, alias) ? count(u[alias]) : cacheWrite === 0 ? 0 : null;
-      const cacheWrite30m = ttlCount('ttl_30m_tokens', 'cacheWriteTokens30m');
-      const cacheWrite12h = ttlCount('ttl_12h_tokens', 'cacheWriteTokens12h');
-      const od = u.output_tokens_details || u.completion_tokens_details || {};
-      const reasoning = count(own(od, 'reasoning_tokens') ? od.reasoning_tokens : u.reasoningTokens);
-      return { input, cached, output, cacheWrite, cacheWrite30m, cacheWrite12h, reasoning };
-    }
-    /**
-     * 応答 → 1 回の要求の中の AI の呼び出しごとの token（分からない呼び出しは null）。生成は meta.timing の calls（呼び出しごと。無ければ最初の生成と最後の修復と修復の回数）、
-     *   計画は差分から全体に切り替えたとき差分の試み（patchAttempt）と全体の 2 回、ほかは 1 回
-     */
-    function callsOf(kind, r) {
-      if (!r || typeof r !== 'object') return [null];
-      const first = tokensOfUsage(r.ai && r.ai.usage);
-      if (kind === 'generate') {
-        const tm = r.timing && typeof r.timing === 'object' ? r.timing : null;
-        const declared = tm && tm.ai ? num(tm.ai.count) : null;
-        const tc = tm && Array.isArray(tm.calls) ? tm.calls.filter(c => c && typeof c === 'object') : [];
-        let out;
-        if (tc.length) {
-          out = tc.map(c => tokensOfUsage(c));
-        } else {
-          const nRep = num(r.verification && r.verification.repairs && r.verification.repairs.count) || 0;
-          out = [first];
-          if (nRep > 0) { for (let i = 1; i < nRep; i++) out.push(null); out.push(tokensOfUsage(r.aiRepair && r.aiRepair.usage)); }
-        }
-        while (declared != null && out.length < declared) out.push(null);
-        return out;
-      }
-      if (kind === 'plan') {
-        const rm = r.revisionMeta && typeof r.revisionMeta === 'object' ? r.revisionMeta : null;
-        if (rm && rm.patchAttempt && typeof rm.patchAttempt === 'object') return [tokensOfUsage(rm.patchAttempt.usage), first];
-      }
-      return [first];
-    }
-    const serviceTierAuditOf = (meta) => {
-      const audit = Object.fromEntries(['requestedServiceTier', 'serviceTier'].filter(key => meta && own(meta, key)).map(key => [key, typeof meta[key] === 'string' ? meta[key].slice(0, 40) : null]));
-      const requested = meta?.settings?.requestedServiceTier;
-      if (audit.requestedServiceTier == null && requested != null) audit.requestedServiceTier = typeof requested === 'string' ? requested.slice(0, 40) : null;
-      return audit;
-    };
-    /** ローカル精算の呼び出しごとのtier。最後の修復のtierを前の呼び出しに流用しない。 */
-    function callTierMetadataOf(kind, r, count) {
-      let source = [r?.ai];
-      if (kind === 'generate') {
-        const tc = Array.isArray(r?.timing?.calls) ? r.timing.calls.filter(c => c && typeof c === 'object') : [];
-        if (tc.length) source = tc;
-        else if (count > 1) source = [r?.ai, ...Array(Math.max(0, count - 2)).fill(null), r?.aiRepair];
-      } else if (kind === 'plan' && r?.revisionMeta?.patchAttempt) source = [r.revisionMeta.patchAttempt, r?.ai];
-      return Array.from({ length: count }, (_, i) => serviceTierAuditOf(source[i]));
-    }
-    const configKeyOf = (host) => `${CONFIG_PREFIX}.${host}`;
-    const ledgerKeyOf = (host, id) => `${LEDGER_PREFIX}.${host}.${id}`;
-    /** 再検証前の指示 §3（2026-10-10）: このページ（タブ）で検証の上限が一度有効だった印の sessionStorage のキー（値は設定の id と作った日時だけ） */
-    const ARMED_PREFIX = 'ktAi.budgetArmed.v1';
-    const armedKeyOf = (host) => `${ARMED_PREFIX}.${host}`;
-    function parseConfig(raw) {
-      let j = null; try { j = JSON.parse(raw); } catch (e) { return null; }
-      if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
-      const id = typeof j.id === 'string' ? j.id.trim() : '';
-      const limitUsd = num(j.limitUsd), maxCalls = num(j.maxCalls);
-      const createdAt = typeof j.createdAt === 'string' ? j.createdAt.trim() : '';
-      if (!/^[A-Za-z0-9._:-]{1,64}$/.test(id) || limitUsd == null || limitUsd < 0 || maxCalls == null || maxCalls < 0 || !Number.isInteger(maxCalls) || !createdAt || createdAt.length > 64) return null;
-      return { id, limitUsd, maxCalls, createdAt };
-    }
-    //   レビューの指摘 row7（2026-10-09）: 費用が確定していない記録（進行中・終了不明・一部不明）は costUsd が null・costComplete false・costKnownUsd = 確認できた分。
-    //   前の形の記録（costUsd が数・costKnownUsd が無い）も読む
-    const validEntry = (e) => !!e && typeof e === 'object' && typeof e.key === 'string' && STATUSES.includes(e.status) && num(e.reservedUsd) != null && e.reservedUsd >= 0 && num(e.reservedCalls) != null && e.reservedCalls >= 0
-      && ((num(e.costUsd) != null && e.costUsd >= 0) || (e.costUsd === null && e.costComplete === false)) && (e.costKnownUsd === undefined || (num(e.costKnownUsd) != null && e.costKnownUsd >= 0)) && Array.isArray(e.calls);
-    /** 記録の確認できた費用（費用が確定していない記録は確認できた分だけ。前の形の記録は costUsd） */
-    const knownCostOf = (e) => (e ? (num(e.costKnownUsd) ?? num(e.costUsd) ?? 0) : 0);
-    function parseLedger(raw, config) {
-      let j = null; try { j = JSON.parse(raw); } catch (e) { return { ok: false, reason: 'ledger-broken' }; }
-      if (!j || typeof j !== 'object' || j.version !== LEDGER_VERSION || !Array.isArray(j.entries)) return { ok: false, reason: 'ledger-broken' };
-      if (j.id !== config.id || j.configCreatedAt !== config.createdAt) return { ok: false, reason: 'ledger-mismatch' };
-      if (!j.entries.every(validEntry)) return { ok: false, reason: 'ledger-broken' };
-      return { ok: true, ledger: { version: LEDGER_VERSION, id: j.id, configCreatedAt: j.configCreatedAt, entries: j.entries, stopped: j.stopped && typeof j.stopped === 'object' ? j.stopped : null } };
-    }
-    /** 記録の合計。unknown は費用未確定の総数。costUnknown は成功応答受領済み、completionUnknown は終了未確認（旧記録を含む）。金額・回数の制限は従来どおり。 */
-    function totalsOf(ledger, { sessionId = null } = {}) {
-      let recordedUsd = 0, reservedUsd = 0, usedCalls = 0, unknown = 0, costUnknown = 0, completionUnknown = 0, inFlight = 0, done = 0;
-      for (const e of (ledger && Array.isArray(ledger.entries) ? ledger.entries : [])) {
-        if (!e || e.status === 'released') continue;
-        recordedUsd += knownCostOf(e);
-        reservedUsd += e.reservedUsd || 0;
-        //   再検証前の指示 §4: Gateway の費用の記録（gatewayCalls）がある要求は、その呼び出しの数も数える（token の記録の数より多ければそちら）
-        usedCalls += e.status === 'done' || e.status === 'partial-unknown' ? Math.max(e.calls.length, Array.isArray(e.gatewayCalls) ? e.gatewayCalls.length : 0) : (e.reservedCalls || 0);
-        if (e.status === 'unknown' || e.status === 'partial-unknown' || (e.status === 'in-flight' && e.sessionId !== sessionId)) {
-          unknown += 1;
-          // 応答の受領と費用の確定は別。旧記録や切断から成功を推測しない。
-          if (e.responseState === 'succeeded' && e.status !== 'in-flight') costUnknown += 1;
-          else completionUnknown += 1;
-        }
-        else if (e.status === 'in-flight') inFlight += 1;
-        else if (e.status === 'done') done += 1;
-      }
-      return { recordedUsd: round6(recordedUsd), reservedUsd: round6(reservedUsd), usedCalls, unknown, costUnknown, completionUnknown, inFlight, done };
-    }
-    const nowIso = (nowFn) => { try { return new Date(nowFn()).toISOString(); } catch (e) { return null; } };
-    const newSessionId = () => `p-${(typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10)}`;
-    const codeOf = (e) => { const c = e && typeof e.code === 'string' ? e.code : e && e.name === 'AbortError' ? 'CANCELLED' : 'ERROR'; return /^[A-Z][A-Z0-9_]{0,39}$/.test(c) ? c : 'ERROR'; };
-    /**
-     * @param {object} p storage（localStorage 互換。既定は localStorage）/ host（既定 location.host）/ locks（Web Locks。既定 navigator.locks。無ければこのタブの中だけ）/
-     *   now（ms）/ sessionId（このページの印。読み込み直しで進行中のまま残った記録を見分ける）/
-     *   session（sessionStorage 互換。既定は sessionStorage。このページ（タブ）で検証の上限が一度有効だった印を持つ。本文・金額は入れない）
-     */
-    function create({ storage = undefined, session = undefined, host = undefined, locks = undefined, now = () => Date.now(), sessionId = null } = {}) {
-      //   再検証前の指示 §3（2026-10-10）: 保存領域そのものを取れない（localStorage の参照が例外）は「設定を読めない」（予算を使わない通常の利用と見なさない）
-      let storageThrew = false;
-      const st0 = storage !== undefined ? storage : (() => { try { return typeof localStorage !== 'undefined' ? localStorage : null; } catch (e) { storageThrew = true; return null; } })();
-      const ss0 = session !== undefined ? session : (() => { try { return typeof sessionStorage !== 'undefined' ? sessionStorage : null; } catch (e) { return null; } })();
-      const h = host !== undefined ? String(host || '') : (typeof location !== 'undefined' ? String(location.host || '') : '');
-      const lockApi = locks !== undefined ? locks : ((typeof navigator !== 'undefined' && navigator && navigator.locks && typeof navigator.locks.request === 'function') ? navigator.locks : null);
-      const sid = sessionId || newSessionId();
-      const configKey = configKeyOf(h);
-      const armedKey = armedKeyOf(h);
-      const LOCK_NAME = `ktAi.budget:${h}`;
-      let seq = 0, configurationFailure = null;
-      const listeners = new Set();
-      const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (e) { } } };
-      const withLock = (fn) => (lockApi ? Promise.resolve(lockApi.request(LOCK_NAME, { mode: 'exclusive' }, async () => fn())) : Promise.resolve().then(fn));
-      //   再検証前の指示 §3: このページで検証の上限が一度有効だった印（このページのメモリと sessionStorage。中身は設定の id と作った日時だけ）。
-      //   sessionStorage を読めない・書けないときはメモリだけ（読み込み直しでは消える）
-      let armedMem = null;
-      const armedOf = () => {
-        if (armedMem) return armedMem;
-        try { const raw = ss0 ? ss0.getItem(armedKey) : null; const j = raw ? JSON.parse(raw) : null; if (j && typeof j === 'object' && typeof j.id === 'string') return { id: j.id, createdAt: typeof j.createdAt === 'string' ? j.createdAt : '' }; } catch (e) { }
-        return null;
-      };
-      const arm = (config) => {
-        if (armedMem && armedMem.id === config.id && armedMem.createdAt === config.createdAt) return;
-        armedMem = { id: config.id, createdAt: config.createdAt };
-        try { if (ss0) ss0.setItem(armedKey, JSON.stringify(armedMem)); } catch (e) { }
-      };
-      /**
-       * 設定と記録 → { mode: disabled | broken | on }。
-       *   disabled = 予算を使わない通常の利用（設定のキーが無く、読取に成功し、このページで一度も有効になっていない。今と同じ）。
-       *   broken = 送らない: 設定の形が正しくない・記録を読めない／壊れている・設定と合わない、と、再検証前の指示 §3（2026-10-10）の「予算を使う検証で状態を確かめられない」
-       *   （設定の読取の例外 config-unreadable・このページで一度有効だった設定が消えた config-missing）。設定の読取の例外で上限なしの送信に戻さない
-       */
-      function storedState() {
-        if (!st0) return storageThrew || armedOf() ? { mode: 'broken', reason: 'config-unreadable' } : { mode: 'disabled' };
-        let raw = null;
-        try { raw = st0.getItem(configKey); } catch (e) { return { mode: 'broken', reason: 'config-unreadable' }; }
-        if (raw == null) return armedOf() ? { mode: 'broken', reason: 'config-missing' } : { mode: 'disabled' };
-        const config = parseConfig(raw);
-        if (!config) return { mode: 'broken', reason: 'config-invalid' };
-        arm(config);
-        let lraw = null;
-        try { lraw = st0.getItem(ledgerKeyOf(h, config.id)); } catch (e) { return { mode: 'broken', reason: 'ledger-unreadable', config }; }
-        if (lraw == null) return { mode: 'on', config, ledger: { version: LEDGER_VERSION, id: config.id, configCreatedAt: config.createdAt, entries: [], stopped: null } };
-        const pl = parseLedger(lraw, config);
-        return pl.ok ? { mode: 'on', config, ledger: pl.ledger } : { mode: 'broken', reason: pl.reason, config };
-      }
-      const readState = () => configurationFailure ? { mode: 'broken', reason: configurationFailure } : storedState();
-      const writeLedger = (config, ledger) => {
-        try { st0.setItem(ledgerKeyOf(h, config.id), JSON.stringify(ledger)); } catch (e) { throw budgetError('ledger-write'); }
-      };
-      /** 新規の検証枠を設定する。旧記録を消さず、進行中の要求がある間は切り替えない。 */
-      const configure = ({ limitUsd, maxCalls } = {}, mayConfigure = () => true) => withLock(() => {
-        if (!mayConfigure()) throw budgetError('conversation-active');
-        const id = `b-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${now().toString(36)}-${Math.random().toString(36).slice(2)}-${++seq}`}`;
-        const config = parseConfig(JSON.stringify({ id, limitUsd, maxCalls, createdAt: nowIso(now) }));
-        if (!config) throw budgetError('config-invalid');
-        const previous = storedState();
-        if (previous.mode === 'on' && previous.ledger.entries.some(e => e.status === 'in-flight')) throw budgetError('in-flight');
-        try {
-          if (!st0 || previous.mode === 'broken') throw budgetError(previous.reason || 'config-unreadable');
-          const key = ledgerKeyOf(h, config.id);
-          if (config.id === previous.config?.id || st0.getItem(key) != null) throw budgetError('config-write');
-          const ledger = { version: LEDGER_VERSION, id: config.id, configCreatedAt: config.createdAt, entries: [], stopped: null };
-          writeLedger(config, ledger);
-          if (st0.getItem(key) !== JSON.stringify(ledger)) throw budgetError('ledger-write');
-          st0.setItem(configKey, JSON.stringify(config));
-          const saved = storedState();
-          if (saved.mode !== 'on' || JSON.stringify(saved.config) !== JSON.stringify(config)) throw budgetError(saved.reason || 'config-write');
-          configurationFailure = null;
-          notify();
-          return summary();
-        } catch (e) {
-          configurationFailure = e?.details?.budget?.reason || 'config-write';
-          notify();
-          throw budgetError(configurationFailure);
-        }
-      });
-      /**
-       * 送信の直前の確保（記録に in-flight を書く）。超えるなら BUDGET_EXCEEDED を投げる。無効なら null。
-       *   enforcement 'estimate'（印の無い Gateway）: 確保額 = Toolkit の推定の最大費用（推定。provider に送る入力をこの値以下に制限してはいない＝上限の強制は無い）。
-       *   enforcement 'gateway'（再検証前の指示 §4。health の limits.budgetAllowance）: 残り = 上限 − 記録済みの費用（不明は確保額で数える）− ほかの進行中・終了不明の確保額。
-       *   再検証前の確認（並行の要求・2026-10-10）: allowanceUsd = min(残り, capUsd（この要求の上界の見積もり gatewayBound。無ければ残り）) を Gateway に渡し
-       *   （Gateway が provider に送る要求の上界で呼び出しの前に確かめ、超える呼び出しをしない）、この要求の確保額 = allowanceUsd（残り全額を 1 つの要求で確保しない）。残りが 0 なら送らない。
-       *   aboveUsd（送り直し）: 残り（capUsd は使わない）が aboveUsd より大きいときだけ確保し、そうでなければ { skipped: true }（記録を書かない）
-       */
-      const reserve = ({ requestId = null, kind, est, enforcement = 'estimate', capUsd = null, aboveUsd = null }) => withLock(() => {
-        const s = readState();
-        if (s.mode === 'disabled') return null;
-        //   状態を確かめられない（再検証前の指示 §3 の設定の消失・読取の例外を含む）→ 送らない。見出しの行も描き直す（設定の消失は記録を書かないので知らせる）
-        if (s.mode === 'broken') { notify(); throw budgetError(s.reason); }
-        const { config, ledger } = s;
-        if (ledger.stopped) throw budgetError('stopped', { stopReason: ledger.stopped.reason || null });
-        //   読み込み直し（このページの外）で進行中のまま残った記録は、終了不明として数える（確保は解放しない）
-        let relabeled = 0;
-        for (const e of ledger.entries) if (e.status === 'in-flight' && e.sessionId !== sid) { e.status = 'unknown'; e.reason = 'NOT_SETTLED'; relabeled += 1; }
-        if (relabeled) { writeLedger(config, ledger); notify(); }
-        const t = totalsOf(ledger, { sessionId: sid });
-        const remainingUsd = round6(config.limitUsd - t.recordedUsd - t.reservedUsd);
-        const remainingCalls = config.maxCalls - t.usedCalls;
-        const gw = enforcement === 'gateway';
-        const info = { kind, mode: gw ? 'gateway' : 'estimate', ...(gw ? {} : { needUsd: est.maxUsd }), remainingUsd, needCalls: est.maxCalls, remainingCalls, limitUsd: config.limitUsd, maxCalls: config.maxCalls };
-        if (gw ? !(remainingUsd > 1e-6) : est.maxUsd > remainingUsd + 1e-9) throw budgetError('limit', info);
-        if (est.maxCalls > remainingCalls) throw budgetError('calls', info);
-        const floor6 = (x) => Math.floor(Math.round(Number(x) * 1e9) / 1e3) / 1e6;
-        const cap = gw && aboveUsd == null && num(capUsd) != null && capUsd > 0 ? num(capUsd) : null;
-        const allowanceUsd = gw ? floor6(cap != null ? Math.min(remainingUsd, cap) : remainingUsd) : null;
-        if (gw && aboveUsd != null && !(allowanceUsd > num(aboveUsd) + 1e-6)) return { skipped: true, remainingUsd };
-        const key = `${sid}:${++seq}`;
-        ledger.entries.push({ key, requestId: typeof requestId === 'string' ? requestId.slice(0, 80) : null, feature: est.feature, kind, mode: est.mode, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}), sessionId: sid, startedAt: nowIso(now), endedAt: null, status: 'in-flight', reservedUsd: gw ? allowanceUsd : est.maxUsd, reservedCalls: est.maxCalls, maxCallUsd: est.maxCallUsd, estimatedModel: est.model, estimatedServiceTier: est.serviceTier ?? null, maxOutputTokens: est.maxOutputTokens, ctxBytes: est.ctxBytes, model: null, calls: [], costUsd: null, costKnownUsd: 0, costComplete: false, costCachedUsd: null, reason: null });
-        writeLedger(config, ledger);
-        notify();
-        return { key, enforcement: gw ? 'gateway' : 'estimate', ...(gw ? { allowanceUsd } : {}) };
-      });
-      /**
-       * 再検証前の指示 §4: Gateway の費用の記録（meta.budget・エラーの detail.budget）で精算する。complete なら done（費用 = spentUsd・確保 0）。
-       *   そうでなければ確認できた費用（costUsd のある呼び出し）を記録し、費用が分からない呼び出しはその呼び出しの上界（boundUsd）を確保に残す（呼び出しの記録どおり）。
-       *   spentUsd が渡した allowanceUsd を超えていたら（取り決めと合わない）以後を止める
-       */
-      const settleByMeta = (e, ledger, bm, kind) => {
-        const maxCalls0 = e.reservedCalls;
-        const known = bm.calls.filter(c => c.costUsd != null);
-        //   費用が分からない呼び出しの上界（boundUsd が無ければ渡した allowanceUsd）
-        const unknownBound = round6(bm.calls.filter(c => c.costUsd == null).reduce((s2, c) => s2 + (c.boundUsd != null ? c.boundUsd : (e.allowanceUsd || 0)), 0));
-        e.gatewayCalls = bm.calls.map(c => ({ ...c }));
-        if (bm.calls.some(c => own(c, 'usage'))) e.calls = bm.calls.map(c => c.usage || null);
-        e.costKnownUsd = bm.complete ? round6(bm.spentUsd) : round6(known.reduce((s2, c) => s2 + c.costUsd, 0));
-        e.status = bm.complete ? 'done' : known.length ? 'partial-unknown' : 'unknown';
-        e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? e.costKnownUsd : null;
-        if (e.status === 'done') { e.reservedUsd = 0; e.reservedCalls = bm.calls.length; }
-        else if (bm.calls.length) { e.reservedUsd = round6(e.allowanceUsd != null ? Math.min(e.allowanceUsd, unknownBound) : unknownBound); e.reservedCalls = bm.calls.length; }
-        //   呼び出しの記録が無い不完全な記録は、確保（渡した allowanceUsd）を残す（0 にしない）
-        let stop = null;
-        if (e.allowanceUsd != null && bm.spentUsd > e.allowanceUsd + 1e-6) stop = { reason: 'over-allowance' };
-        else if (bm.calls.length > maxCalls0) stop = { reason: 'calls', calls: bm.calls.length };
-        if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
-      };
-      /** 記録の 1 件を書き換える（記録を読めなければ何もしない。確保は残ったまま = 保守的） */
-      const update = (key, fn) => withLock(() => {
-        const s = readState();
-        if (s.mode !== 'on') return null;
-        const e = s.ledger.entries.find(x => x.key === key);
-        if (!e) return null;
-        fn(e, s.ledger);
-        writeLedger(s.config, s.ledger);
-        notify();
-        return { ...e };
-      });
-      /**
-       * 応答で精算: 呼び出しごとの token がそろえば done（確保を解放）、一部が無ければ partial-unknown（無い分の確保を残す）、無ければ unknown（確保を残す）。
-       *   応答のモデルが単価の表に無い・表より高い、出力の上限が見積もりより大きい、呼び出しが見積もりの最大より多いときは、以後の送信を止める（stopped）
-       */
-      //   再検証前の指示 §4: 上限を Gateway に渡した要求（enforcement gateway）は Gateway の費用の記録（meta.budget）で精算する（出力の上限は Gateway の上界に含まれる）。
-      //   記録が無ければ取り決めと合わないので以後を止め、今までの token の精算をする（確保は渡した allowanceUsd のまま残りうる＝保守的）
-      const settle = (key, { kind, response }) => update(key, (e, ledger) => {
-        e.responseState = 'succeeded'; // 成功応答を受領した事実だけを保存。費用不明分の確保は維持する。
-        const calls = callsOf(kind, response);
-        const ai = response && response.ai && typeof response.ai === 'object' ? response.ai : null;
-        const model = ai && typeof ai.model === 'string' && ai.model.trim() ? ai.model.trim().slice(0, 60) : null;
-        const est = priceOf(e.estimatedModel);
-        const got = model ? priceOf(model) : est;
-        const gw = e.enforcement === 'gateway';
-        const bm = gw ? budgetMetaOf(response && response.budgetMeta) : null;
-        Object.assign(e, serviceTierAuditOf(ai));
-        if (gw && bm) {
-          e.endedAt = nowIso(now); e.model = model;
-          e.calls = calls.map(c => c ? { ...c } : null);
-          e.costCachedUsd = null; // 旧い読取割引だけの参考値を作らず、書込を含むGatewayの合計を使う。
-          settleByMeta(e, ledger, bm, kind);
-          e.reason = null;
-          if (model && (!got || (est && (got.input > est.input || got.output > est.output))) && !ledger.stopped) ledger.stopped = { reason: 'model', model, at: nowIso(now), kind };
-          return;
-        }
-        let stop = null;
-        if (gw) stop = { reason: 'no-budget-meta' };
-        if (!stop && model && (!got || (est && (got.input > est.input || got.output > est.output)))) stop = { reason: 'model', model };
-        const mo = ai && ai.settings ? num(ai.settings.maxOutputTokens) : null;
-        if (!stop && !gw && mo != null && mo > e.maxOutputTokens) stop = { reason: 'output-limit', maxOutputTokens: mo };
-        if (!stop && calls.length > e.reservedCalls) stop = { reason: 'calls', calls: calls.length };
-        const tierMetadata = callTierMetadataOf(kind, response, calls.length);
-        const estimatedPrice = tierPriceOf(e.estimatedModel, e.estimatedServiceTier);
-        const prices = tierMetadata.map(meta => {
-          const explicitTier = e.estimatedServiceTier != null || meta.requestedServiceTier != null;
-          if (explicitTier && meta.serviceTier == null) return null;
-          return tierPriceOf(model || e.estimatedModel, meta.serviceTier);
-        });
-        if (!stop && tierMetadata.some((meta, i) => meta.serviceTier != null && (!prices[i] || (estimatedPrice && (prices[i].input > estimatedPrice.input || prices[i].output > estimatedPrice.output))))) stop = { reason: 'service-tier' };
-        const priced = !(stop && ['model', 'service-tier'].includes(stop.reason));
-        e.endedAt = nowIso(now); e.model = model;
-        e.calls = calls.map(c => c ? { ...c } : null);
-        e.callServiceTiers = tierMetadata;
-        //   レビューの指摘 row7: 確認できた費用（costKnownUsd）と、費用が確定したか（costComplete）。確定していない記録の costUsd は null（0 と読ませない）
-        const costs = calls.map((c, i) => priced ? usageCostUsd(prices[i], c) : null);
-        const knownCosts = costs.filter(c => c != null);
-        const knownUsd = round6(knownCosts.reduce((sum, cost) => sum + cost, 0));
-        e.costCachedUsd = null;
-        const nullN = calls.length - knownCosts.length;
-        e.status = !priced || !knownCosts.length ? 'unknown' : nullN ? 'partial-unknown' : 'done';
-        e.costKnownUsd = knownUsd; e.costComplete = e.status === 'done'; e.costUsd = e.costComplete ? knownUsd : null;
-        if (e.status === 'done') { e.reservedUsd = 0; e.reservedCalls = calls.length; }
-        else if (e.status === 'partial-unknown') { e.reservedUsd = round6(Math.min(e.reservedUsd, nullN * (e.maxCallUsd || 0))); e.reservedCalls = calls.length; }
-        e.reason = knownCosts.length ? null : prices.some(p => !p) ? 'INCOMPLETE_SERVICE_TIER' : 'INCOMPLETE_USAGE';
-        if (stop && !ledger.stopped) ledger.stopped = { ...stop, at: nowIso(now), kind };
-      });
-      /** 失敗で精算: AI を呼ぶ前に止まったものだけ解放し、それ以外（中断・時間切れ・切断・AI を呼んだ後のエラー）は終了不明（確保を残す） */
-      //   再検証前の指示 §4: Gateway が最初の呼び出しの前に上限で止めた（BUDGET_EXCEEDED stage first）は AI を呼んでいないので解放。上限を渡した要求で、AI を呼んだ後の
-      //   エラーの本文に Gateway の費用の記録（error.detail.budget）があれば、それで精算する（無ければ今までどおり終了不明・確保を残す）
-      //   再検証前の確認（時間切れの記録・2026-10-10）: 費用の記録は error.detail.budget と、detail が文字列の応答（502 UPSTREAM_ERROR detail "timeout"）の error.budget の両方を読み、
-      //   記録された上界で精算する（確保を渡した allowanceUsd の全額のまま残さない。使用量の分からない呼び出しはその上界を確保に残す）
-      const fail = (key, err) => update(key, (e, ledger) => {
-        e.endedAt = nowIso(now); e.reason = codeOf(err);
-        if (preAiOf(err)) { e.status = 'released'; e.reservedUsd = 0; e.reservedCalls = 0; e.costUsd = 0; e.costKnownUsd = 0; e.costComplete = true; return; }
-        const bm = e.enforcement === 'gateway' ? budgetMetaOf(gatewayBudgetRawOf(err)) : null;
-        if (bm) { settleByMeta(e, ledger, bm, e.kind); e.reason = codeOf(err); return; }
-        e.status = 'unknown'; e.costUsd = null; e.costKnownUsd = num(e.costKnownUsd) ?? 0; e.costComplete = false;
-      });
-      /** 送る前に止めた（確保の直後に取り消された）: 解放 */
-      const release = (key, code = 'CANCELLED') => update(key, (e) => { e.endedAt = nowIso(now); e.reason = code; e.status = 'released'; e.reservedUsd = 0; e.reservedCalls = 0; e.costUsd = 0; e.costKnownUsd = 0; e.costComplete = true; });
-      //   再検証前の指示 §4: 最後に包んだ client の health の limits（見出しの行で、Gateway が上限を強制するか・推定による送信制限だけかを分けて出す）
-      let lastLimits = null;
-      function summary() {
-        const s = readState();
-        if (s.mode === 'disabled') return { enabled: false };
-        if (s.mode === 'broken') return { enabled: true, ok: false, reason: s.reason };
-        const t = totalsOf(s.ledger, { sessionId: sid });
-        const L = lastLimits ? lastLimits() : null;
-        const modes = [...new Set(['ask', 'plan', 'generate'].map(k => enforcementOf(L, k)))];
-        return { enabled: true, ok: true, id: s.config.id, limitUsd: s.config.limitUsd, maxCalls: s.config.maxCalls, ...t, stopped: s.ledger.stopped ? { ...s.ledger.stopped } : null, enforcement: modes.length === 1 ? modes[0] : 'mixed' };
-      }
-      /**
-       * session.client を包む（ask / propose / plan / generate の直前に確保、応答で精算）。設定が無ければ素通し（今と同じ）。
-       *   limits = health の limits（関数でもよい）。有効なときは直接の送信の失敗から kintone.proxy で送り直さない（noProxyFallback）。
-       *   再検証前の指示 §3: 各送信の前に設定を読み直す（予算を使う検証で状態を確かめられなければ送信 0 件。readState）。
-       *   再検証前の指示 §4: health に limits.budgetAllowance があり、その feature のモデルが印にあれば、envelope に budget: { allowanceUsd } を付ける（確保額 = allowanceUsd）
-       */
-      function wrap(client, { limits = null } = {}) {
-        if (!client || typeof client !== 'object') return client;
-        const lim = () => { try { return typeof limits === 'function' ? limits() : limits; } catch (e) { return null; } };
-        lastLimits = lim;
-        //   再検証前の確認（並行の要求・2026-10-10）: 印のある Gateway には allowanceUsd = min(残り, この要求の上界の見積もり gatewayBound) を渡す（作業中の質問と計画の更新が
-        //   並ぶ発言で、先の要求が残りを全部確保して後の要求が残り 0 で止まらない。並ぶ要求の allowance の合計は残りを超えない）。Gateway が最初の呼び出しの前に上界で止めたら
-        //   （gatewayFirstOverOf。AI を呼んでいない）確保を解放し、残りがその allowance より大きければ allowanceUsd = 残り で 1 回だけ送り直す（それでも超えれば止める）
-        const run = (kind) => async (p = {}) => {
-          if (readState().mode === 'disabled') return client[kind](p);
-          const requestId = p && p.requestId ? p.requestId : KTAiClient.newRequestId();
-          const L = lim();
-          const est = estimate({ kind, ctx: p ? p.ctx : null, limits: L });
-          if (!est.ok) throw budgetError(est.reason, { kind, ...(est.model ? { model: est.model } : {}) });
-          const enforcement = enforcementOf(L, kind, p?.ctx);
-          const gb = enforcement === 'gateway' ? gatewayBound({ kind, ctx: p ? p.ctx : null, limits: L }) : null;
-          const analysis = typeof KTAnalysisInput !== 'undefined' && KTAnalysisInput.analysis(p?.ctx);
-          // Analysis is one call. Let the server check its actual compact prompt
-          // against the remaining allowance, not a client approximation cap.
-          let res = await reserve({ requestId, kind, est, enforcement, capUsd: !analysis && gb && gb.ok ? gb.maxUsd : null });
-          if (!res) return client[kind](p);
-          for (let resent = false; ; resent = true) {
-            if (p && p.signal && p.signal.aborted) { try { await release(res.key, 'CANCELLED'); } catch (x) { } throw new AiClientError({ code: ERROR_CODES.CANCELLED, message: '送信をキャンセルしました' }); }
-            let r;
-            try { r = await client[kind]({ ...p, requestId, onRecoveryPrepared: record => p?.onRecoveryPrepared?.({...record,budgetKey:res.key}), noProxyFallback: true, ...(res.enforcement === 'gateway' ? { budget: { allowanceUsd: res.allowanceUsd } } : {}) }); }
-            catch (e) {
-              try { await fail(res.key, e); } catch (x) { }
-              if(e.recovery)e.recovery.budgetKey=res.key;
-              if (!analysis && !resent && res.enforcement === 'gateway' && gatewayFirstOverOf(e)) {
-                let again = null;
-                try { again = await reserve({ requestId, kind, est, enforcement, aboveUsd: res.allowanceUsd }); } catch (x) { again = null; }
-                if (again && !again.skipped && again.key) { res = again; continue; }
-              }
-              throw e;
-            }
-            try { await settle(res.key, { kind, response: r }); } catch (x) { }
-            return r;
-          }
-        };
-        return { ...client, ask: run('ask'), propose: run('propose'), plan: run('plan'), generate: run('generate') };
-      }
-      return {
-        configKey, ledgerKey: () => { const s = readState(); return s.config ? ledgerKeyOf(h, s.config.id) : null; }, sessionId: sid,
-        enabled: () => readState().mode !== 'disabled', state: () => readState().mode, readState, summary, configure,
-        reserve, settle, fail, release, wrap,
-        subscribe(fn) { if (typeof fn === 'function') listeners.add(fn); return () => listeners.delete(fn); },
-      };
-    }
-    /** 見出しの 1 行（予算が有効なときだけ。金額と回数だけ。内部の値は出さない） */
-    //   再検証前の指示 §4（2026-10-10）: Gateway が要求ごとに上限を強制するか（budgetAllowance の印）、Toolkit の推定による送信制限だけか（上限の強制は無い）を分けて書く
-    const ENFORCEMENT_JA = Object.freeze({ gateway: '（AI サービスが要求ごとに上限を強制）', estimate: '（推定による送信制限・上限の強制は無い）', mixed: '（一部の要求は推定による送信制限・上限の強制は無い）' });
-    function summaryText(s) {
-      if (!s || !s.enabled) return '';
-      const usd = KTAiClient.usdText;
-      if (!s.ok) return s.reason === 'config-unreadable' || s.reason === 'config-missing' ? '費用の上限: 設定を確かめられないため、AI に送りません' : '費用の上限: 設定または記録を読めないため、AI に送りません';
-      const mode = ENFORCEMENT_JA[s.enforcement] || '';
-      const pending = [s.costUnknown ? `応答完了・費用未確定 ${s.costUnknown} 件` : '', (s.completionUnknown ?? s.unknown) ? `終了不明 ${s.completionUnknown ?? s.unknown} 件` : ''].filter(Boolean);
-      const pendingText = pending.length ? `（${pending.join('・')}）` : '';
-      if (s.stopped) return `費用の上限${mode}: 見積もりの表・上限の取り決めと合わない応答があったため、以後の送信を止めています（記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル）${pendingText}`;
-      return `費用の上限${mode}: 記録済み 約 ${usd(s.recordedUsd)} 米ドル・確保中 約 ${usd(s.reservedUsd)} 米ドル${pendingText} ／ 上限 ${usd(s.limitUsd)} 米ドル・AI の呼び出し ${s.usedCalls} / ${s.maxCalls} 回`;
-    }
-    return { CONFIG_PREFIX, LEDGER_PREFIX, ARMED_PREFIX, LEDGER_VERSION, PRICES, FEATURE_OF, DEFAULT_MODEL, OUTPUT_LIMITS, MAX_CALLS, PROMPT_BYTES, CTX_FACTOR, BYTES_PER_TOKEN, REPAIR_EXTRA_TOKENS, STATUSES,
-      MESSAGE_OVERHEAD_BYTES, MESSAGES_PER_CALL, PREV_OUTPUT_BYTES_PER_TOKEN, RETRY_EXTRA_BYTES,
-      priceOf, estimate, gatewayBound, gatewayBodyBytesOf, callsOf, tokensOfUsage, preAiOf, notSentOf, gatewayFirstOverOf, budgetMetaOf, enforcementOf, totalsOf, knownCostOf, parseConfig, budgetError, configKeyOf, ledgerKeyOf, armedKeyOf, summaryText, create };
-  })();
-
 
   // ==========================================
   // 3.6 AI 向けドキュメント・計画・Review・Executor の表示 UI（KTContextUi）
@@ -12977,7 +12283,7 @@
     const planPaneHtml = ({ border, bg }) => `<div id="kt-ai-plan-result" style="display:none; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.6;"></div>`;
     /** 根拠（fact）の詳細の枠。Phase 15: AI タブの「根拠」ペイン */
     const evidencePaneHtml = ({ border, bg }) => `<div id="kt-ai-fact-detail" style="display:none; border:1px dashed ${border}; border-radius:8px; padding:8px; background:${bg}; line-height:1.5; font-size:11px;"></div>`;
-    /** Nest Rec AI の接続（未接続 / 接続中 / 接続済み / 開発モード）と状態表示。Phase 15: AI タブの「接続」ペインに置く */
+    /** Nest Rec AI の接続（未接続 / 接続中 / 接続済み）と状態表示。Phase 15: AI タブの「接続」ペインに置く */
     function connectionHtml({ border, bg }) {
       return `
           <!-- 有料: Nest Rec AI（AIに質問）。無料側の生成・コピーには依存させない -->
@@ -12986,22 +12292,11 @@
               <b>Nest Rec AI</b>
               <span id="kt-ai-conn-badge" style="font-size:11px; opacity:.8;"></span>
             </div>
-            <!-- 未接続: 「Nest Rec AIに接続」だけ（利用者に credential を見せない・入力させない）。
-                 Customer Token の旧方式は開発モード（localStorage ktAi.devMode = "1"）のときだけ表示する -->
+            <!-- 接続はNest Rec会員の承認画面で行う。 -->
             <div id="kt-ai-connect" style="display:none; flex-direction:column; gap:6px;">
               <button id="kt-ai-connect-start" class="btn" style="height:32px; font-weight:600;">Nest Rec AIに接続</button>
               <div id="kt-ai-connect-target" style="display:none; font-size:11px; color:#b26a00;"></div>
               <div style="opacity:.7; font-size:11px;">AI向けドキュメント機能は接続しなくても無料で利用できます。</div>
-              <div id="kt-ai-dev" style="display:none; flex-direction:column; gap:4px; border:1px dashed ${border}; border-radius:6px; padding:6px;">
-                <div style="font-size:11px; opacity:.7;">開発モード: Customer Token で接続（運用者向け。接続後は保存されません）</div>
-                <input id="kt-ai-token" type="password" placeholder="Customer Token" autocomplete="off" style="border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-                <div style="display:flex; gap:6px;">
-                  <button id="kt-ai-connect-btn" class="btn" style="height:28px; flex:1;">接続（Customer Token）</button>
-                  <details id="kt-ai-paid-settings" style="font-size:11px;"><summary style="cursor:pointer; line-height:28px;">詳細</summary>
-                    <input id="kt-ai-api-base" placeholder="API Base URL" style="width:100%; box-sizing:border-box; border:1px solid ${border}; border-radius:6px; padding:4px; background:${bg}; color:inherit; font:inherit;">
-                  </details>
-                </div>
-              </div>
             </div>
             <!-- 接続中: Nest Rec の承認ページを別タブで開き、承認を待つ（ポップアップ block 時は再度開ける） -->
             <div id="kt-ai-connecting" style="display:none; flex-direction:column; gap:6px; border:1px solid ${border}; border-radius:8px; padding:8px; background:${bg};">
@@ -19202,150 +18497,12 @@
     return { sanitize, html };
   })();
 
-  /* Read-only, allowlisted cost diagnostics. Does not settle, reserve, configure or send requests. */
-  'use strict';
-  const KTReleaseBudgetReport = (() => {
-    const usageDiagnostics = typeof KTReleaseUsageDiagnostics !== 'undefined' ? KTReleaseUsageDiagnostics : require('./release-usage-diagnostics.js').KTReleaseUsageDiagnostics;
-    const SCHEMA = 'toolkit-budget-report-1';
-    const obj = value => !!value && typeof value === 'object' && !Array.isArray(value);
-    const own = (value, key) => obj(value) && Object.prototype.hasOwnProperty.call(value, key);
-    const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : null;
-    const count = value => number(value) != null && Number.isSafeInteger(value) ? value : null;
-    const oneOf = (value, values) => values.includes(value) ? value : null;
-    const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-    const id = (value, prefix) => typeof value === 'string' && new RegExp('^(?:' + prefix + '-)?' + uuid + '$', 'i').test(value) ? value : null;
-    const model = value => typeof value === 'string' && /^gpt-(?:6-astra|6-luna|6\.1-sol|6\.1-terra|4\.1(?:-mini|-nano)?|4o(?:-mini)?|5(?:-mini|-nano)?)(?:-\d{4}-\d{2}-\d{2})?$/.test(value) ? value : null;
-    const tier = value => oneOf(value, ['default', 'fast', 'priority']);
-    const date = value => {
-      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
-      const ms = Date.parse(value); return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-    };
-    const REASONS = Object.freeze({
-      'usage-totals-unknown': '入力または出力の利用量が確認できません。',
-      'cache-usage-unknown': 'キャッシュの読み取り・書き込みの利用量が確認できません。',
-      'cache-write-ttl-unknown': 'キャッシュ書き込みの保持期間別の内訳が確認できません。',
-      'usage-inconsistent': '利用量の合計と内訳が一致せず、費用を計算できません。',
-      'service-tier-missing': '応答に料金区分の記録がなく、適用された単価を確認できません。',
-      'service-tier-unknown': '応答の料金区分に対応する単価を確認できません。',
-      'unknown-model': '応答モデルに対応する単価を確認できません。',
-      'cost-invalid': '費用の計算結果が有効な数値ではありません。',
-      'INCOMPLETE_USAGE': '費用を計算するための利用量の情報が不足しています。',
-      'INCOMPLETE_SERVICE_TIER': '適用された料金区分または単価を確認できません。',
-      'unknown': '費用未確定の詳しい理由は、この記録では確認できません。',
-    });
-    const reason = value => typeof value === 'string' && own(REASONS, value) ? value : 'unknown';
-    const STATUS = Object.freeze({
-      'succeeded-cost-unsettled': '応答完了・費用未確定',
-      'completion-unknown': '終了不明・費用未確定',
-      'in-flight': '進行中',
-      'cost-confirmed': '費用の見積もり確定済み',
-      'released': '未送信・確保解放済み',
-    });
-    const FAILURES = Object.freeze({
-      'read-failed': '費用の確認情報を読み取れません。',
-      'inconsistent-state': '読み取り中に検証枠または記録が変わったため、確認情報を表示できません。',
-      'invalid-record': '費用記録の形式を確認できません。',
-    });
-    const first = (value, keys) => { for (const key of keys) if (own(value, key)) return value[key]; return undefined; };
-    function usage(value) {
-      const v = obj(value) ? value : {}, d = obj(v.input_tokens_details) ? v.input_tokens_details : obj(v.prompt_tokens_details) ? v.prompt_tokens_details : {};
-      const wd = obj(d.cache_write_tokens_details) ? d.cache_write_tokens_details : {}, od = obj(v.output_tokens_details) ? v.output_tokens_details : obj(v.completion_tokens_details) ? v.completion_tokens_details : {};
-      const direct = (keys, nested, key) => { const found = keys.find(k => own(v, k)); return count(found ? v[found] : nested?.[key]); };
-      return {
-        inputTokens: count(first(v, ['input', 'inputTokens', 'input_tokens', 'prompt_tokens'])),
-        outputTokens: count(first(v, ['output', 'outputTokens', 'output_tokens', 'completion_tokens'])),
-        cachedTokens: direct(['cached', 'cachedTokens', 'cache_read_input_tokens'], d, 'cached_tokens'),
-        cacheWriteTokens: direct(['cacheWrite', 'cacheWriteTokens'], d, 'cache_write_tokens'),
-        cacheWriteTokens30m: direct(['cacheWrite30m', 'cacheWriteTokens30m'], wd, 'ttl_30m_tokens'),
-        cacheWriteTokens12h: direct(['cacheWrite12h', 'cacheWriteTokens12h'], wd, 'ttl_12h_tokens'),
-        reasoningTokens: direct(['reasoning', 'reasoningTokens'], od, 'reasoning_tokens'),
-      };
-    }
-    function capture(budget, { now = () => Date.now() } = {}) {
-      let capturedAt = null;
-      try { const ms = now(); if (typeof ms === 'number' && Number.isFinite(ms)) capturedAt = new Date(ms).toISOString(); } catch { /* Clock failure does not invent a date. */ }
-      const base = { schemaVersion: SCHEMA, capturedAt, scope: 'active-budget' };
-      const failed = errorReason => ({ ...base, mode: 'unreadable', status: 'unreadable', errorReason, budget: null, totals: null, entries: [] });
-      try {
-        if (!budget || typeof budget.readState !== 'function' || typeof budget.summary !== 'function') return failed('read-failed');
-        const state = budget.readState(), original = JSON.stringify(state), summary = budget.summary();
-        // A different tab may settle the same allowance between these reads.
-        if (JSON.stringify(budget.readState()) !== original) return failed('inconsistent-state');
-        if (!obj(state) || !obj(summary)) return failed('invalid-record');
-        if (state.mode === 'disabled' && summary.enabled === false) return { ...base, mode: 'disabled', status: 'disabled', errorReason: null, budget: null, totals: null, entries: [] };
-        if (state.mode !== 'on' || summary.ok !== true || summary.enabled !== true) return failed(state.mode === 'broken' ? 'read-failed' : 'inconsistent-state');
-        const { config, ledger } = state;
-        if (!obj(config) || !obj(ledger) || !Array.isArray(ledger.entries)) return failed('invalid-record');
-        if (typeof config.id !== 'string' || !config.id || config.id !== summary.id || config.id !== ledger.id || (ledger.configCreatedAt != null && config.createdAt !== ledger.configCreatedAt)) return failed('inconsistent-state');
-        if (ledger.entries.some(e => !obj(e) || !['in-flight', 'done', 'partial-unknown', 'unknown', 'released'].includes(e.status) || !Array.isArray(e.calls) || (e.gatewayCalls != null && !Array.isArray(e.gatewayCalls)))) return failed('invalid-record');
-        const entries = ledger.entries.map((e, index) => {
-          const confirmed = e.costComplete !== false && e.status === 'done' && number(e.costUsd) != null;
-          const currentInFlight = e.status === 'in-flight' && typeof budget.sessionId === 'string' && e.sessionId === budget.sessionId;
-          const status = e.status === 'released' ? 'released' : currentInFlight ? 'in-flight' : confirmed ? 'cost-confirmed' : e.responseState === 'succeeded' && e.status !== 'in-flight' ? 'succeeded-cost-unsettled' : 'completion-unknown';
-          const source = Array.isArray(e.gatewayCalls) && e.gatewayCalls.length ? e.gatewayCalls : e.calls;
-          const gateway = Array.isArray(e.gatewayCalls) && e.gatewayCalls.length > 0;
-          const calls = source.map((raw, i) => {
-            const c = obj(raw) ? raw : {}, perCallTiers = Array.isArray(e.callServiceTiers);
-            const ct = perCallTiers ? (obj(e.callServiceTiers[i]) ? e.callServiceTiers[i] : {}) : source.length === 1 ? e : {};
-            const callCost = gateway ? number(c.costUsd) : null;
-            const costStatus = !gateway && confirmed ? 'breakdown-unrecorded' : callCost != null ? 'cost-confirmed' : 'unsettled';
-            const callReason = costStatus !== 'unsettled' ? null : reason(gateway ? c.costReason : e.reason);
-            return { index: i + 1, kind: oneOf(gateway ? c.kind : e.kind, ['ask', 'qa', 'propose', 'proposal', 'plan', 'plan-full', 'plan-patch', 'generate', 'repair']),
-              model: model(gateway ? c.model : source.length === 1 ? e.model : null), requestedServiceTier: tier(gateway ? c.requestedServiceTier : ct.requestedServiceTier ?? (!perCallTiers && source.length === 1 ? e.estimatedServiceTier : null)),
-              serviceTier: tier(gateway ? c.serviceTier : ct.serviceTier), usage: usage(gateway ? c.usage : raw),
-              boundUsd: gateway ? number(c.boundUsd) : null, costUsd: callCost, costStatus, costReason: callReason, usageDiagnostics: gateway ? usageDiagnostics.sanitize(c.usageDiagnostics) : null };
-          });
-          return { index: index + 1, requestId: id(e.requestId, 'tk'), kind: oneOf(e.kind, ['ask', 'propose', 'plan', 'generate']),
-            feature: oneOf(e.feature, ['assistant-qa', 'change-planner', 'customization-generator']), startedAt: date(e.startedAt), endedAt: date(e.endedAt),
-            status, responseState: e.responseState === 'succeeded' ? 'succeeded' : null,
-            costComplete: confirmed || (e.status === 'released' && e.costComplete === true), costUsd: confirmed || (e.status === 'released' && e.costComplete === true) ? number(e.costUsd) : null,
-            knownUsd: number(e.costKnownUsd) ?? (confirmed ? number(e.costUsd) : null), reservedUsd: number(e.reservedUsd), reservedCalls: count(e.reservedCalls), allowanceUsd: number(e.allowanceUsd),
-            model: model(e.model), estimatedModel: model(e.estimatedModel), requestedServiceTier: tier(e.requestedServiceTier ?? e.estimatedServiceTier), serviceTier: tier(e.serviceTier),
-            costReason: status === 'cost-confirmed' || status === 'released' || status === 'in-flight' ? null : reason(e.reason), calls };
-        });
-        return { ...base, mode: 'active', status: entries.length ? 'ok' : 'empty', errorReason: null,
-          budget: { id: id(config.id, 'b'), createdAt: date(config.createdAt), limitUsd: number(config.limitUsd), maxCalls: count(config.maxCalls) },
-          totals: { knownUsd: number(summary.recordedUsd), reservedUsd: number(summary.reservedUsd), usedCalls: count(summary.usedCalls), costUnknownCount: count(summary.costUnknown), completionUnknownCount: count(summary.completionUnknown), inFlightCount: count(summary.inFlight) }, entries };
-      } catch { return failed('read-failed'); }
-    }
-    const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const amount = value => number(value) == null ? '未確認' : String(Math.round(value * 1e6) / 1e6) + ' 米ドル';
-    const integer = value => count(value) == null ? '未確認' : String(value);
-    const text = value => value == null ? '未確認' : escape(value);
-    function html(report) {
-      if (!obj(report) || report.schemaVersion !== SCHEMA || !['active', 'disabled', 'unreadable'].includes(report.mode)) return '<p>費用の確認情報を読み取れません。未確認の費用を0とは判断しません。</p>';
-      if (report.mode === 'disabled') return '<p>検証用の費用枠が有効ではないため、確認情報はありません。</p>';
-      if (report.mode === 'unreadable') return '<p>' + (own(FAILURES, report.errorReason) ? FAILURES[report.errorReason] : FAILURES['read-failed']) + '未確認の費用を0とは判断しません。</p>';
-      const b = report.budget || {}, t = report.totals || {}, entries = Array.isArray(report.entries) ? report.entries : [];
-      const usageLabels = { inputTokens: '入力', outputTokens: '出力', cachedTokens: 'キャッシュ読取', cacheWriteTokens: 'キャッシュ書込', cacheWriteTokens30m: '書込30分', cacheWriteTokens12h: '書込12時間', reasoningTokens: '推論' };
-      let result = '<p>現在の検証枠は同じドメインで共通です。会話・アプリ単位の集計ではありません。</p><p>検証枠：' + text(id(b.id, 'b')) + '<br>上限：' + amount(b.limitUsd) + '／呼び出し：' + integer(t.usedCalls) + ' / ' + integer(b.maxCalls) + ' 回</p><p>既知の見積もり費用：' + amount(t.knownUsd) + '／保守的な確保額：' + amount(t.reservedUsd) + '</p><p>確保額は上限管理用の額で、実際の請求額ではありません。未確定の費用を0として扱いません。</p>';
-      if (!entries.length) result += '<p>この検証枠には要求の記録がありません。</p>';
-      for (const e of entries) {
-        if (!obj(e)) continue;
-        result += '<details class="ktr-budget-report-entry"><summary>要求 ' + integer(e.index) + '：' + (own(STATUS, e.status) ? STATUS[e.status] : '状態未確認') + '</summary><p>要求ID：' + text(id(e.requestId, 'tk')) + '<br>開始：' + text(date(e.startedAt)) + '／終了：' + text(date(e.endedAt)) + '<br>既知の見積もり費用：' + amount(e.knownUsd) + '／保守的な確保額：' + amount(e.reservedUsd) + '</p><p>応答モデル：' + text(model(e.model)) + '／見積もり時モデル：' + text(model(e.estimatedModel)) + '<br>要求した料金区分：' + text(tier(e.requestedServiceTier)) + '／応答の料金区分：' + text(tier(e.serviceTier)) + '</p>';
-        if (e.costReason != null && !(Array.isArray(e.calls) && e.calls.some(c => obj(c) && c.costReason != null && reason(c.costReason) !== 'unknown'))) result += '<p>' + REASONS[reason(e.costReason)] + '</p>';
-        for (const c of Array.isArray(e.calls) ? e.calls : []) {
-          if (!obj(c)) continue;
-          const unrecorded = c.costStatus === 'breakdown-unrecorded';
-          result += '<details><summary>呼び出し ' + integer(c.index) + '：' + (unrecorded ? '呼び出し別の費用内訳は未記録（要求全体は見積もり確定済み）' : number(c.costUsd) == null ? '費用未確定' : '費用の見積もり確認済み') + '</summary><p>モデル：' + text(model(c.model)) + '<br>要求した料金区分：' + text(tier(c.requestedServiceTier)) + '／応答の料金区分：' + text(tier(c.serviceTier)) + '<br>費用の見積もり：' + (unrecorded ? '未記録（要求全体で確認）' : amount(c.costUsd)) + '／呼び出しの費用上限（見積もり）：' + amount(c.boundUsd) + '</p>';
-          if (!unrecorded && number(c.costUsd) == null) result += '<p>' + REASONS[reason(c.costReason)] + '</p>';
-          if (c.usageDiagnostics != null || ['cache-write-ttl-unknown', 'cache-usage-unknown', 'usage-inconsistent'].includes(c.costReason)) result += usageDiagnostics.html(c.usageDiagnostics);
-          result += '<dl>' + Object.entries(usageLabels).map(([key, label]) => '<dt>' + label + '</dt><dd>' + integer(c.usage?.[key]) + '</dd>').join('') + '</dl></details>';
-        }
-        result += '</details>';
-      }
-      return result + '<p>取得日時：' + text(date(report.capturedAt)) + '。保存した時点の記録であり、その後の請求情報との照合は行っていません。</p>';
-    }
-    return { capture, html };
-  })();
-
   /* Browser composition. Authentication, limits and preview executors are reused;
    * the former conversation/review/dual-pane state is not part of this path. */
   'use strict';
   function mountReleaseWorkspace(host, d) {
     const settings = d.settings || KTAiClient.createSettingsStore();
     const session = d.session || KTAiClient.createSession({ store: settings });
-    const budget = d.budget || KTAiBudget.create();
     let capability = { available: false, features: {} }, healthAt = 0, healthPromise = null, latestBase = null, view = null;
     let baseQueue = Promise.resolve();
     let smalltalkCapability = null;
@@ -19484,7 +18641,7 @@
       });
       baseQueue = next; return next;
     }
-    const client = budget.wrap(session.client, { limits: () => capability.limits });
+    const client = session.client;
     const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge, findBrokenRefs: KTDeps.findBrokenRefs, calcChainStats: KTDeps.calcChainStats };
     const proposalContext = input => input.businessMode === 'understand' ? KTBusinessConsultation.context(input.businessContext,input.text) : input.businessSnapshot ? KTBusinessContract.context(input.businessSnapshot,input.text,{workflow:input.businessWorkflow===true}) : KTReleaseContext.proposal(input,dependencyTools);
     const recoveryInputHash = (kind,ctx,input) => KTReleaseWorkspace.hash({kind,ctx:{...ctx,generatedAt:null,...(Array.isArray(ctx.facts)?{facts:ctx.facts.map(f=>f.kind==='dependency-coverage'?{...f,value:{...f.value,analyzedAt:null}}:f)}:{})},finalBundleId:kind==='generate'?input.plan?.finalBundle?.id||null:null});
@@ -19498,7 +18655,6 @@
     const services = {
       async recover(record) {
         const r=await session.client.recover({recovery:record});updateUsage(r.usage);
-        if(record.budgetKey){try{await budget.settle(record.budgetKey,{kind:record.kind,response:r});}catch{}}
         return record.kind==='plan'?{plan:r}:record.kind==='generate'?{generated:r,verification:r.verification,artifactOutcome:r.artifactOutcome}:{...r,facts:record.facts||[]};
       },
       async validateRecovery(kind,input,record) {
@@ -19568,122 +18724,17 @@
     let flow = null, connectionBusy = false;
     const connectionDialogs = new Set();
     const updateConnections = () => { for (const render of connectionDialogs) render(); };
-    function verificationSettings(el) {
-      const panel = el.querySelector('[data-budget-panel]');
-      if (!panel) return;
-      const status = panel.querySelector('[data-budget-status]'), id = panel.querySelector('[data-budget-id]');
-      const save = panel.querySelector('[data-budget-start]'), note = panel.querySelector('[data-budget-note]');
-      const reportBody = panel.querySelector('[data-budget-report-body]');
-      const reportSave = panel.querySelector('[data-budget-report-save]');
-      const reportMessage = panel.querySelector('[data-budget-report-message]');
-      const currentReport = () => KTReleaseBudgetReport.capture(budget);
-      let reportBudgetId;
-      const renderReport = report => {
-        if (!reportBody) return;
-        try {
-          report = report || currentReport();
-          const opened = reportBudgetId === report.budget?.id ? [...reportBody.querySelectorAll('details')].map((item, index) => item.open ? index : -1).filter(index => index >= 0) : [];
-          reportBody.innerHTML = KTReleaseBudgetReport.html(report);
-          const details = reportBody.querySelectorAll('details');
-          for (const index of opened) if (details[index]) details[index].open = true;
-          reportBudgetId = report.budget?.id;
-        }
-        catch (_) { reportBody.textContent = '費用の確認情報を読み取れませんでした。利用記録や確保額は変更していません。'; }
-      };
-      reportSave?.addEventListener('click', () => {
-        reportMessage.textContent = '';
-        try {
-          const report = currentReport();
-          renderReport(report);
-          d.downloadText('toolkit-budget-report.json', JSON.stringify(report, null, 2), 'application/json');
-          reportMessage.textContent = '費用の確認情報をファイルへ書き出しました。現在の検証枠の記録であり、この会話だけの費用ではありません。';
-        } catch (_) { reportMessage.textContent = '確認情報をファイルに保存できませんでした。利用記録や確保額は変更していません。'; }
-      });
-      let saving = false, displayedBudgetId;
-      const canConfigure = () => {
-        const state = controller.getState();
-        return state.phase === 'idle' && state.messages.length === 0;
-      };
-      const render = () => {
-        const current = budget.summary();
-        // Initialize from the active allowance, but preserve unsaved edits across status updates.
-        // Once the conversation starts, the disabled fields describe the enforced allowance.
-        if (displayedBudgetId !== (current.id || null) || !canConfigure()) {
-          panel.querySelector('[data-budget-usd]').value = String(current.enabled ? current.limitUsd : 1);
-          panel.querySelector('[data-budget-calls]').value = String(current.enabled ? current.maxCalls : 8);
-          displayedBudgetId = current.id || null;
-        }
-        status.textContent = current.enabled ? KTAiBudget.summaryText(current) : '検証用の利用上限は設定されていません。';
-        id.textContent = current.id ? '検証枠: ' + current.id : '';
-        renderReport();
-        save.disabled = saving || !canConfigure();
-        panel.querySelectorAll('input').forEach(input => { input.disabled = save.disabled; });
-        note.textContent = canConfigure() ? '会話を始める前に設定します。過去の利用記録は残ります。' : '会話の途中で新しい検証枠には切り替えられません。';
-      };
-      save.addEventListener('click', async () => {
-        if (saving || !canConfigure()) return;
-        saving = true; render();
-        const message = panel.querySelector('[data-budget-message]');
-        message.textContent = '';
-        try {
-          await budget.configure({ limitUsd: panel.querySelector('[data-budget-usd]').value, maxCalls: panel.querySelector('[data-budget-calls]').value }, canConfigure);
-          message.textContent = '新しい検証枠を設定しました。上の上限と回数を確認してください。';
-        } catch (error) {
-          message.textContent = error?.details?.budget?.reason === 'in-flight' ? '処理中の要求があるため、検証枠を変更できません。' : '検証枠を設定できませんでした。入力した値と設定の状態を確認してください。';
-        } finally { saving = false; render(); }
-      });
-      const offBudget = budget.subscribe(render), offState = controller.subscribe(render);
-      el.addEventListener('close', () => { offBudget(); offState(); }, { once: true });
-      render();
-    }
     function connectionDialog() {
-      const staging = 'https://appinsight-ai-api-staging.black-waterfall-157a.workers.dev';
-      const verification = KTAiClient.isDevMode() && typeof budget.configure === 'function' ? '<details data-budget-panel><summary>開発者向け：検証用の設定</summary><p data-staging-note></p><button type="button" data-staging-select>検証用の接続先（staging）に切り替える</button><p data-budget-status></p><p class="ktr-note" data-budget-id></p><label>上限（米ドル） <input data-budget-usd type="number" min="0" step="0.01" value="1.00"></label><label> AIの呼び出し上限（回） <input data-budget-calls type="number" min="0" step="1" value="8"></label><p class="ktr-note" data-budget-note></p><button type="button" data-budget-start>新しい検証枠を設定</button><p data-budget-message role="status"></p><details data-budget-report><summary>費用の確認情報</summary><p class="ktr-note">確認・保存ではAIを呼びません。会話本文や認証情報は含めません。</p><div data-budget-report-body></div><button type="button" data-budget-report-save>確認情報をファイルで保存</button><p data-budget-report-message role="status"></p></details></details>' : '';
-      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><p data-connection-base></p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary data-usage-help-title>回数の数え方</summary><div data-usage-help></div></details>' + verification);
-      verificationSettings(el);
+      const el = dialog('AIサービスとの接続', '<p data-message>' + esc(connection().message) + '</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button data-connect>接続する</button><button data-refresh>接続を更新</button><button data-disconnect>接続を解除</button></div><p data-link></p><section data-usage aria-label="今月の利用状況"></section><details><summary data-usage-help-title>回数の数え方</summary><div data-usage-help></div></details>');
       const message = t => { el.querySelector('[data-message]').textContent = t; };
-      const stagingReason = () => {
-        const status = session.status(), saved = settings.load(), state = controller.getState();
-        if (status.apiBase === staging && saved.apiBase === staging && !connectionSettingsFailed) return '検証用の接続先（staging）が設定されています。変更は不要です。';
-        if (connectionBusy || healthPromise || flow?.isRunning() || budget.summary().inFlight > 0) return '処理が終わってから接続先を切り替えてください。';
-        // An expired refresh or a live in-memory access token must never move to another service.
-        if (status.connected || status.accessExpiresAt || saved.refreshToken || saved.refreshAttempt) return '接続情報が残っています。接続を解除してから切り替えてください。';
-        if (state.phase !== 'idle' || state.messages.length) return '会話を終え、新しい相談を始める前に接続先を切り替えてください。';
-        return '';
-      };
       const render = () => {
         el.querySelector('[data-usage]').innerHTML = KTReleaseView.usageHtml(capability.usage);
         el.querySelector('[data-usage-help-title]').textContent = [3, 4].includes(capability.usage?.version) ? 'クレジットの数え方' : '回数の数え方';
         el.querySelector('[data-usage-help]').innerHTML = KTReleaseView.usageDetailsHtml(capability.usage);
-        el.querySelector('[data-connection-base]').textContent = '接続先: ' + session.status().apiBase;
         el.querySelector('[data-connect]').disabled = connectionBusy || !!healthPromise || connectionSettingsFailed;
         el.querySelector('[data-refresh]').disabled = connectionBusy || connectionSettingsFailed;
         el.querySelector('[data-disconnect]').disabled = connectionBusy;
-        const select = el.querySelector('[data-staging-select]');
-        if (select) {
-          const reason = stagingReason();
-          select.disabled = !!reason;
-          el.querySelector('[data-staging-note]').textContent = reason || '未接続で会話を始める前だけ切り替えられます。切り替えた後に［接続する］を押してください。';
-        }
       };
-      el.querySelector('[data-staging-select]')?.addEventListener('click', () => {
-        if (stagingReason()) { render(); return; }
-        try {
-          // Save only the endpoint: neither credentials nor refresh-in-progress state are copied.
-          if (settings.save({ apiBase: staging }) !== true) throw new Error('Settings were not saved');
-          const saved = settings.load();
-          if (saved.apiBase !== staging || session.status().apiBase !== staging || saved.refreshToken || saved.refreshAttempt || saved.scope || saved.connectedAt || saved.refreshExpiresAt) throw new Error('Settings readback differs');
-          connectionSettingsFailed = false;
-          capability = { available: false, features: {} }; healthAt = 0; initialHealth = null; connectionError = '';
-          message('検証用の接続先（staging）に切り替えました。［接続する］から接続してください。');
-        } catch (_) {
-          connectionSettingsFailed = true;
-          capability = { available: false, features: {} }; healthAt = 0; initialHealth = null;
-          connectionError = '接続先の保存を確認できませんでした。接続は開始していません。保存できる状態か確認し、もう一度切り替えてください。';
-          message(connectionError);
-        }
-        render(); view.render();
-      });
       el.querySelector('[data-refresh]').addEventListener('click', async () => {
         if (connectionBusy || connectionSettingsFailed) return;
         connectionBusy = true; render();
@@ -19713,10 +18764,10 @@
         catch (e) { message(KTAiClient.errorText(e.code) || '接続を完了できませんでした。'); try { popup?.close(); } catch (_) {} }
         finally { connectionBusy = false; flow = null; updateConnections(); }
       });
-      const offState = controller.subscribe(render), offBudget = budget.subscribe(render);
+      const offState = controller.subscribe(render);
       connectionDialogs.add(render);
       window.addEventListener('storage', render);
-      el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); else flow = null; connectionDialogs.delete(render); offState(); offBudget(); window.removeEventListener('storage', render); });
+      el.addEventListener('close', () => { if (flow?.isRunning()) flow.cancel(); else flow = null; connectionDialogs.delete(render); offState(); window.removeEventListener('storage', render); });
       render();
     }
     let businessPanel = null;
@@ -24467,7 +23518,7 @@
 
   /**
    * AI の接続の確認を起動時に始める（設定取得ではない通信。設定取得の関所で止めない）。
-   *   最小化で開いたときは開発支援（AI の画面）の組み立てを展開まで遅らせるが、接続の確認（旧形式の移行・Gateway のトークンの交換・/v2/health）は
+   *   最小化で開いたときは開発支援（AI の画面）の組み立てを展開まで遅らせるが、接続の確認（Gateway のトークンの更新・/v2/health）は
    *   今までどおり起動時に行う。組み立てた画面は同じセッション（Access Token）と、この health の結果を使う（renderAiWorkspace の aiLink）。
    *   作業の基準の取得（自動の設定取得）は、ここでは始めない（開発支援が見えたときに mountAiWorkspace が取る）
    * @returns {{ settings, session, probe: () => Promise<{ ok, health?, error?, at } | null> } | null}（未接続なら probe は null を返す）
@@ -24476,7 +23527,6 @@
     let settings = null, session = null;
     try { settings = KTAiClient.createSettingsStore(); session = KTAiClient.createSession({ store: KTAiClient.createSettingsStore() }); } catch (e) { return null; }
     const result = (async () => {
-      try { if (typeof session.migrateLegacy === 'function') await session.migrateLegacy(); } catch (e) { }
       let st = null;
       try { st = session.status(); } catch (e) { st = null; }
       if (!st || !st.connected) return null;
