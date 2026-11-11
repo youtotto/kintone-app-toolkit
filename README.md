@@ -2,8 +2,10 @@
 
 **kintone開発の標準化・効率化 for Developers**
 
-> 🚀 Latest: Toolkit v2.3.2 released
+> 🚀 Latest: Toolkit v2.3.3 released
 > 設定を「見る」ツールから、**依存関係と変更影響を「分析する」ツール**へ。
+
+**v2.3.3**：自動検証できない条件でJS生成が止まる問題と、工程カードの配色を修正しました。[修正内容と更新方法](docs/RELEASE-NOTES-2.3.3.md)をご覧ください。
 
 **v2.3.2**：一般配布版から検証専用機能を取り除きました。[今回の修正と更新方法](docs/RELEASE-NOTES-2.3.2.md)をご覧ください。
 
