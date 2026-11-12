@@ -32,3 +32,6 @@ tests/.build/
 worker/wrangler.toml
 worker/.wrangler/
 .wrangler/
+
+# Chrome 拡張機能版のビルド: npm から取得した同梱ライブラリの置き場（vendor.lock.json で照合する）
+extension/.vendor-cache/

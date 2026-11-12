@@ -1,0 +1,31 @@
+{
+  "note": "拡張機能に同梱する外部ライブラリ。ユーザースクリプト版が CDN から読み込んでいるものと同じ系列を、版を固定して npm の配布物（tarball）から取り出す。integrity は npm レジストリの値（取得した tarball を照合する）。",
+  "packages": [
+    {
+      "name": "mermaid",
+      "version": "10.9.8",
+      "userscriptSource": "@require https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js（mermaid@10 の最新 = 10.9.8、2026-11-12 時点）",
+      "tarball": "https://registry.npmjs.org/mermaid/-/mermaid-10.9.8.tgz",
+      "integrity": "sha512-gmIhmkmD/3DL5lErDV71E/cFUkEbBW4VTFpsJH1HSYjeBICRKOoc4AZem+RNz/FhhCXKBMZiD75bIfBlb2A4yA==",
+      "license": "MIT",
+      "copy": [
+        { "from": "package/dist/mermaid.min.js", "to": "vendor/mermaid/mermaid.min.js" },
+        { "url": "https://raw.githubusercontent.com/mermaid-js/mermaid/v10.9.8/LICENSE", "sha256": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80", "to": "vendor/mermaid/LICENSE", "note": "npm の配布物に LICENSE が含まれないため、同じ版のタグから取得する" }
+      ]
+    },
+    {
+      "name": "monaco-editor",
+      "version": "0.36.1",
+      "userscriptSource": "MONACO_BASE = https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs",
+      "tarball": "https://registry.npmjs.org/monaco-editor/-/monaco-editor-0.36.1.tgz",
+      "integrity": "sha512-/CaclMHKQ3A6rnzBzOADfwdSJ25BFoFT0Emxsc4zYVyav5SkK9iA6lEtIeuN/oRYbwPgviJT+t3l+sjFa28jYg==",
+      "license": "MIT",
+      "copy": [
+        { "fromDir": "package/min/vs/", "to": "vendor/monaco/vs/" },
+        { "from": "package/min/vs/loader.js", "to": "vendor/monaco/vs/loader.min.js", "note": "本体は cdnjs の名前（loader.min.js）で読み込む。npm の配布物の名前は loader.js のため、同じ内容をその名前でも置く" },
+        { "from": "package/LICENSE", "to": "vendor/monaco/LICENSE" },
+        { "from": "package/ThirdPartyNotices.txt", "to": "vendor/monaco/ThirdPartyNotices.txt", "optional": true }
+      ]
+    }
+  ]
+}
