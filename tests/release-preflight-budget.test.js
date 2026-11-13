@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { KTAiBudget: B } = require('./helpers/load-toolkit.js').loadToolkit();
+const { KTAiBudget: B } = require('./helpers/load-toolkit.js').loadToolkit({ verificationBudget: true });
 function storage() {
   const values = new Map();
   return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) };

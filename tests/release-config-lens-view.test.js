@@ -251,8 +251,9 @@ test('保存したアプリと現在のアプリは個別の名前・環境・�
   assert.match(right, /設定の取得：[\s\S]*datetime="2026-10-20T01:00:00Z"/);
   assert.match(right, /ファイル保存：[\s\S]*datetime="2026-10-21T02:00:00Z"/);
   assert.doesNotMatch(left, /保存時の見積管理|ファイル保存/); assert.doesNotMatch(right, /今の請求管理/);
-  assert.ok(html.indexOf(left) < html.indexOf('<details'), '現在側は詳細を開かずに確認できる配置');
-  assert.ok(html.indexOf(right) < html.indexOf('<details'), '保存側も詳細を開かずに確認できる配置');
+  assert.match(left.slice(0,left.indexOf('<details')), /今の請求管理/, '現在のアプリ名は常時表示');
+  assert.match(right.slice(0,right.indexOf('<details')), /保存時の見積管理/, '保存側のアプリ名も常時表示');
+  assert.match(right, /<details class="ktcl-origin-info"[^>]*><summary>取得情報<\/summary>/, '取得日時は折りたたんで表示');
   const reading = render({result:null,savedFile,comparisonTarget:'file',reading:true});
   assert.doesNotMatch(reading,/今の請求管理/);
   assert.match(originOf(reading,'before'),/アプリ情報は未取得/);

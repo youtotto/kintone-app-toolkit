@@ -10,8 +10,9 @@ const root=path.resolve(__dirname,'..');
 test('診断から選択した項目だけを相談し、入力・案・コードを保ち自動送信しない',{timeout:90000},async()=>{
  let pw;try{pw=require(process.env.PLAYWRIGHT_MODULE||'playwright');}catch{pw=require(path.join(process.env.USERPROFILE,'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'));}
  const T=loadToolkit();
- const {describeRegistry}=await import(pathToFileURL(path.join(root,'../AI/worker/src/v2/prompt-registry.mjs')).href);
+ const {describeRegistry}=await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
  const health={ok:true,supportedContractVersions:['2.1'],registry:describeRegistry(),entitlements:[{product:'toolkit',features:['assistant-qa','change-planner','customization-generator']}]};
+ let remaining=10,oldPrice=false;const usage=()=>({version:4,plan:'toolkit-light',resetsAt:'2099-11-01T00:00:00Z',operationCosts:{consultation:1,document:2,final:3,business:10,...(oldPrice?{}:{diagnosis:3})},credits:{limit:100,used:100-remaining,reserved:0,remaining}});
  const prod={appId:'310',appName:'案件管理',fields:{memo:{type:'MULTI_LINE_TEXT',code:'memo',label:'備考'},ステータス:{type:'STATUS',code:'ステータス',label:'ステータス',enabled:true}},
  adminNotes:{content:'PRIVATE_ADMIN_NOTE'},layout:[],views:{views:{},revision:'1'},status:{enable:true,states:{作成中:{name:'作成中',index:'0',assignee:{type:'ONE',entities:[]}},承認待ち:{name:'承認待ち',index:'1',assignee:{type:'ONE',entities:[]}},承認済み:{name:'承認済み',index:'2',assignee:{type:'ONE',entities:[]}}},actions:[]},customize:{scope:'ALL',desktop:{js:[],css:[]},mobile:{js:[],css:[]}}};
  const mock=makeKintoneMock(prod),loadBase=devBaseLoaderOf({KTDevBase:{load:T.KTDevBase.loadForRelease}},{appId:'310',production:prod,mockRef:()=>mock});
@@ -26,7 +27,7 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
   await page.exposeFunction('base',loadBase);await page.exposeFunction('api',async(name,args)=>mock.api[name](...args));
   await page.exposeFunction('service',async(name,ctx)=>{
-   calls.push({name,ctx});if(name==='getHealth')return E.clone(health);
+   calls.push({name,ctx});if(name==='getHealth')return {...E.clone(health),meta:{usage:usage()}};
    if(name==='propose'){
     if(ctx.question===F.REQUEST)return F.proposal();
     if(failNext){failNext=false;throw new Error('資料作成の固定の通信失敗です。');}
@@ -36,7 +37,7 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
     answer.explanation.unknowns=['実際の画面の動きは未確認です。'];
     assert.ok(memo);answer.explanation.sections.forEach(s=>s.evidenceIds=[memo.id]);
     if(holdNext){holdNext=false;await new Promise(resolve=>{releaseHold=resolve;});}
-    return answer;
+    remaining-=ctx.focus?.target?.type==='app-diagnosis'?3:1;return {...answer,usage:usage()};
    }
    if(name==='plan')return F.plan();
    return F.generated(ctx.customization);
@@ -60,12 +61,20 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
   const countPaid=()=>calls.filter(c=>c.name!=='getHealth').length;
   await page.waitForFunction(()=>work.capability().available===true);
   assert.equal(await action('diagnose').isEnabled(),true);assert.equal(countPaid(),0);
+  remaining=2;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('diagnose').isDisabled(),true);
+  remaining=3;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('diagnose').isEnabled(),true);
+  oldPrice=true;await page.evaluate(()=>work.refreshCapability(true));assert.equal(await action('diagnose').isDisabled(),true);
+  oldPrice=false;remaining=10;await page.evaluate(()=>work.refreshCapability(true));
   await page.locator('#kt-release-input').fill('編集中の相談');
   await action('diagnose').click();await page.locator('[data-consent]').click();
   await page.waitForFunction(()=>work.controller.getState().explanations.length===1);
+  await page.waitForFunction(()=>!document.querySelector('[data-release-action="saved-history"]').disabled);
+  assert.equal(await action('diagnose').isEnabled(),true,'接続更新なしで診断を再び選べる');
+  assert.equal(await action('smalltalk-open').isEnabled(),true);
+  assert.match(await page.locator('.ktr-explanation').innerText(),/個人別の実効権限は未確認/);
   assert.equal(countPaid(),1);assert.equal(await page.locator('#kt-release-input').inputValue(),'編集中の相談');
   const input=calls.find(c=>c.name==='propose').ctx;
-  assert.equal(input.requestPurpose,'ideation');assert.equal(input.focus.target.type,'app-diagnosis');assert.ok(input.facts.some(f=>f.kind==='app-health'));assert.ok(input.facts.some(f=>f.kind==='js-events'));
+  assert.equal(remaining,7);assert.ok(input.clientCapabilities.includes('appDiagnosisCredits3'));assert.equal(input.requestPurpose,'ideation');assert.equal(input.focus.target.type,'app-diagnosis');assert.ok(input.facts.some(f=>f.kind==='app-health'));assert.ok(input.facts.some(f=>f.kind==='js-events'));
   assert.ok(!JSON.stringify(input).includes('PRIVATE_ADMIN_NOTE'));
   assert.equal(await page.locator('[data-release-action="consult-diagnosis"]').count(),2);
   const before=await page.evaluate(()=>JSON.stringify({proposal:work.controller.getState().proposal,plan:work.controller.getState().plan,artifacts:work.controller.getState().artifacts}));
@@ -85,11 +94,21 @@ test('診断から選択した項目だけを相談し、入力・案・コー�
   assert.equal(await page.evaluate(()=>work.controller.getState().requestPurpose),'consultation');
   await action('send').click();await page.waitForFunction(()=>work.controller.getState().explanations.length===2);
   const selected=calls.filter(c=>c.name==='propose')[1].ctx;
-  assert.equal(selected.requestPurpose,'consultation');assert.equal(selected.question,draft.trim());assert.equal(selected.conversation.discussion.find(m=>m.role==='assistant').accepted,false);assert.equal(countPaid(),2);
+  assert.equal(remaining,6);assert.equal(selected.requestPurpose,'consultation');assert.equal(selected.question,draft.trim());assert.equal(selected.conversation.discussion.find(m=>m.role==='assistant').accepted,false);assert.equal(countPaid(),2);
+  // Reproduce held and failed responses without a health refresh or any external request.
+  holdNext=true;await action('diagnose').click();await page.waitForFunction(()=>work.controller.getState().phase==='consulting');
+  assert.equal(await action('saved-history').isDisabled(),true);assert.equal(await action('diagnose').isDisabled(),true);
+  await page.waitForFunction(()=>document.querySelector('[data-release-action="cancel"]'));
+  while(!releaseHold)await new Promise(resolve=>setTimeout(resolve,5));releaseHold();
+  await page.waitForFunction(()=>!document.querySelector('[data-release-action="saved-history"]').disabled);
+  assert.equal(await action('diagnose').isEnabled(),true);
+  failNext=true;await action('diagnose').click();await page.waitForFunction(()=>!!work.controller.getState().error);
+  await page.waitForFunction(()=>!document.querySelector('[data-release-action="saved-history"]').disabled);
+  assert.equal(await action('diagnose').isEnabled(),true,'通信失敗後も送信中のロックを解除する');
   // Missing diagnosis capability disables only this action; regular consultation remains usable.
   health.registry.toolkit['assistant-qa'].conversation=health.registry.toolkit['assistant-qa'].conversation.filter(x=>x!=='appDiagnosis');
   await action('connect').click();await page.locator('dialog [data-refresh]').click();await page.waitForFunction(()=>!work.capability().features['assistant-qa'].conversation.includes('appDiagnosis'));await page.locator('dialog [data-close]').click();
-  assert.equal(await action('diagnose').isDisabled(),true);assert.equal(await action('send').isEnabled(),true);assert.equal(countPaid(),2);
+  assert.equal(await action('diagnose').isDisabled(),true);assert.equal(await action('send').isEnabled(),true);assert.equal(countPaid(),4);
   assert.equal(mock.calls.filter(c=>!c.startsWith('GET')).length,0);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);
  }finally{await browser.close();}
 });

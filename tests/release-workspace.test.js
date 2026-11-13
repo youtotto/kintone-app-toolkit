@@ -564,3 +564,45 @@ test('一覧の追加を明示して更新した案だけが採用され、取�
   assert.ok(!JSON.stringify(stateOf(f).adopted).includes('B4'));
   assert.equal(f.writes.length,0);
 });
+const testUnverifiedBody = "kintone.events.on('app.record.edit.show',function(event){return event;});";
+test('自動確認できなくても後続のJSを作成し、コードと説明を保存復元する', async () => {
+  const f = fresh({ generate: ({ customization }) => generated(customization, customization.customizationId === 'C1'
+    ? { state: 'unverified', body: testUnverifiedBody, message: '条件の自動確認は未対応です。' } : {}) });
+  await built(f);
+  assert.equal(f.count('generate'), 2);
+  assert.equal(stateOf(f).phase, 'incomplete');
+  assert.equal(stateOf(f).artifacts.length, 2);
+  assert.equal(f.count('prepare'), 0);
+  const saved=f.controller.exportSession(), restored=fresh();
+  assert.equal(await restored.controller.restoreSession(JSON.parse(JSON.stringify(saved))),true);
+  const state=stateOf(restored), html=KTReleaseView.render(state);
+  assert.equal(state.artifacts[0].result.code,testUnverifiedBody);
+  assert.equal(state.artifacts[0].result.artifactOutcome.state,'unverified');
+  assert.match(html,/JavaScriptは作成済みです/);
+  assert.match(html,/コードの誤りとは判定していません/);
+  assert.match(html,/条件の自動確認は未対応です/);
+  assert.match(html,/data-release-action="copy-code"/);
+  assert.match(html,/data-release-action="download-code"/);
+  assert.match(html,/JavaScriptを見る/);
+  assert.doesNotMatch(html,/data-release-action="resume"/);
+  await restored.controller.apply();
+  assert.equal(restored.count('generate'),0);
+  assert.equal(restored.writes.length,0);
+});
+
+test('一部未確認の後で通信断になっても、作成済みを再生成せず残りだけ再開する', async () => {
+  let fail=true;
+  const f=fresh({generate:({customization})=>{
+    if(customization.customizationId==='C1')return generated(customization,{state:'unverified',body:testUnverifiedBody});
+    if(fail)throw Object.assign(new Error('接続が切れました'),{code:'NETWORK_ERROR'});
+    return generated(customization);
+  }});
+  await built(f);
+  assert.match(KTReleaseView.render(stateOf(f)),/data-release-action="resume"/);
+  fail=false;await f.controller.resume();
+  assert.equal(f.calls.filter(c=>c.method==='generate'&&c.id==='C1').length,1);
+  assert.equal(f.calls.filter(c=>c.method==='generate'&&c.id==='C2').length,2);
+  assert.equal(stateOf(f).artifacts.length,2);
+  assert.equal(stateOf(f).artifacts.find(a=>a.customizationId==='C1').result.code,testUnverifiedBody);
+  assert.equal(f.writes.length,0);
+});

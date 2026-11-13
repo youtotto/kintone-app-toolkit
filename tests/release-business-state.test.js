@@ -78,16 +78,17 @@ test('F11 既存条件解析器でコードとステータスを結び、未解�
  assert.ok(bad.limitations.some(x=>x.message.includes('解析できていません')));
  assert.equal(new Set(bad.limitations.map(x=>x.kind+x.message)).size,bad.limitations.length);
 });
-test('F18 500根拠・256KiB・8候補・8000文字の境界内成功と1超過拒否',async()=>{
+test('F18 2000根拠・1MiB・8候補・8000文字の境界内成功と1超過拒否',async()=>{
  const {s}=await F.snapshot(),data=F.raw();
- data.notification_record.notifications=Array.from({length:501-s.evidence.length},()=>F.clone(data.notification_record.notifications[0]));
- const many=(await F.snapshot({data})).s;assert.equal(many.evidence.length,500);assert.deepEqual(F.C.validateSnapshot(many),[]);
+ data.notification_record.notifications=Array.from({length:2001-s.evidence.length},()=>F.clone(data.notification_record.notifications[0]));
+ const many=(await F.snapshot({data})).s;assert.equal(many.evidence.length,2000);assert.deepEqual(F.C.validateSnapshot(many),[]);
  data.notification_record.notifications.push(F.clone(data.notification_record.notifications[0]));
  assert.ok(F.C.validateSnapshot((await F.snapshot({data})).s).length);
  const exact=F.clone(s),title=exact.evidence.find(e=>e.kind==='notification_record').value;title.title='';
- const initial=Buffer.byteLength(JSON.stringify(F.C.context(exact)));
- title.title='a'.repeat(256*1024-initial);
- assert.equal(Buffer.byteLength(JSON.stringify(F.C.context(exact))),256*1024);title.title+='a';assert.throws(()=>F.C.context(exact),/送信上限/);
+ const {KTAnalysisInput:A}=require('../src/release-analysis-input.js');
+ const initial=A.bytes(A.pack(F.C.context(exact)));
+ title.title='a'.repeat(1024*1024-initial);
+ assert.equal(A.bytes(A.pack(F.C.context(exact))),1024*1024);title.title+='a';assert.throws(()=>F.C.context(exact),/容量上限/);
  const o=F.output(s),rule=o.rules[0];rule.participants=[];rule.questions=[];rule.inference='a'.repeat(600);rule.reasoning='b'.repeat(398);rule.trigger.interpretation='c';rule.nextAction.interpretation='d';
  o.rules=Array.from({length:8},(_,i)=>({...F.clone(rule),ruleId:'R'+(i+1)}));
  assert.deepEqual(F.C.validateOutput(o,s),[]);o.rules[0].reasoning+='e';assert.ok(F.C.validateOutput(o,s).some(x=>x.includes('8000')));

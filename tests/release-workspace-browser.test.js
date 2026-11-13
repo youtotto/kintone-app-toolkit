@@ -39,7 +39,7 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     try { playwright = require('playwright'); }
     catch (_) { playwright = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
   }
-  const { describeRegistry } = await import(pathToFileURL(path.join(process.env.KT_AI_REPO || path.resolve(root,'../AI'),'worker/src/v2/prompt-registry.mjs')).href);
+  const { describeRegistry } = await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
   const health = {ok:true,supportedContractVersions:['2.1'],registry:describeRegistry(),entitlements:[{product:'toolkit',features:['assistant-qa','change-planner','customization-generator']}]};
   const t=loadToolkit(), prod=data(), mock=makeKintoneMock(prod);
   const loadBase=devBaseLoaderOf({KTDevBase:{load:t.KTDevBase.loadForRelease}}, {appId:'310',production:prod,mockRef:()=>mock});

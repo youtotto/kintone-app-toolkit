@@ -4,6 +4,7 @@
 const KTReleaseConfigLensView = (() => {
   const Diff = typeof KTReleaseEnvironmentDiff !== 'undefined' ? KTReleaseEnvironmentDiff : require('./release-environment-diff.js').KTReleaseEnvironmentDiff;
   const Environment = typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView;
+  const Layout = typeof KTReleaseConfigLensLayout !== 'undefined' ? KTReleaseConfigLensLayout : require('./release-config-lens-layout.js').KTReleaseConfigLensLayout;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const KINDS = Object.freeze({ added: '追加', changed: '変更', deleted: '削除' });
   const entryKey = entry => entry.id != null && String(entry.id) !== '' ? String(entry.id) : JSON.stringify([String(entry.categoryId || ''), String(entry.code ?? entry.label ?? '')]);
@@ -30,13 +31,16 @@ const KTReleaseConfigLensView = (() => {
       (!edits?.available ? '<p>この画面では手元の編集状態を取得できていません。</p>' : files.length ? list(files.map(file => file.name + '（' + (file.target === 'mobile' ? 'モバイル' : 'PC') + '・' + ({new:'新規作成・未登録',edited:'手元で編集中・未登録',unknown:'取得時との違いは未確認'}[file.state] || '未確認') + '）')) : '<p>このタブに未登録の編集はありません。</p>') +
       '<p>AIへ説明を依頼する場合も、手元のコード本文は送りません。</p></details>';
   }
-  function categoryHtml(category, filter, labels) {
-    const visible = category.entries.filter(entry => filter === 'all' || entry.kind === filter);
+  function categoryHtml(category, filter, labels, options, selectedCategory, busy) {
+    const visible = category.entries.filter(entry => selectedCategory === 'layout' || filter === 'all' || entry.kind === filter);
     const warnings = category.warnings?.length ? '<div class="ktcl-warning">' + list(category.warnings) + '</div>' : '';
     const empty = !['ok', 'partial'].includes(category.status) ? 'この範囲は比較できていません。' :
       category.entries.length ? 'この種類の変更はありません。' :
       category.status === 'partial' ? '比較できた範囲に変更はありません。' : '変更はありません。';
-    return '<section class="ktcl-category" data-cl-result-category="' + esc(category.id) + '"><h3>' + esc(category.label) + '<small>' + esc(stateLabel(category)) + '</small></h3>' + warnings +
+    const layout = category.id === 'layout' ? (selectedCategory === 'layout'
+      ? Layout.render(options.layoutComparison, labels, options.layoutZoom, busy)
+      : button('フォーム配置を見る', 'data-cl-category="layout"', busy)) : '';
+    return '<section class="ktcl-category" data-cl-result-category="' + esc(category.id) + '"><h3>' + esc(category.label) + '<small>' + esc(stateLabel(category)) + '</small></h3>' + warnings + layout +
       (visible.length ? visible.map(entry => detail(entry, labels)).join('') : '<p class="ktcl-empty">' + empty + '</p>') + '</section>';
   }
   function render(options = {}) {
@@ -64,11 +68,12 @@ const KTReleaseConfigLensView = (() => {
     const origin = (side, title, value, control = '') => '<section class="ktcl-origin" data-cl-origin="' + side + '" aria-label="' + esc(title) + '">' +
       '<div class="ktcl-origin-heading"><strong>' + esc(title) + '</strong>' + control + '</div>' +
       (side === 'after' && fileMode && !value ? '<p>保存した設定ファイルを選んでください。</p>' :
-        '<div class="ktcl-origin-app"><b>' + esc(value?.appName || (value?.appId ? 'アプリ名は未取得' : 'アプリ情報は未取得')) + '</b>' +
-          (value?.appId ? '<span>アプリ ' + esc(value.appId) + ' ・ ' + esc(value.domain || '取得元不明') + '</span>' : '') + '</div>' +
+        '<div class="ktcl-origin-app"><b title="' + esc(value?.appName || '') + '">' + esc(value?.appName || (value?.appId ? 'アプリ名は未取得' : 'アプリ情報は未取得')) + '</b>' +
+          (value?.appId ? '<small>アプリ ' + esc(value.appId) + '</small>' : '') + '</div><details class="ktcl-origin-info" data-cl-disclosure="origin-' + side + '"><summary>取得情報</summary>' +
+          (value?.appId ? '<span>アプリ ' + esc(value.appId) + ' ・ ' + esc(value.domain || '取得元不明') + '</span>' : '') +
         '<div class="ktcl-origin-time">' + (side === 'after' && fileMode ? '保存元：' + esc(environmentLabel(value?.environment)) + ' ／ ' : '') +
           '設定の取得：' + timestamp(value?.capturedAt) +
-          (side === 'after' && fileMode ? ' ／ ファイル保存：' + timestamp(value?.savedAt) : '') + '</div>') +
+          (side === 'after' && fileMode ? ' ／ ファイル保存：' + timestamp(value?.savedAt) : '') + '</div></details>') +
       (side === 'after' && fileMode ? '<div class="ktcl-file-choice">' +
         button(options.savedFile ? '別のファイルを選ぶ' : 'ファイルを選ぶ', 'data-cl-action="open-file"', busy) +
         '<input type="file" data-cl-file accept=".json,application/json" aria-label="比較する保存設定ファイル" hidden' + (busy ? ' disabled' : '') + '>' +
@@ -98,18 +103,18 @@ const KTReleaseConfigLensView = (() => {
       origins +
       (exportStatus ? '<p class="ktcl-status" role="status" data-cl-export-status>' + esc(exportStatus) + '</p>' : '') +
       (error ? '<p class="ktcl-warning" role="alert" data-cl-error>' + esc(typeof error === 'string' ? error : error.message || '設定を取得できませんでした。') + '</p>' : '') +
-      '<div class="ktcl-overview ktcl-meta"><strong role="status" data-cl-summary>' + esc(reading ? '設定を読み込んでいます…' : sending ? 'AI説明を準備しています…' : saving ? '設定を保存しています…' : importing ? '保存ファイルを読み込んでいます…' : totalLabel) + '</strong>' +
+      '<div class="ktcl-statusbar"><div class="ktcl-overview ktcl-meta"><strong role="status" data-cl-summary>' + esc(reading ? '設定を読み込んでいます…' : sending ? 'AI説明を準備しています…' : saving ? '設定を保存しています…' : importing ? '保存ファイルを読み込んでいます…' : totalLabel) + '</strong>' +
       (result ? '<span>' + overview + '分類に変更' + (result.unavailable?.length ? ' ／ ' + result.unavailable.length + '分類に未確認の範囲' : '') + '</span><span>追加・変更・削除は左から右への違いです。</span>' : '') + '</div>' +
-      '<details class="ktcl-provenance"><summary>比較の詳細</summary><p>設定の版：左 ' + esc(before?.revision ?? '未確認') + ' ／ 右 ' + esc(after?.revision ?? '未確認') +
-        '</p>' + (fileMode ? '<p>保存ファイルの比較はこの画面で確認できます。AI説明は環境どうしの比較が対象です。</p>' : '') + '</details>' +
+      '<details class="ktcl-provenance" data-cl-disclosure="provenance"><summary>比較の詳細</summary><p>設定の版：左 ' + esc(before?.revision ?? '未確認') + ' ／ 右 ' + esc(after?.revision ?? '未確認') +
+        '</p>' + (fileMode ? '<p>保存ファイルの比較はこの画面で確認できます。AI説明は環境どうしの比較が対象です。</p>' : '') + '</details></div>' +
       (fileMode && source.crossApp ? '<p class="ktcl-comparison-note" data-cl-cross-app>別アプリとの設定比較です。変更履歴ではありません。一覧・グラフ・アプリアクションは同じ名前で照合します。</p>' : '') +
       (categories.length ? '<div class="ktcl-shell"><nav class="ktcl-navigation" aria-label="比較する設定">' +
         button('すべての設定', 'data-cl-category="all" aria-pressed="' + (selectedCategory === 'all') + '"', busy) +
         categories.map(category => '<button type="button" data-cl-category="' + esc(category.id) + '" aria-pressed="' + (selectedCategory === category.id) + '"' + (busy ? ' disabled' : '') + '><span>' + esc(category.label) + '</span><small' + (category.status !== 'ok' ? ' class="ktcl-attention"' : '') + '>' + esc(stateLabel(category)) + '</small></button>').join('') +
-      '</nav><div class="ktcl-results"><div class="ktcl-filters" role="group" aria-label="変更の種類">' +
+      '</nav><div class="ktcl-results">' + (selectedCategory === 'layout' ? '' : '<div class="ktcl-filters" role="group" aria-label="変更の種類">' +
         button('すべて ' + categoryEntries.length, 'data-cl-kind="all" aria-pressed="' + (filter === 'all') + '"', busy) +
         Object.entries(KINDS).map(([kind,label]) => button(label + ' ' + counts[kind], 'data-cl-kind="' + kind + '" aria-pressed="' + (filter === kind) + '"', busy)).join('') +
-      '</div>' + (groups.length ? groups.map(category => categoryHtml(category, filter, labels)).join('') : '<p class="ktcl-empty">この種類の変更はありません。</p>') + '</div></div>' :
+      '</div>') + (groups.length ? groups.map(category => categoryHtml(category, filter, labels, options, selectedCategory, busy)).join('') : '<p class="ktcl-empty">この種類の変更はありません。</p>') + '</div></div>' :
       '<div class="ktcl-empty-page"><p>保存済みの設定を読み込み、変更した項目を左右に並べて確認できます。</p><p>一覧を見る操作ではAIを呼びません。</p></div>') +
       '<footer class="ktcl-footer">' + editsHtml(options.localEdits) +
       '<details class="ktcl-notes"><summary>比較と保存の範囲</summary><p>' + (fileMode ? '現在の運用環境を左側、保存ファイルを右側に表示します。追加・変更・削除は左から右への違いです。' : '運用環境と動作テスト環境の設定を比較します。設定画面で保存した内容が対象で、この会話以外で変更した内容も含みます。') + '</p><p>現在のアプリの取得済み設定をファイルで保存します。設定の変更や復元は行いません。</p>' +
@@ -126,6 +131,7 @@ const KTReleaseConfigLensView = (() => {
       '.ktcl-entry{margin-top:8px;border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;overflow:hidden}.ktcl-entry summary{padding:11px 12px;cursor:pointer;overflow-wrap:anywhere;background:var(--kt-soft,#f5f7fb)}.ktcl-entry summary strong{font-weight:600}.ktcl-entry summary small{font-size:12px;margin-left:8px;color:var(--kt-muted,#58677d)}.ktcl-kind{display:inline-block;padding:1px 7px;border:1px solid currentColor;border-radius:4px;font-size:11px;margin-right:10px;line-height:1.5}.ktcl-kind-added{color:var(--kt-success,#24634f)}.ktcl-kind-changed{color:var(--kt-warning,#805c15)}.ktcl-kind-deleted{color:var(--kt-danger,#9d3d22)}.ktcl-table-scroll{max-width:100%;overflow:auto}.ktcl-view table{width:100%;table-layout:fixed;border-collapse:collapse}.ktcl-view th,.ktcl-view td{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--kt-line,#dbe2ec);overflow-wrap:anywhere}.ktcl-view thead th{background:var(--kt-soft,#f5f7fb);font-size:12px}.ktcl-view th:first-child{width:24%}.ktcl-view tbody th{font-weight:500;font-size:12px}.ktcl-view pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0;max-height:320px;overflow:auto}.ktcl-empty-page{padding:32px 0}.ktcl-empty-page p+p{margin-top:8px}' +
       '.ktcl-footer{border-top:1px solid var(--kt-line,#dbe2ec);margin-top:20px;padding-top:8px}.ktcl-notes{margin:10px 0}.ktcl-notes summary{cursor:pointer;font-weight:600}.ktcl-notes p{margin:6px 0}.ktcl-notes ul{margin:6px 0;padding-left:20px}.ktcl-notes li{margin:4px 0}' +
       '@media(max-width:760px){.ktcl-view{padding:12px}.ktcl-origins{grid-template-columns:minmax(0,1fr);gap:8px}.ktcl-origin{padding:8px 10px}.ktcl-shell{grid-template-columns:minmax(0,1fr);gap:14px}.ktcl-navigation{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;max-height:180px;overflow:auto}.ktcl-navigation button{min-width:0}.ktcl-actions{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.ktcl-actions button{min-width:0;width:100%}.ktcl-meta{gap:3px 12px;margin:8px 0 12px}.ktcl-view th,.ktcl-view td{padding:7px}.ktcl-view th:first-child{width:26%}}' +
+      '.ktcl-origins{gap:12px;margin:6px 0}.ktcl-origin{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:2px 10px;padding:5px 10px;border:1px solid var(--kt-line,#dbe2ec);border-radius:7px;background:var(--kt-soft,#f5f7fb)}.ktcl-origin-heading{grid-column:1/-1;margin:0;min-height:28px}.ktcl-origin-heading strong{font-size:12px}.ktcl-origin-app{flex-wrap:nowrap;min-width:0;gap:8px}.ktcl-origin-app b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.ktcl-origin-app small{flex-shrink:0;font-size:11px;color:var(--kt-muted,#58677d)}.ktcl-origin-info{min-width:0;font-size:11px;color:var(--kt-muted,#58677d)}.ktcl-origin-info summary{cursor:pointer;white-space:nowrap}.ktcl-origin-info[open]{grid-column:1/-1}.ktcl-file-choice{grid-column:1/-1}.ktcl-statusbar{display:flex;align-items:baseline;gap:4px 16px;flex-wrap:wrap;margin:4px 0 8px}.ktcl-statusbar .ktcl-meta{margin:0;gap:3px 12px}.ktcl-statusbar .ktcl-provenance{margin:0}.ktcl-statusbar .ktcl-provenance[open]{flex-basis:100%}.ktcl-category{margin:6px 0 16px}@media(max-width:760px){.ktcl-origins{gap:4px;margin:6px 0}.ktcl-origin{padding:4px 8px}.ktcl-statusbar{gap:4px 10px}.ktcl-shell{gap:8px}.ktcl-navigation{max-height:124px}}' +
       '</style>';
   }
   return { render, styles };

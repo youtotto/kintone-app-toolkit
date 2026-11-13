@@ -14,7 +14,11 @@ const KTReleaseContext = (() => {
   const appOf = base => ({ id: String(base.appId ?? base.data?.appId ?? ''), name: base.data?.appName || base.data?.name || null });
   const statusesOf = base => entries(base.data?.status?.states).map(x => x.name);
   function sizeCheck(ctx, limit) {
-    if (new TextEncoder().encode(JSON.stringify(ctx)).length > limit) throw Object.assign(new Error('このアプリの設定と相談の記録は、一度に送れる量を超えています。内容を省略して送信することはできません。'), { code: 'CONTEXT_TOO_LARGE' });
+    if ((typeof KTAnalysisInput !== 'undefined' ? KTAnalysisInput : require('./release-analysis-input.js').KTAnalysisInput).analysis(ctx)) {
+      (typeof KTAnalysisInput !== 'undefined' ? KTAnalysisInput : require('./release-analysis-input.js').KTAnalysisInput).prepare(ctx); return ctx;
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(ctx)).length;
+    if (bytes > limit) throw Object.assign(new Error('送信する設定と会話が入力上限を超えています（' + bytes.toLocaleString() + ' / ' + limit.toLocaleString() + ' bytes）。AIには送信していません。設定一覧を保存し、対象範囲を分ける必要があります。'), { code: 'CONTEXT_TOO_LARGE', details: { reason: 'INPUT_BYTES', bytes, limit } });
     return ctx;
   }
   function dependencyContext(base, tools, consultationTarget = null, diagnosis = false) {
@@ -94,7 +98,31 @@ const KTReleaseContext = (() => {
     ? { type: target.type, id: target.id, name: target.name, appId: target.appId, environment: target.environment, revision: target.revision }
     : { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
   const fileSubject = target => target ? { type: 'javascript', sourceId: target.target + ':js:' + target.name, name: target.name, target: target.target, customizationType: 'FILE', sourceAvailable: true } : null;
-  function factsOf(base, dependencies = { facts: [] }, requestTargets = [], consultationTarget = null) {
+  // Lossless factoring: shared attributes + each item reconstruct the original
+  // evidence (only request-local E identifiers are reassigned). Never summarize
+  // source values, confidence, pointers or acquisition provenance in prose.
+  function compactFacts(facts) {
+    const buckets = new Map(), result = [];
+    for (const fact of facts) {
+      if (!['field', 'dependency', 'js-reference'].includes(fact.kind)) { result.push(clone(fact)); continue; }
+      const key = fact.kind + ':' + fact.confidence;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(fact);
+    }
+    for (const bucket of buckets.values()) for (let start = 0; start < bucket.length; start += 100) {
+      const chunk = bucket.slice(start, start + 100);
+      if (chunk.length === 1) { result.push(clone(chunk[0])); continue; }
+      const items = chunk.map(({id, ...fact}) => clone(fact)), shared = {};
+      for (const key of Object.keys(items[0])) if (items.every(item => Object.hasOwn(item, key) && JSON.stringify(item[key]) === JSON.stringify(items[0][key]))) {
+        shared[key] = items[0][key]; items.forEach(item => { delete item[key]; });
+      }
+      result.push({ kind: 'evidence-group', confidence: chunk[0].confidence,
+        statement: (chunk[0].kind === 'field' ? 'フィールド設定' : chunk[0].kind === 'dependency' ? '設定の参照関係' : 'JavaScriptの参照候補') + ' ' + chunk.length + '件。sharedと各itemsを合わせたものが個別の根拠です。',
+        value: { format: 'shared-items-1', count: items.length, shared, items } });
+    }
+    return result.map((fact, i) => ({ ...fact, id: 'E' + (i + 1) }));
+  }
+  function factsOf(base, dependencies = { facts: [] }, requestTargets = [], consultationTarget = null, compact = false) {
     const data = base.data || {}, facts = [];
     const add = (kind, statement, value, extra = {}) => facts.push({ id: 'E' + (facts.length + 1), kind, confidence: 'CERTAIN', statement, value: clone(value), ...extra });
     add('environment', '動作テスト環境の設定です。レコードの内容は含みません。', { environment: base.env || null, revision: base.revision?.preview ?? null, loadedAt: base.loadedAt ?? null, app: appOf(base) });
@@ -125,8 +153,9 @@ const KTReleaseContext = (() => {
     if (['field', 'event'].includes(consultationTarget?.type)) add('consultation-target', '今回、利用者が変更の影響を相談するために選択した対象です。選択しただけでは変更の依頼や採用にはなりません。', selectedTarget(consultationTarget));
     if (requestTargets.some(request => request.target)) add('consultation-history', '相談を送ったときに利用者が選択していた対象です。各発言の対象を示す履歴であり、変更の採用や現在の設定・本文を示すものではありません。現在の設定と登録済みファイルの情報を参照してください。',
       requestTargets.map(request => ({ text: request.text, target: selectedTarget(request.target) })));
-    if (facts.length > 500) throw Object.assign(new Error('アプリの設定が多いため、この会話では全体を確認できません。設定の一部を省略して変更案を作ることはできません。'), { code: 'CONTEXT_TOO_LARGE' });
-    return facts;
+    const result = compact && (facts.length > 400 || new TextEncoder().encode(JSON.stringify(facts)).length > 192 * 1024) ? compactFacts(facts) : facts;
+    if (result.length > 500) throw Object.assign(new Error('送信する根拠が件数上限を超えています（' + result.length + ' / 500件）。AIには送信していません。設定一覧を保存し、対象範囲を分ける必要があります。'), { code: 'CONTEXT_TOO_LARGE', details: { reason: 'INPUT_FACTS', count: result.length, limit: 500 } });
+    return result;
   }
   const coverageOf = (base, dependencies) => ({ adminNotes: false, fields: true, dependencies: dependencies.analyzed, javascript: (base.files || []).every(f => sameFileEnvironment(f, base) && f.type === 'FILE' && f.sourceAvailable !== false && typeof f.text === 'string'), incoming: false, plugins: false, recordData: false });
   function dictionaryOf(base) {
@@ -138,15 +167,15 @@ const KTReleaseContext = (() => {
       reminders: (data.reminderNotify?.notifications || []).flatMap((n, i) => ['reminder#' + (i + 1), ...(n.title ? [n.title] : [])]),
       reports: Object.keys(data.reports?.reports || data.reports || {}).filter(k => k !== 'revision') };
   }
-  function proposal({ text, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base, environmentComparison = null, diagnosis = false }, dependencyTools = null) {
+  function proposal({ text, businessMode = null, businessContext = null, requestPurpose = 'consultation', consultationTarget = null, requestTargets = [], previous, questionIdFloor = 0, pendingPlanQuestions = [], answers = [], requests = [], discussion = [], originalRequestHistory = null, acceptedProposal = null, currentPlanSummary = null, currentResultSummary = null, base, environmentComparison = null, diagnosis = false }, dependencyTools = null) {
     if (diagnosis && (requestPurpose !== 'ideation' || environmentComparison || consultationTarget || !base.ok || base.env !== 'preview')) throw new Error('診断する動作テスト環境を確認できません。');
     const comparison = environmentComparison ? (typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView).context(base, environmentComparison) : null;
     const dependencies = comparison ? { facts: [] } : dependencyContext(base, dependencyTools, consultationTarget, diagnosis);
     const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
       ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
       : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
-    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation'], question: text, app: appOf(base),
-      focus: diagnosis ? { resolution: 'resolved', target: { type: 'app-diagnosis', id: String(base.appId) }, candidates: [] } : comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
+    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation', ...(diagnosis ? ['appDiagnosisCredits3'] : []), ...(businessContext ? ['businessConsultationV1'] : [])], question: text, ...(businessContext ? {businessMode,businessContext:clone(businessContext)} : {}), app: appOf(base),
+      focus: diagnosis ? { resolution: 'resolved', target: { type: 'app-diagnosis', id: String(base.appId) }, candidates: [] } : comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget, diagnosis), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
   }
@@ -159,11 +188,12 @@ const KTReleaseContext = (() => {
         label: a.label, answer: a.answer, ...(a.question ? { question: a.question } : {}), ...(a.kind === 'delegated' ? { delegated: true } : {}) };
     });
   }
-  function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], version, base }, dependencyTools = null) {
+  function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], businessPremises = [], version, base }, dependencyTools = null) {
     const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
     return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
       coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
+      ...(businessPremises.length ? { businessPremises: clone(businessPremises) } : {}),
       acceptedProposal: { revision: version, proposal: clone(accepted) } }, 384 * 1024);
   }
   function generator({ customization, plan, proposal: accepted, answers = [], requests = [], version, base }) {

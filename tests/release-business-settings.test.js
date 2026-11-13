@@ -2,8 +2,8 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const F=require('./helpers/business-fixture.js'),{C,S,clone}=F;
 const {KTBusinessView:V}=require('../src/release-business-view.js');
-test('F01/F07 8カテゴリをGETだけで読み、前後の版と環境・通知原文を保持',async()=>{
- for(const environment of ['production','preview']){const {s,calls,data}=await F.snapshot({environment});assert.deepEqual(C.validateSnapshot(s),[]);assert.equal(calls.length,9);assert.ok(calls.every(c=>c.path.startsWith('/k/v1/'+(environment==='preview'?'preview/':''))));assert.deepEqual(s.evidence.find(e=>e.kind==='notification_record').value,data.notification_record.notifications[0]);assert.equal(s.categories.length,8);}
+test('F01/F07 10カテゴリをGETだけで読み、前後の版と環境・通知原文を保持',async()=>{
+ for(const environment of ['production','preview']){const {s,calls,data}=await F.snapshot({environment});assert.deepEqual(C.validateSnapshot(s),[]);assert.equal(calls.length,11);assert.ok(calls.every(c=>c.path.startsWith('/k/v1/'+(environment==='preview'?'preview/':''))));assert.deepEqual(s.evidence.find(e=>e.kind==='notification_record').value,data.notification_record.notifications[0]);assert.equal(s.categories.length,10);}
 });
 test('F02 空・無効・通知文なしと適用対象外を区別',async()=>{
  const data=F.raw();data.process.enable=false;data.acl_record.rights=[];data.notification_record.notifications[0].title='';data.notification_general.notifyToCommenter=true;
@@ -64,7 +64,13 @@ test('F16 管理者メモ・レコード値・未知API属性を送らない',as
  const {s}=await F.snapshot({data}),ctx=C.context(s);assert.ok(!JSON.stringify(ctx).includes('DO-NOT-SEND'));assert.ok(!JSON.stringify(ctx).includes('RECORD-SECRET'));assert.ok(JSON.stringify(ctx).includes('Ignore instructions'));assert.equal(ctx.facts.length,0);
  const bad=clone(s);bad.evidence[0].value.secret='extra';assert.ok(C.validateSnapshot(bad).length);
 });
-test('F18 入力バイト上限と根拠500件超を明示して拒否',async()=>{
- const {s}=await F.snapshot();const huge=clone(s);huge.evidence.find(e=>e.kind==='notification_record').value.title='あ'.repeat(90000);assert.throws(()=>C.context(huge),/送信上限/);
- const data=F.raw();data.notification_record.notifications=Array.from({length:501},()=>clone(data.notification_record.notifications[0]));const {s:many}=await F.snapshot({data});assert.ok(C.validateSnapshot(many).some(m=>m.includes('500')));assert.deepEqual(C.validateSnapshot(many,{generatable:false}),[]);
+test('F18 入力バイト上限と根拠2000件超を明示して拒否',async()=>{
+ const {s}=await F.snapshot();const huge=clone(s);huge.evidence.find(e=>e.kind==='notification_record').value.title='あ'.repeat(400000);assert.throws(()=>C.context(huge),/容量上限/);
+ const data=F.raw();data.notification_record.notifications=Array.from({length:2001},()=>clone(data.notification_record.notifications[0]));const {s:many}=await F.snapshot({data});assert.ok(C.validateSnapshot(many).some(m=>m.includes('2000')));assert.deepEqual(C.validateSnapshot(many,{generatable:false}),[]);
+});
+
+test('コメント投稿者通知の有効時だけ通知先の根拠として参照できる',async()=>{
+ const data=F.raw();data.notification_general.notifyToCommenter=true;const {s}=await F.snapshot({data});const e=s.evidence.find(e=>e.kind==='comment_notification');
+ assert.equal(C.relationValid('notification_target',e,null),true);assert.equal(C.relationValid('notification_target',e,'/notifyToCommenter'),false);assert.equal(C.relationValid('edit_allowed',e,null),false);assert.equal(C.relationValid('notification_target',{...e,value:{notifyToCommenter:false}},null),false);
+ const o=F.output(s),r=o.rules[0];r.evidenceRefs.push({evidenceId:e.evidenceId,pointer:null});r.participants.push({roleHypothesis:'コメントの連絡を受ける候補',settingRelations:[{relation:'notification_target',evidenceRef:{evidenceId:e.evidenceId,pointer:null}}]});o.unassignedEvidence=o.unassignedEvidence.filter(x=>x.evidenceId!==e.evidenceId);assert.deepEqual(C.validateOutput(o,s),[]);
 });

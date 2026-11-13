@@ -7,11 +7,11 @@ const { devBaseLoaderOf } = require('./helpers/dev-base-fake.js');
 const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const F = require('./helpers/release-workspace-fixture.js'), E = require('./helpers/release-explanation-fixture.js');
 const root = path.resolve(__dirname, '..');
-const usage = (remaining = 4, reserved = 0) => ({ version: 4, plan: 'toolkit-light', yyyymm: '209910', resetsAt: '2099-10-31T15:00:00.000Z', timeZone: 'Asia/Tokyo', price: { monthlyJpy: 1480, taxIncluded: true }, operationCosts: { consultation: 1, document: 2, final: 3 }, credits: { limit: 100, used: 100 - remaining - reserved, reserved, remaining } });
+const usage = (remaining = 4, reserved = 0) => ({ version: 4, plan: 'toolkit-light', yyyymm: '209910', resetsAt: '2099-10-31T15:00:00.000Z', timeZone: 'Asia/Tokyo', price: { monthlyJpy: 2480, taxIncluded: true }, operationCosts: { consultation: 1, document: 2, final: 3 }, credits: { limit: 100, used: 100 - remaining - reserved, reserved, remaining } });
 
 test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再開を完了でき、旧課金を誤使用しない', { timeout: 120000 }, async () => {
   let pw; try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); } catch { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
-  const { describeRegistry } = await import(pathToFileURL(path.join(process.env.KT_AI_REPO || path.resolve(root, '../AI'), 'worker/src/v2/prompt-registry.mjs')).href);
+  const { describeRegistry } = await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
   const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
   const prod = { appId: '310', appName: '共通クレジットの確認', fields: { memo: { type: 'MULTI_LINE_TEXT', code: 'memo', label: '備考' } }, layout: [], views: { views: {}, revision: '1' }, status: { enable: false, states: {}, actions: [] }, customize: { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } } };
   const T = loadToolkit(), mock = makeKintoneMock(prod), loadBase = devBaseLoaderOf({ KTDevBase: { load: T.KTDevBase.loadForRelease } }, { appId: '310', production: prod, mockRef: () => mock });
@@ -76,12 +76,12 @@ test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再�
     assert.deepEqual(await page.evaluate(() => progressEvents), ['repair', 'verify', 'repair', 'verify']);
     assert.equal(await action('send').isDisabled(), true); assert.equal(await action('apply').isEnabled(), true);
     const artifacts = await page.evaluate(() => work.controller.getState().artifacts);
-    let dialog = await open(); assert.match(await dialog.locator('[data-usage-plan]').innerText(), /スターター/);
+    let dialog = await open(); assert.match(await dialog.locator('[data-usage-plan]').innerText(), /SOLO/);
     assert.match(await dialog.locator('[data-usage-credits]').innerText(), /残り 0 \/ 月 100.*利用済み 100・確保中 0/);
     assert.equal(await dialog.locator('[data-usage-bucket]').count(), 0);
     await dialog.getByText('クレジットの数え方', { exact: true }).click();
     assert.match(await dialog.innerText(), /最終案一式で3クレジット/);
-    assert.match(await dialog.innerText(), /自動修復・確認では追加消費しません/); assert.match(await dialog.locator('[data-usage-price]').innerText(), /1,480円（税込）/); assert.doesNotMatch(await dialog.innerText(), /作成1回|相談1回|gpt-|token/i);
+    assert.match(await dialog.innerText(), /自動修復・確認では追加消費しません/); assert.match(await dialog.locator('[data-usage-price]').innerText(), /2,480円（税込）/); assert.doesNotMatch(await dialog.innerText(), /作成1回|相談1回|gpt-|token/i);
     const out = path.join(__dirname, '.build/release-credits'); fs.mkdirSync(out, { recursive: true }); await page.screenshot({ path: path.join(out, 'connection-credits.png') });
     await dialog.locator('[data-close]').click();
     await page.evaluate(() => work.controller.reprepare()); await phase('review'); assert.equal(requests().length, 4, '反映前の確認をやり直してもクレジット要求なし');
@@ -101,9 +101,10 @@ test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再�
     assert.equal(await page.evaluate(() => work.controller.getState().explanations.length), 2);
     assert.deepEqual(await page.evaluate(() => work.controller.getState().artifacts), artifacts);
     await action('focus-consultation').click(); assert.equal(await action('send').isEnabled(), true, '残1なら資料は作れなくても相談できる');
-    current = usage(0); current.resetsAt = new Date(Date.now() + 500).toISOString(); await page.evaluate(() => work.refreshCapability(true));
+    const rolloverClock = Date.now(); await page.clock.install({ time: new Date(rolloverClock) }); await page.clock.pauseAt(new Date(rolloverClock + 1000));
+    current = usage(0); current.resetsAt = new Date(rolloverClock + 1500).toISOString(); await page.evaluate(() => work.refreshCapability(true));
     await action('documents').click(); assert.equal(await page.locator('[data-document-create]').isDisabled(), true);
-    current = usage(5); await page.waitForFunction(() => work.capability().usage.credits.remaining === 5);
+    current = usage(5); await page.clock.runFor(600); await page.clock.resume(); await page.waitForFunction(() => work.capability().usage.credits.remaining === 5);
     assert.equal(await page.locator('[data-document-create]').isEnabled(), true, '月替わりで開いた資料ダイアログも更新'); await page.locator('dialog [data-close]').click();
     assert.equal(await action('send').isEnabled(), true); assert.equal(await page.locator('#kt-release-input').inputValue(), '残す資料の修正文');
     await page.locator('#kt-release-input').fill(''); await page.evaluate(() => work.controller.newTask());

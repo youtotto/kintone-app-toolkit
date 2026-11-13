@@ -24,7 +24,7 @@ const production = () => ({ appId: '310', appName: '案件管理', fields: {
 test('会話を自動保存・自動復元し、下書き・採用・成果物・選択中の会話を維持する（実IndexedDB・外部通信なし）', { timeout: 150000 }, async () => {
   let pw; try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
   catch (_) { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
-  const { describeRegistry } = await import(pathToFileURL(path.join(process.env.KT_AI_REPO || path.resolve(root, '../AI'), 'worker/src/v2/prompt-registry.mjs')).href);
+  const { describeRegistry } = await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
   const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
   const T = loadToolkit(), prod = production(), mock = makeKintoneMock(prod);
   const loadBase = devBaseLoaderOf({ KTDevBase: { load: T.KTDevBase.loadForRelease } }, { appId: '310', production: prod, mockRef: () => mock });
@@ -62,7 +62,7 @@ test('会話を自動保存・自動復元し、下書き・採用・成果物�
     const mount = async (options = {}) => {
       await page.addScriptTag({ content: bundle() });
       await page.evaluate(({ prod, names, dbName, options }) => {
-        window.downloads = [];
+        window.downloads = []; window.holdHistoryLoad = !!options.holdHistoryLoad;
         // Gate delivery after a real IndexedDB load; do not change production dependencies.
         const createHistory = HistoryTest.KTReleaseHistory.create;
         HistoryTest.KTReleaseHistory.create = args => {
@@ -125,6 +125,7 @@ test('会話を自動保存・自動復元し、下書き・採用・成果物�
       if (checkPendingClose) {
         await heldBaseStarted.promise;
         assert.equal(await page.locator('dialog [data-close]').isDisabled(), true, 'the loading conversation cannot be dismissed mid-restore');
+        assert.equal(await page.locator('[data-history-export]').isDisabled(), true, 'manual restoration also disables export');
         await page.keyboard.press('Escape'); assert.equal(await page.locator('dialog[open]').count(), 1);
         heldBase.resolve(); heldBase = null; heldBaseStarted = null;
       }
@@ -155,6 +156,36 @@ test('会話を自動保存・自動復元し、下書き・採用・成果物�
     const editorDrafts = { version: 1, active: 'local-draft', files: [{ key: 'local-draft', name: '手元の編集.js', text: '// まだ登録しない変更\nconst draftValue = 42;', registeredText: '', environment: 'preview', target: 'desktop', kind: 'js' }] };
     await page.evaluate(value => window.editDraft(value), editorDrafts); await saved();
     const firstId = await page.evaluate(() => work.history().getCurrent().id), proposalPaid = paid();
+    // Reproduce the live race: open history while startup still holds an empty workspace.
+    for (const boundary of ['stored-payload', 'restore-base']) {
+      const paidBefore = paid(), writesBefore = mock.calls.filter(call => !call.startsWith('GET')).length;
+      const priorMessages = await page.evaluate(() => work.controller.getState().messages);
+      await page.reload();
+      if (boundary === 'restore-base') { heldBase = F.deferred(); heldBaseStarted = F.deferred(); heldBaseReason = 'history-open'; }
+      await mount({ waitReady: false, holdHistoryLoad: boundary === 'stored-payload' });
+      if (boundary === 'stored-payload') await page.waitForFunction(() => window.historyLoadStarted === true);
+      else await heldBaseStarted.promise;
+      assert.deepEqual(await page.evaluate(() => work.controller.getState().messages), []);
+      await action('saved-history').click();
+      assert.equal(await page.locator('[data-history-export]').isDisabled(), true);
+      assert.match(await page.locator('[data-history-export]').getAttribute('title'), /読み込み完了後/);
+      // Even a queued/synthetic click cannot bypass the UI guard.
+      await page.locator('[data-history-export]').dispatchEvent('click');
+      assert.equal(await page.evaluate(() => window.downloads.length), 0);
+      if (boundary === 'stored-payload') await page.screenshot({ path: path.join(out, 'export-loading.png'), fullPage: true });
+      if (boundary === 'stored-payload') await page.evaluate(() => { window.holdHistoryLoad = false; window.releaseHistoryLoad(); });
+      else { heldBase.resolve(); heldBase = null; heldBaseStarted = null; heldBaseReason = null; }
+      await page.waitForFunction(() => !document.querySelector('[data-history-export]').disabled);
+      assert.equal(await page.evaluate(() => window.downloads.length), 0, 'completing restore does not trigger a deferred download');
+      await page.locator('[data-history-export]').click();
+      const exported = await page.evaluate(() => JSON.parse(window.downloads.at(-1).text));
+      assert.deepEqual(exported, await page.evaluate(() => work.history().exportCurrent()));
+      assert.deepEqual(exported.session.state.messages, priorMessages);
+      assert.equal(exported.draft, 'まだ送らない修正の下書き'); assert.deepEqual(exported.editor, editorDrafts);
+      assert.equal(await page.evaluate(() => window.downloads.length), 1);
+      assert.equal(paid(), paidBefore); assert.equal(mock.calls.filter(call => !call.startsWith('GET')).length, writesBefore);
+      await page.locator('dialog [data-close]').click();
+    }
     await autoReload(firstId);
     assert.equal(await page.locator('#kt-release-input').inputValue(), 'まだ送らない修正の下書き');
     assert.equal(await page.evaluate(() => work.controller.getState().phase), 'proposal');
@@ -339,6 +370,7 @@ test('会話を自動保存・自動復元し、下書き・採用・成果物�
     await page.waitForFunction(() => !document.querySelector('dialog [data-close]').disabled);
     assert.equal(await page.locator('#kt-release-input').inputValue(), largeDraft, 'a retry failure preserves the unsaved draft');
     assert.equal(await page.evaluate(() => work.history().getStatus().state), 'error');
+    assert.equal(await page.locator('[data-history-export]').isEnabled(), true, 'quota failures must still permit rescuing the active draft');
     await page.locator('[data-history-export]').click();
     assert.equal(await page.evaluate(() => JSON.parse(window.downloads.at(-1).text).draft), largeDraft);
     await page.screenshot({ path: path.join(out, 'history-storage-error.png'), fullPage: true });

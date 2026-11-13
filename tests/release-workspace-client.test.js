@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadToolkit } = require('./helpers/load-toolkit.js');
 const { generated, plan } = require('./helpers/release-workspace-fixture.js');
-const T = loadToolkit();
+const T = loadToolkit({ verificationBudget: true });
 const { KTAiClient: Client, KTAiBudget: Budget, KTContext } = T;
 const { KTReleaseContext: ReleaseContext } = require('../src/release-context.js');
 const C = Client.ERROR_CODES;
@@ -154,7 +154,7 @@ const done = () => {
   const { verification, artifactOutcome, ...body } = result;
   return { ok: true, contractVersion: '2.1', meta: {}, generated: body, verification, artifactOutcome };
 };
-const clientOf = fetchFn => Client.createAiClient({ apiBase: 'https://gateway.test.invalid', customerToken: 'TEST_ONLY', hostname: HOST, transport: Client.createDefaultTransport({ kintoneApi: null, fetchFn }) });
+const clientOf = fetchFn => Client.createAiClient({ apiBase: 'https://gateway.test.invalid', accessToken: 'TEST_ONLY', hostname: HOST, transport: Client.createDefaultTransport({ kintoneApi: null, fetchFn }) });
 
 test('進捗は途中の案にならず、完了イベントの本文だけを受け取る', async () => {
   const events = [], seen = [];

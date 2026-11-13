@@ -77,7 +77,7 @@ test('第三者変更と判定された反映の部分結果から復元を開�
 });
 
 for (const [state, title, resume] of [
-  ['incomplete', '作成途中です', true], ['failed', '検証で不一致がありました', true], ['unverified', '検証できない内容があります', false]
+  ['incomplete', '作成途中です', true], ['failed', '検証で不一致がありました', true], ['unverified', '自動確認できていない内容があります', false]
 ]) test(state + 'を見出しと次の操作で区別する', async () => {
   const f = fixture(Workspace, { generate: ({ customization }) => generated(customization, { state, message: '検証の具体的な理由' }) });
   await build(f); const current = get(f), screen = html(current), counts = ai(f);
@@ -96,7 +96,7 @@ test('完成済みと検証不能の混在では完成済みを保持し、再�
   const f = fixture(Workspace, { generate: ({ customization }) => generated(customization, { state: customization.customizationId === 'C1' ? 'ready' : 'unverified' }) });
   await build(f); const before = get(f), counts = ai(f), screen = html(before);
   assert.equal(before.artifacts[0].result.artifactOutcome.state, 'ready');
-  assert.match(screen, /できた内容/); assert.match(screen, /完成した内容は残っています/);
+  assert.match(screen, /自動確認が完了した内容/); assert.match(screen, /JavaScriptは作成済みです/);
   assert.doesNotMatch(screen, /data-release-action="resume"|反映する変更はありません/);
   assert.equal(await f.controller.resume(), false); assert.deepEqual(ai(f), counts);
   assert.deepEqual(get(f).artifacts, before.artifacts);
@@ -107,7 +107,7 @@ test('検証不能と辞退は同じ要求をそのまま有料再生成へ送�
     const f = fixture(Workspace, { generate: () => { throw Object.assign(Error('作成前に止まりました'), { code }); } });
     await build(f); const counts = ai(f), screen = html(get(f));
     assert.doesNotMatch(screen, /data-release-action="resume"/, code);
-    assert.match(screen, /相談欄で内容を修正する/);
+    assert.match(screen, /内容について相談する/);
     assert.equal(await f.controller.resume(), false, code); assert.deepEqual(ai(f), counts);
   }
 });

@@ -77,6 +77,28 @@ test('startup restores the last selected older history without saving the blank 
   assert.equal(f.calls.applied, 1); assert.equal(f.manager.isInitializing(), false); assert.equal(f.manager.isSwitching(), false);
 });
 
+test('file export rejects startup at each async restore boundary, then includes the restored payload', async t => {
+  for (const boundary of ['getSelection', 'load', 'restore', 'select']) await t.test(boundary, async t => {
+    const f = fixture(), gate = f.pause(boundary), before = clone([...f.saved]);
+    t.after(() => f.manager.dispose());
+    const starting = f.manager.initialize(); await gate.started.promise;
+    assert.throws(() => f.manager.exportCurrent(), { code: 'HISTORY_LOADING' });
+    gate.release.resolve(); assert.equal(await starting, true);
+    assert.deepEqual(f.manager.exportCurrent(), f.saved.get('older').payload);
+    assert.deepEqual([...f.saved], before); assert.equal(f.calls.save.length, 0);
+  });
+});
+
+test('manual restore blocks export and a failed open still allows saving retained work', async t => {
+  const f = fixture(); t.after(() => f.manager.dispose()); await f.manager.initialize();
+  const before = f.manager.exportCurrent(), gate = f.pause('load');
+  const opening = f.manager.open('newer'); await gate.started.promise;
+  assert.throws(() => f.manager.exportCurrent(), { code: 'HISTORY_LOADING' });
+  f.access = false; gate.release.resolve(); assert.equal(await opening, false);
+  assert.deepEqual(f.manager.exportCurrent(), before);
+  f.access = true;
+});
+
 test('an explicit empty selection stays blank while legacy missing selection restores newest', async t => {
   await t.test('explicit new conversation', async t => {
     const f = fixture({ selection: { id: null } }); t.after(() => f.manager.dispose());

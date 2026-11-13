@@ -1,0 +1,7 @@
+'use strict';
+const F=require('./business-fixture.js');
+async function make({stages=5,actions=stages,fields=0,js=0}={}){const data=F.raw(),a=structuredClone(Object.values(data.process.states)[0].assignee);data.process.states=Object.fromEntries(Array.from({length:stages},(_,i)=>['工程'+i,{name:'工程'+i,index:String(i),assignee:a}]));data.process.actions=Array.from({length:actions},(_,i)=>({name:'操作'+i,from:'工程'+(i%stages),to:'工程'+((i+1)%stages),filterCond:i%2?'金額 >= 100000':'',type:'PRIMARY'}));const {s}=await F.snapshot({data});let e=s.evidence.find(e=>e.kind==='field');for(let i=0;i<fields;i++)s.evidence.push({...structuredClone(e),evidenceId:'B'+(s.evidence.length+1),value:{...e.value,code:'追加'+i,label:'追加項目'+i}});s.categories.find(c=>c.category==='fields').itemCount+=fields;
+ if(js){s.evidence.push({evidenceId:'B'+(s.evidence.length+1),snapshotId:s.snapshotId,category:'javascript',kind:'javascript',source:{pointer:'/desktop/js/0',revision:s.revision,fetchedAt:s.categories.find(c=>c.category==='javascript').fetchedAt},label:'業務補助JS',active:true,value:{name:'workflow.js',target:'desktop',type:'FILE',scope:'ALL',order:0,bodyStatus:'success',text:'/* 原文を保持 '+ 'x'.repeat(js)+' */'},linkedEvidenceIds:[],unresolvedReferences:[]});s.categories.find(c=>c.category==='javascript').itemCount++;s.categories.find(c=>c.category==='javascript').presence='present';}
+ return s;}
+
+module.exports={make};

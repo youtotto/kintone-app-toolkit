@@ -2,7 +2,7 @@
 // Offline settlement through the existing ledger. No AI, network, or kintone.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { KTAiBudget: B } = require('./helpers/load-toolkit.js').loadToolkit();
+const { KTAiBudget: B } = require('./helpers/load-toolkit.js').loadToolkit({ verificationBudget: true });
 const storage = () => { const m = new Map(); return { getItem: k => m.get(k) ?? null, setItem: (k, v) => m.set(k, v), removeItem: k => m.delete(k) }; };
 const raw = (input, output, cached = 0, write = 0, short = 0, long = 0) => ({
   input_tokens: input, output_tokens: output, input_tokens_details: {
@@ -67,7 +67,7 @@ for (const failure of [false, true]) test((failure ? '失敗' : '成功') + 'で
 
 test('Sol・Terra・LunaでGatewayとToolkitが同じusageを同じ金額・未確定として扱う', async () => {
   const path = require('node:path'), { pathToFileURL } = require('node:url');
-  const aiRoot = process.env.KT_AI_REPO || path.resolve(__dirname, '../../AI');
+  const aiRoot = require('./helpers/ai-repo.js').resolveAiRepo();
   const { costMicroOf, priceOf } = await import(pathToFileURL(path.join(aiRoot, 'worker/src/v2/budget.mjs')).href);
   for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-terra-2026-10-27', 'gpt-6-luna', 'gpt-6-luna-2026-10-27']) for (const usage of [complete, raw(272000, 100), raw(272001, 100), raw(800, 10, 200, 500, 500, 0),
     { input_tokens: 1000, output_tokens: 100 }, raw(1000, 100, 900, 200, 200, 0),
@@ -127,7 +127,7 @@ test('Terraは通常・読取・保持期間別書込の単価と長文境界で
 });
 
 test('healthのLuna Fast相談・仮案・アイディアとSol通常資料を見積もり・上限強制にそろえる', async () => {
-  const { KTAiClient: Client } = require('./helpers/load-toolkit.js').loadToolkit();
+  const { KTAiClient: Client } = require('./helpers/load-toolkit.js').loadToolkit({ verificationBudget: true });
   const advertised = { model: 'gpt-6.1-sol', serviceTier: 'default', modelsByPurpose: { consultation: 'gpt-6-luna', document: 'gpt-6.1-sol', ideation: 'gpt-6-luna' },
     serviceTiersByPurpose: { consultation: 'fast', document: 'default', ideation: 'fast' }, maxOutputTokens: 4000, maxAiCalls: 1 };
   const limits = Client.limitsFromHealth({ limits: { version: 1, features: { 'toolkit.assistant-qa': advertised },

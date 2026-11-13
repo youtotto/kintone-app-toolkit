@@ -18,11 +18,8 @@ function toolkitSource() {
     .replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
   assert.ok(end >= 0);
-  return source.slice(0, end) + '\nglobalThis.TableShellTest={mountRoot};\n' + source.slice(end);
+  return source.slice(0, end) + '\nglobalThis.TableShellTest={mountRoot};globalThis.TableReleaseView=KTReleaseView;\n' + source.slice(end);
 }
-const workspaceSource = fs.readFileSync(process.env.KT_RELEASE_WORKSPACE_SRC || path.join(root, 'src/release-workspace.js'), 'utf8');
-const viewSource = fs.readFileSync(process.env.KT_RELEASE_VIEW_SRC || path.join(root, 'src/release-view.js'), 'utf8')
-  + '\nglobalThis.TableReleaseView=KTReleaseView;\n';
 
 for (const colorScheme of ['dark', 'light']) {
   test('説明の表は本物の外枠と' + colorScheme + '配色を共有し、見出し固定の役割は維持する', { timeout: 45000 }, async () => {
@@ -42,8 +39,6 @@ for (const colorScheme of ['dark', 'light']) {
       page.on('pageerror', error => errors.push(error.message));
       await page.goto('https://table-styles.test.invalid/');
       await page.addScriptTag({ content: toolkitSource() });
-      await page.addScriptTag({ content: workspaceSource });
-      await page.addScriptTag({ content: viewSource });
       await page.evaluate(state => {
         const shell = TableShellTest.mountRoot();
         shell.querySelector('#view-fields').innerHTML = '<table id="unchanged-table"><thead><tr><th>既存の見出し</th></tr></thead><tbody><tr><td>既存の内容</td></tr></tbody></table>';

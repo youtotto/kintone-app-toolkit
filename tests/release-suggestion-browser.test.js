@@ -19,6 +19,7 @@ async function mounted(t) {
   t.after(async () => { assert.deepEqual(errors, []); assert.deepEqual(network, []); await page.close(); });
   page.on('pageerror', e => errors.push(e.message)); await page.route('**/*', r => { network.push(r.request().url()); return r.abort(); });
   await page.setContent('<!doctype html><html lang="ja"><meta charset="utf-8"><title>追加提案の確認</title><body style="margin:0"><div id="host" style="height:100vh"></div></body></html>');
+  for (const file of ['release-workflow-diagram.js', 'release-workflow-overview.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
   await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src/release-workspace.js'), 'utf8') + '\nwindow.Workspace = KTReleaseWorkspace;' });
   await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src/release-view.js'), 'utf8') + '\nwindow.View = KTReleaseView;' });
   await page.evaluate(async ({ initial, updated }) => {

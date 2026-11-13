@@ -10,7 +10,7 @@ const root=path.resolve(__dirname,'..');
 test('同じ相談で概要から引継ぎ資料を作り、コピー保存と説明・変更案の切替はAIを呼ばない',{timeout:90000},async()=>{
  let pw;try{pw=require(process.env.PLAYWRIGHT_MODULE||'playwright');}catch{pw=require(path.join(process.env.USERPROFILE,'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'));}
  const T=loadToolkit();
- const {describeRegistry}=await import(pathToFileURL(path.join(root,'../AI/worker/src/v2/prompt-registry.mjs')).href);
+ const {describeRegistry}=await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
  const health={ok:true,supportedContractVersions:['2.1'],registry:describeRegistry(),entitlements:[{product:'toolkit',features:['assistant-qa','change-planner','customization-generator']}]};
  const prod={appId:'310',appName:'案件管理',fields:{memo:{type:'MULTI_LINE_TEXT',code:'memo',label:'備考'},ステータス:{type:'STATUS',code:'ステータス',label:'ステータス',enabled:true}},
  layout:[],views:{views:{},revision:'1'},status:{enable:true,states:{作成中:{name:'作成中',index:'0',assignee:{type:'ONE',entities:[]}},承認待ち:{name:'承認待ち',index:'1',assignee:{type:'ONE',entities:[]}},承認済み:{name:'承認済み',index:'2',assignee:{type:'ONE',entities:[]}}},actions:[]},customize:{scope:'ALL',desktop:{js:[],css:[]},mobile:{js:[],css:[]}}};
@@ -78,7 +78,7 @@ test('同じ相談で概要から引継ぎ資料を作り、コピー保存と�
   await page.waitForFunction(()=>work.capability().features['assistant-qa'].conversation.includes('discussionMetadata'));
   await page.locator('dialog [data-close]').click();
   assert.equal(await action('send').isEnabled(),true);assert.equal(countPaid(),0);
-  assert.equal(await action('documents').innerText(),'資料を作る');
+  assert.equal(await action('documents').locator('.ktr-entry-title').innerText(),'資料を作る');assert.equal(await action('documents').locator('.ktr-entry-price').innerText(),'2クレジット');
   await send('このアプリの仕組みを教えてください。');await page.locator('[data-consent]').click();
   await page.waitForFunction(()=>work.controller.getState().explanations.length===1);
   assert.equal(await page.locator('.ktr-current').getAttribute('data-release-stage'),'explanation');

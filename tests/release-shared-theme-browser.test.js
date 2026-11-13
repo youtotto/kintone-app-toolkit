@@ -55,7 +55,7 @@ async function inspect(page, selectors) {
     const box = el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth }; };
     const samples = selectors.flatMap(selector => [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length).map(el => {
       const s = getComputedStyle(el), bg = background(el), fg = over(rgba(s.color), bg), a = luminance(fg), b = luminance(bg);
-      return { selector, disabled: !!el.disabled, text: (el.textContent || el.value || '').trim().slice(0, 50), color: s.color, background: s.backgroundColor, effectiveBackground: bg.slice(0, 3), font: s.fontFamily, fontSize: parseFloat(s.fontSize), contrast: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), ...box(el) };
+      return { selector, action: el.dataset.releaseAction || null, disabled: !!el.disabled, text: (el.textContent || el.value || '').trim().slice(0, 50), color: s.color, background: s.backgroundColor, effectiveBackground: bg.slice(0, 3), font: s.fontFamily, fontSize: parseFloat(s.fontSize), contrast: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), ...box(el) };
     }));
     const bounds = Object.fromEntries(['#kt-toolkit', '#kt-toolkit > .bar', '#kt-toolkit > .body', '.ktr-workspace', '.ktr-layout', '.ktr-conversation', '.ktr-current', '#kt-release-input', 'dialog[open]'].map(selector => [selector, document.querySelector(selector)]).filter(([, el]) => el?.getClientRects().length).map(([selector, el]) => [selector, box(el)]));
     return { samples, bounds, width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyDirectDialog: document.querySelector('dialog[open]')?.parentElement === document.body };
@@ -91,7 +91,7 @@ function audit(normal, ai, dialog, scene) {
     check(shell[key] === workspace[key], `通常タブとAI画面の${key}が揃う: ${shell[key]} / ${workspace[key]}`);
     check(workspace[key] === modal[key], `AI画面とbody直下dialogの${key}が揃う: ${workspace[key]} / ${modal[key]}`);
   }
-  const normalButton = sample(normal, '#fi-copy'), aiButton = sample(ai, '.ktr-workspace button:not(:disabled)', s => s.text === '資料を作る');
+  const normalButton = sample(normal, '#fi-copy'), aiButton = sample(ai, '.ktr-workspace button:not(:disabled)', s => s.action === 'documents');
   const dialogButton = sample(dialog, 'dialog[open] button:not(:disabled)', s => s.text === '閉じる');
   for (const key of ['color', 'background', 'font']) {
     check(normalButton[key] === aiButton[key], `通常ボタンとAIボタンの${key}が揃う`);
@@ -239,7 +239,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         await page.screenshot({ path: path.join(output, label + '-config-lens-overview.png'), fullPage: true });
         await page.locator('#view-config-lens [data-cl-category="fields"]').click();
         await page.locator('#view-config-lens .ktcl-entry > summary').click();
-        const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-origin-time', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
+        const lensSelectors = ['#kt-toolkit', '#tab-config-lens', '.ktcl-view', '.ktcl-header p', '.ktcl-origin-info summary', '.ktcl-overview', '.ktcl-view button:not(:disabled)', '.ktcl-navigation small', '.ktcl-entry th', '.ktcl-entry td', '.ktcl-kind', '.ktcl-notes summary'];
         const lens = await inspect(page, lensSelectors), lensFailures = [];
         const shellSample = normal.samples.find(sample => sample.selector === '#kt-toolkit');
         const lensSample = lens.samples.find(sample => sample.selector === '.ktcl-view');

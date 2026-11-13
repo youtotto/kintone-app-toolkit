@@ -33,15 +33,18 @@ test('本物の認証クライアントから雑談だけを送り、通信失�
  const {KTAiClient}=require('./helpers/load-toolkit.js').loadToolkit();
  const values=new Map(),storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
  const requests=[];let fail=false;
- const session=KTAiClient.createSession({store:KTAiClient.createSettingsStore({storage,host:'h'}),hostname:'h',apiBase:'https://gw.test',transport:async req=>{
+ const session=KTAiClient.createSession({store:KTAiClient.createSettingsStore({storage,host:'h'}),hostname:'h',transport:async req=>{
   requests.push(req);if(fail)throw Error('offline');return {status:200,body:JSON.stringify({ok:true,version:1,reply:'こんにちは',handoff:false})};
  }});
  session.adopt({accessToken:'FAKE-AT',expiresAt:new Date(Date.now()+3600000).toISOString(),refreshToken:'FAKE-RT',refreshExpiresAt:new Date(Date.now()+86400000).toISOString(),scope:{product:'toolkit',feature:'assistant-qa',domain:'h'}});
  const result=await session.client.smalltalk({text:'こんにちは',history:[],requestId:'free-1',context:{adminNotes:'送らない'},model:'別モデル'});
  assert.equal(result.reply,'こんにちは');assert.equal(requests.length,1);
- assert.equal(requests[0].url,'https://gw.test/v2/smalltalk');assert.equal(requests[0].headers.Authorization,'Bearer FAKE-AT');
+ assert.equal(requests[0].url,KTAiClient.DEFAULT_API_BASE+'/v2/smalltalk');assert.equal(requests[0].headers.Authorization,'Bearer FAKE-AT');
  assert.deepEqual(JSON.parse(requests[0].body),{version:1,requestId:'free-1',text:'こんにちは',history:[]});
- fail=true;await assert.rejects(session.client.smalltalk({text:'続き',requestId:'free-2'}));assert.equal(requests.length,2);
+ fail=true;await assert.rejects(session.client.smalltalk({text:'続き',requestId:'free-2'}));
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(requests.length,2,'通信失敗後に生成を再送しない');
+ assert.ok(requests.every(req=>req.url===KTAiClient.DEFAULT_API_BASE+'/v2/smalltalk'));
+ assert.deepEqual(JSON.parse(requests[1].body),{version:1,requestId:'free-2',text:'続き',history:[]});
 });
 
  test('100文字は送信し101文字は拒否、旧500文字の履歴は保持する',async()=>{

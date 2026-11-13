@@ -12,7 +12,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     page.on('pageerror', e => errors.push(e.message));
     await page.route('**/*', r => r.request().url() === 'https://release.test.invalid/' ? r.fulfill({ contentType: 'text/html', body: '<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="host" style="height:100vh"></div></body></html>' }) : (network.push(r.request().url()), r.abort()));
     await page.goto('https://release.test.invalid/');
-    for (const file of ['release-workspace.js', 'release-view.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
+    for (const file of ['release-workflow-diagram.js', 'release-workflow-overview.js', 'release-workspace.js', 'release-view.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
     await page.evaluate(() => {
       window.calls = { ai: 0, apply: 0, read: 0, rollback: 0, rollbackRead: 0 }; window.unverified = false; window.purposes = [];
       const proposal = { behaviors: [{ id: 'B1', text: '承認待ちの一覧を追加する', origin: 'user' }], decisions: [], assumptions: [], cannot: ['画面からの操作だけが対象です。'] };
@@ -82,7 +82,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     await send('備考の編集制御を作ってください');
     await page.locator('[data-release-action="adopt"]').click();
     await page.waitForFunction(() => controller.getState().phase === 'incomplete');
-    assert.equal(await page.getByRole('heading', { name: '検証できない内容があります', exact: true }).isVisible(), true);
+    assert.equal(await page.getByRole('heading', { name: '自動確認できていない内容があります', exact: true }).isVisible(), true);
     assert.equal(await page.locator('[data-release-action="resume"]').count(), 0);
     assert.equal(await page.locator('[data-release-action="apply"]').count(), 0);
     await page.locator('[data-release-action="documents"]').click();

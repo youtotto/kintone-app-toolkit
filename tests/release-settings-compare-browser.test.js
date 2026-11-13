@@ -99,6 +99,7 @@ test('運用環境を左に固定し、同じ画面で動作テストと保存�
     await upload(downloads[0].document, 'fresh-production.json');
     assert.match(await pane().locator('[data-cl-summary]').innerText(), /変更はありません/, '保存した運用設定を運用と比較すれば差はない');
     await upload(original.document);
+    await origin('after').locator('.ktcl-origin-info > summary').click();
     const savedOrigin = await visibleOrigin('after');
     assert.match(savedOrigin, /保存時のアプリ/);
     assert.match(savedOrigin, /fixture.cybozu.com/);
@@ -108,6 +109,7 @@ test('運用環境を左に固定し、同じ画面で動作テストと保存�
     assert.match(savedOrigin, /取得[\s\S]*2026[/-]10[/-]0?1/);
     assert.match(savedOrigin, /保存[\s\S]*2026[/-]10[/-]0?2/);
     assert.deepEqual(await origin('after').locator('time').evaluateAll(nodes => nodes.map(el => el.getAttribute('datetime'))), ['2026-10-01T02:03:04.000Z', '2026-10-02T03:04:05.000Z'], '設定取得とファイル保存の日時を取り違えない');
+    await origin('before').locator('.ktcl-origin-info > summary').click();
     const currentOrigin = await visibleOrigin('before');
     assert.match(currentOrigin, /左.*運用環境/);
     assert.match(currentOrigin, /現在の運用アプリ/);
@@ -153,6 +155,7 @@ test('運用環境を左に固定し、同じ画面で動作テストと保存�
     await upload(other, '<saved>.json');
     assert.equal(await pane().locator('[data-cl-cross-app]').count(), 1);
     assert.match(await visibleOrigin('after'), /別アプリの保存設定/);
+    await origin('after').locator('.ktcl-origin-info > summary').click();
     assert.match(await origin('after').innerText(), /other.cybozu.com/);
     assert.match(await origin('after').innerText(), /アプリ 900/);
     assert.match(await visibleOrigin('before'), /現在の運用アプリ/);

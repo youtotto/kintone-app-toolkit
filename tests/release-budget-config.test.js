@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadToolkit } = require('./helpers/load-toolkit.js');
-const { KTAiBudget: B } = loadToolkit();
+const { KTAiBudget: B } = loadToolkit({ verificationBudget: true });
 const host = 'budget-test.cybozu.com';
 const plain = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -167,4 +167,39 @@ test('正式なconfigureから確保と精算を通し、8回の後は9回目を
   await assert.rejects(client.propose({ ctx: {} }), reason('calls'));
   assert.equal(sent.length, 8);
   assert.ok(sent.every(p => p.budget.allowanceUsd > 0 && p.budget.allowanceUsd <= 1));
+});
+
+
+test('成功応答の費用不足は終了不明と分離し、確保・回数・再読込を維持する', async () => {
+  const f = fixture(); await f.budget.configure({ limitUsd: 1, maxCalls: 1 });
+  const r = { ...response, budgetMeta: { spentUsd: 0, complete: false, calls: [{ kind: 'propose', boundUsd: 0.1, costUsd: null, costReason: 'cache-usage-unknown' }] } };
+  const client = f.budget.wrap({ propose: async () => r }, { limits });
+  await client.propose({ ctx: {} });
+  const s = f.budget.summary(), e = f.budget.readState().ledger.entries[0];
+  assert.equal(s.costUnknown, 1); assert.equal(s.completionUnknown, 0); assert.equal(s.unknown, 1);
+  assert.equal(s.usedCalls, 1); assert.ok(s.reservedUsd > 0); assert.equal(e.costUsd, null); assert.equal(e.costComplete, false);
+  assert.equal(e.responseState, 'succeeded'); assert.match(B.summaryText(s), /応答完了・費用未確定 1 件/); assert.doesNotMatch(B.summaryText(s), /終了不明/);
+  const restored = fixture({ store: f.store, sessionId: 'after-reload' });
+  restored.budget.wrap({}, { limits });
+  assert.deepEqual(plain(restored.budget.summary()), plain(s));
+  await assert.rejects(client.propose({ ctx: {} }), reason('calls'));
+});
+
+test('一部だけ費用が分かる成功応答も、既知費用と未知分の確保を分けて残す', async () => {
+  const f = fixture(); await f.budget.configure({ limitUsd: 1, maxCalls: 4 });
+  const r = { ...response, budgetMeta: { spentUsd: 0.01, complete: false, calls: [{ kind: 'propose', boundUsd: 0.1, costUsd: 0.01 }, { kind: 'repair', boundUsd: 0.1, costUsd: null }] } };
+  await f.budget.wrap({ propose: async () => r }, { limits }).propose({ ctx: {} });
+  const s = f.budget.summary(); assert.equal(s.recordedUsd, 0.01); assert.ok(s.reservedUsd > 0); assert.equal(s.usedCalls, 2);
+  assert.equal(s.costUnknown, 1); assert.equal(s.completionUnknown, 0); assert.doesNotMatch(B.summaryText(s), /終了不明/);
+  assert.match(B.summaryText(s), /費用未確定/); // 呼出し超過による停止表示でも保持
+});
+
+test('通信失敗と旧記録の終了不明を成功扱いせず、確定済み費用は未確定にしない', async () => {
+  const f = fixture(); await f.budget.configure({ limitUsd: 1, maxCalls: 8 });
+  await f.budget.wrap({ propose: async () => response }, { limits }).propose({ ctx: {} });
+  assert.equal(f.budget.summary().costUnknown, 0); assert.equal(f.budget.summary().done, 1);
+  await assert.rejects(f.budget.wrap({ propose: async () => { throw new Error('disconnected'); } }, { limits }).propose({ ctx: {} }));
+  const s = f.budget.summary(); assert.equal(s.completionUnknown, 1); assert.equal(s.costUnknown, 0); assert.match(B.summaryText(s), /終了不明 1 件/);
+  const legacy = { version: 1, entries: [{ key: 'old', status: 'unknown', reservedUsd: 0.1, reservedCalls: 1, costUsd: null, costComplete: false, calls: [], endedAt: '2026-10-30', reason: null }] };
+  const total = B.totalsOf(legacy); assert.equal(total.completionUnknown, 1); assert.equal(total.costUnknown, 0); assert.equal(total.reservedUsd, 0.1);
 });

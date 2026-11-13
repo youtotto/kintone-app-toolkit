@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..'), clone = F.clone;
 test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ渡し会話と手元編集を保つ', { timeout: 120000 }, async () => {
   let pw; try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
   catch { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
-  const { describeRegistry } = await import(pathToFileURL(path.join(root, '../AI/worker/src/v2/prompt-registry.mjs')).href);
+  const { describeRegistry } = await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
   const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
   const prod = { appId: '398', appName: '比較用', fields: { memo: { code: 'memo', label: '備考', type: 'SINGLE_LINE_TEXT' } }, layout: [], views: { views: {} }, settings: { name: '比較用', description: '' }, customize: { scope: 'ALL', desktop: { js: [fileEntry('old', 'test.js', 'OLD;')], css: [] }, mobile: { js: [], css: [] } } };
   prod.adminNotes = { content: '<p>運用の管理メモ</p>', includeInTemplateAndDuplicates: false };

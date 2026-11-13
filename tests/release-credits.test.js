@@ -31,14 +31,21 @@ test('共通残数ゼロは相談と作成の両方を止め、確保中と消�
   }
 });
 
-test('同じ現行プランIDを新形式だけスターターと表示し、契約名から上限を補わない', () => {
+test('同じ現行プランIDを新形式だけSOLOと表示し、契約名から上限を補わない', () => {
   const html = V.usageHtml(usage(64, 1, 73));
-  assert.match(html, /スターター/); assert.match(html, /data-usage-credits/); assert.match(html, /残り 64 \/ 月 73/);
+  assert.match(html, /SOLO/); assert.match(html, /data-usage-credits/); assert.match(html, /残り 64 \/ 月 73/);
   assert.match(html, /利用済み 8・確保中 1/); assert.match(html, /クレジットは契約全体で共有/);
   assert.doesNotMatch(html, /data-usage-bucket|ライト|作成.*回|相談.*回|円|gpt-|token/i);
   assert.equal(W.usagePlanLabel({ version: 2, plan: 'toolkit-light' }), 'ライト');
-  assert.equal(W.usagePlanLabel({ version: 3, plan: 'toolkit-standard' }), 'スタンダード');
+  assert.equal(W.usagePlanLabel({ version: 2, plan: 'toolkit-standard' }), 'スタンダード');
+  assert.equal(W.usagePlanLabel({ version: 3, plan: 'toolkit-standard' }), 'TEAM');
   assert.equal(W.usagePlanLabel({ version: 3, plan: 'unknown-plan' }), '契約プラン');
+});
+
+test('Businessはサーバーの500cr・9800円とMULTI込みを表示する',()=>{
+ const u=W.usageOf({version:4,plan:'toolkit-business',price:{monthlyJpy:9800,taxIncluded:true},options:{multiDomain:true,multiIncluded:true},operationCosts:{consultation:1,document:2,diagnosis:3,business:10,final:3},credits:{limit:500,used:23,reserved:2,remaining:475}});
+ assert.equal(W.usagePlanLabel(u),'Business（MULTI込み）');
+ const html=V.usageHtml(u);assert.match(html,/Business（MULTI込み）/);assert.match(html,/9,800/);assert.match(html,/475.*500/);assert.doesNotMatch(html,/11,800|250クレジット/);
 });
 
 test('共通クレジットの上限案内は種類で重みを変えず、確保中なら月替わり待ちにしない', () => {
@@ -85,7 +92,7 @@ test('成功応答の共通usageをクライアントが維持する', () => {
 
 const bundledUsage = (remaining = 97, reserved = 0, limit = 100) => ({
   ...usage(remaining, reserved, limit), version: 4,
-  price: { monthlyJpy: limit === 250 ? 2980 : 1480, taxIncluded: true },
+  price: { monthlyJpy: limit === 250 ? 4980 : 2480, taxIncluded: true },
   operationCosts: { consultation: 1, document: 2, final: 3 }
 });
 
@@ -152,12 +159,41 @@ test('同じ最終案の再開はサービスの判定で許可し、新しい�
 
 test('新方式の接続表示はサーバーの税込価格と月枠を使い、不明な価格を補完しない', () => {
   const starter = V.usageHtml(bundledUsage(97));
-  assert.match(starter, /月額 1,480円（税込）/);
+  assert.match(starter, /月額 2,480円（税込）/);
   assert.match(starter, /残り 97 \/ 月 100/);
   const standard = V.usageHtml({ ...bundledUsage(248, 0, 250), plan: 'toolkit-standard' });
-  assert.match(standard, /スタンダード/);
-  assert.match(standard, /月額 2,980円（税込）/);
+  assert.match(standard, /TEAM/);
+  assert.match(standard, /月額 4,980円（税込）/);
   assert.match(standard, /残り 248 \/ 月 250/);
-  assert.doesNotMatch(V.usageHtml({ ...bundledUsage(), price: null }), /data-usage-price|1,480|2,980/);
-  assert.doesNotMatch(V.usageHtml({ ...usage(), price: { monthlyJpy: 1480, taxIncluded: true } }), /data-usage-price|円/);
+  assert.doesNotMatch(V.usageHtml({ ...bundledUsage(), price: null }), /data-usage-price|2,480|4,980/);
+  assert.doesNotMatch(V.usageHtml({ ...usage(), price: { monthlyJpy: 2480, taxIncluded: true } }), /data-usage-price|円/);
+});
+
+test('MULTIはオプション込みの月額を表示し、契約の共通クレジット枠を増やさない', () => {
+  for (const [plan,limit,price] of [['toolkit-light',100,4480],['toolkit-standard',250,6980]]) {
+    const raw = { ...bundledUsage(limit-2,0,limit), plan, options: {multiDomain:true}, price:{monthlyJpy:price,taxIncluded:true} };
+    const normalized = W.usageOf(raw), html = V.usageHtml(normalized);
+    assert.equal(normalized.options.multiDomain,true);
+    assert.equal(normalized.credits.limit,limit);
+    assert.match(html,/ ＋ MULTI/);
+    assert.ok(html.includes(price.toLocaleString('ja-JP')+'円'));
+    assert.ok(html.includes('月 '+limit));
+    assert.equal(W.usageOf({...raw,options:{multiDomain:'true'}}).options,undefined);
+  }
+});
+
+test('雑談の月枠は接続先の値を表示し、契約変更後も使用済み回数を保持する',()=>{
+ const state=F.fixture(W).controller.getState();
+ const render=(limit,usage)=>V.render(state,{connection:{connected:true,available:true,canSmalltalk:true,smalltalkMonthlyLimit:limit},smalltalk:{getState:()=>({open:true,pending:false,turns:[],draft:'',usage})}});
+ for(const limit of [200,500,1000]){
+  assert.ok(render(limit).includes('1契約につき月'+limit+'回'));
+  const html=render(limit,{monthly:{limit:300,used:36,remaining:264,resetsAt:'2099-12-31T15:00:00Z'}});
+  assert.ok(html.includes('今回の契約期間 36/'+limit+'回'));assert.doesNotMatch(html,/36\/300回/);
+ }
+ assert.match(render(null),/月の上限は接続先から確認します/);
+ assert.doesNotMatch(render(null),/月300回|月200回|月500回|月1000回/);
+ const old=render(null,{monthly:{limit:300,used:36,remaining:264,resetsAt:'2099-12-31T15:00:00Z'}});
+ assert.match(old,/今回の契約期間 36\/300回/);
+ const over=render(200,{monthly:{limit:1000,used:600,remaining:400,resetsAt:'2099-12-31T15:00:00Z'}});
+ assert.match(over,/今回の契約期間 600\/200回/);assert.match(over,/から利用できます/);
 });

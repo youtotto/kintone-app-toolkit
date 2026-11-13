@@ -462,7 +462,7 @@ test('上限停止はタイトル横の短い通知にし、全文と必要な�
   const before = JSON.stringify(state), html = KTReleaseView.render(state);
   const header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
   assert.match(header, /class="ktr-title-line"><strong>アプリの相談<\/strong><details class="ktr-header-notice"/);
-  assert.match(header, /<summary><span role="alert">AIの利用上限に達しました<\/span><\/summary>/);
+  assert.match(header, /<summary><span role="alert">今回のAI利用枠を確保できません<\/span><\/summary>/);
   assert.match(header, /class="ktr-header-notice-body"[\s\S]*案は更新していません。&lt;詳細&gt;/);
   assert.match(header, /data-release-action="close-notice"/);
   assert.doesNotMatch(header, /<details[^>]*\sopen(?:\s|>)/);

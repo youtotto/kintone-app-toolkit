@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const usage = (consultation = 1, creation = 3) => ({ version: 2, plan: 'toolkit-light', yyyymm: '209910', resetsAt: '2099-10-31T15:00:00.000Z', timeZone: 'Asia/Tokyo', buckets: { consultation: { limit: 100, used: 100 - consultation, reserved: 0, remaining: consultation }, creation: { limit: 15, used: 15 - creation, reserved: 0, remaining: creation } } });
 test('接続の残数を応答ごとに更新し、相談上限でも作成でき、作成上限でも無料操作と会話を残す', { timeout: 90000 }, async () => {
   let pw; try { pw = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); } catch { pw = require(path.join(process.env.USERPROFILE, '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
-  const { describeRegistry } = await import(pathToFileURL(path.join(process.env.KT_AI_REPO || path.resolve(root, '../AI'), 'worker/src/v2/prompt-registry.mjs')).href);
+  const { describeRegistry } = await import(require('./helpers/ai-repo.js').aiUrl('worker/src/v2/prompt-registry.mjs'));
   const health = { ok: true, supportedContractVersions: ['2.1'], registry: describeRegistry(), entitlements: [{ product: 'toolkit', features: ['assistant-qa', 'change-planner', 'customization-generator'] }] };
   const prod = { appId: '310', appName: '回数表示の確認', fields: { memo: { type: 'MULTI_LINE_TEXT', code: 'memo', label: '備考' } }, layout: [], views: { views: {}, revision: '1' }, status: { enable: false, states: {}, actions: [] }, customize: { scope: 'ALL', desktop: { js: [], css: [] }, mobile: { js: [], css: [] } } };
   const T = loadToolkit(), mock = makeKintoneMock(prod), loadBase = devBaseLoaderOf({ KTDevBase: { load: T.KTDevBase.loadForRelease } }, { appId: '310', production: prod, mockRef: () => mock });

@@ -5,10 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null } = {}) {
+function loadToolkit({ document: docOverride = null, localStorage: lsOverride = null, verificationBudget = false } = {}) {
   // KT_SRC: 別のビルド（修正前の版など）で同じテストを走らせるとき（RED の確認）に使う
   const SRC = process.env.KT_SRC || path.join(__dirname, '..', '..', 'kintoneAppToolkit.user.js');
   let code = fs.readFileSync(SRC, 'utf8');
+  if (verificationBudget) { const at=code.lastIndexOf('})();'); code=code.slice(0,at)+fs.readFileSync(path.join(__dirname,'../../tools/verification/ai-budget.js'),'utf8')+code.slice(at); }
   const lastClose = code.lastIndexOf('})();');
   if (lastClose < 0) throw new Error('IIFE close not found');
   code = code.slice(0, lastClose)

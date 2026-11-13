@@ -11,7 +11,7 @@ test('長い案・修正失敗・計画失敗・一部反映を画面で区別�
   page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/*',r=>r.request().url()==='https://release.test.invalid/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="host" style="height:100vh"></div></body></html>'}):(network.push(r.request().url()),r.abort()));
   await page.goto('https://release.test.invalid/');
-  for(const file of ['release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
+  for(const file of ['release-workflow-diagram.js','release-workflow-overview.js','release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
   await page.evaluate(()=>{
    window.calls={plan:0,apply:0,propose:0};window.failConsult=false;
    const long='承認済みの場合は入力欄を編集できなくし、差し戻した後は編集できます。'.repeat(6);
@@ -96,7 +96,7 @@ test('ヘッダー通知の開閉と再表示は相談・変更案・手元の�
   page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/*',r=>r.request().url()==='https://release.test.invalid/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="host" style="height:100vh"></div><textarea id="local-code" hidden>const edited = true;</textarea></body></html>'}):(network.push(r.request().url()),r.abort()));
   await page.goto('https://release.test.invalid/');
-  for(const file of ['release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
+  for(const file of ['release-workflow-diagram.js','release-workflow-overview.js','release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
   await page.evaluate(()=>{
    window.calls={ai:0,write:0,connect:0};window.codeOpen=false;window.connection={connected:true,available:true,canPlan:true};
    window.state={phase:'proposal',version:1,taskId:1,messages:[{role:'user',text:'備考を編集できなくしてください。'}],runs:[],artifacts:[],
@@ -109,7 +109,7 @@ test('ヘッダー通知の開閉と再表示は相談・変更案・手元の�
   const notification=page.locator('[data-release-panel="header-notice"]'),summary=notification.locator('summary');
   const open=async()=>{if(!await notification.evaluate(el=>el.open))await summary.click();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>resolve())));};
   const closed=async()=>assert.equal(await notification.evaluate(el=>el.open),false);
-  await closed();assert.equal(await summary.locator('[role="alert"]').innerText(),'AIの利用上限に達しました');
+  await closed();assert.equal(await summary.locator('[role="alert"]').innerText(),'今回のAI利用枠を確保できません');
   await page.locator('#kt-release-input').fill('未送信の修正相談');
   const initial=await page.evaluate(()=>JSON.stringify(state)),proposalText=await page.locator('.ktr-current').innerText();
   await open();
