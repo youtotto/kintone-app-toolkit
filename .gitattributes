@@ -1,0 +1,2 @@
+# Preserve the pinned upstream oracle byte-for-byte, including its original comments.
+tests/fixtures/config-lens-fa9a942.cjs -text whitespace=-blank-at-eol

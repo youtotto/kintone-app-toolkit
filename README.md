@@ -6,7 +6,7 @@
 
 [導入する](#導入は3ステップ) · [機能の早見表](#機能の早見表) · [実機で見る使い方](#実機で見る使い方) · [料金・接続案内](https://www.nestrec.com/toolkit)
 
-**公開版：2.3.3**（2026年11月11日）。[今回の修正内容](docs/RELEASE-NOTES-2.3.3.md)
+**公開版：2.3.4**（2026年11月14日）。[今回の修正内容](docs/RELEASE-NOTES-2.3.4.md)
 
 ![ToolkitのFields画面。上部のタブで機能を切り替え、項目の使用箇所と変更影響の候補を確認できます。](docs/images/fields.jpg)
 
@@ -63,7 +63,7 @@ PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です
 2. **[公開中のToolkitを開く](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)。** Tampermonkeyの画面でインストールする。
 3. **kintoneアプリを開き、Toolkitを使う。** まずは無料の設定確認から。AIを使う場合だけ、[料金・接続案内](https://www.nestrec.com/toolkit)に沿ってNest Rec会員で接続する。
 
-既存版から更新するときは、必要な会話・コードを保存してから上記スクリプトを開き、更新後にkintoneアプリを再読み込みしてください。[2.3.3の変更点と更新方法](docs/RELEASE-NOTES-2.3.3.md)
+既存版から更新するときは、必要な会話・コードを保存してから上記スクリプトを開き、更新後にkintoneアプリを再読み込みしてください。[2.3.4の変更点と更新方法](docs/RELEASE-NOTES-2.3.4.md)
 
 ## 使う前に知っておきたいこと
 
@@ -79,6 +79,7 @@ PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です
 |---|---|
 | [機能リファレンス](docs/feature-reference.md) | 各タブの使い方、解析範囲、安全性、API一覧、過去の更新履歴 |
 | [AI Assistantのガイド](docs/release-workspace.md) | 相談・資料作成・変更案・反映・会話保存の流れと確認範囲 |
+| [2.3.4の修正内容](docs/RELEASE-NOTES-2.3.4.md) | ビルド識別子・版情報の整合と、開発・検証手順の整理 |
 | [2.3.3の修正内容](docs/RELEASE-NOTES-2.3.3.md) | 自動検証できない条件でのJS生成と、工程カードの配色の修正 |
 | [2.3.0の主な変更](docs/RELEASE-NOTES-2.3.0.md) | 設定比較、AIによる診断・相談・開発支援 |
 | [製品ページ](https://www.nestrec.com/toolkit) | 料金、導入・接続、契約管理、お問い合わせ |
@@ -88,6 +89,7 @@ PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です
 
 | 版 | 公開日 | 主な変更 |
 |---|---|---|
+| [2.3.4](docs/RELEASE-NOTES-2.3.4.md) | 2026-11-14 | ビルド識別子・表示版・配布版を統一し、版の自動照合と検証手順を整備 |
 | [2.3.3](docs/RELEASE-NOTES-2.3.3.md) | 2026-11-11 | 自動検証できない条件でも作成済みコード・説明・未確認の理由を保持。工程カードの配色を修正 |
 | [2.3.2](docs/RELEASE-NOTES-2.3.2.md) | 2026-11-11 | 通常の会員接続で、通信断後の保存済み回答を再生成・追加消費なしで回収 |
 | [2.3.1](docs/RELEASE-NOTES-2.3.1.md) | 2026-11-11 | 一般配布から検証専用機能を除き、会員の承認による接続に統一 |
