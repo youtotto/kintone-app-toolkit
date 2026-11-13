@@ -28,7 +28,7 @@
   - [Graphs](#graphs)
   - [Config Lens](#config-lens)
   - [Relations](#relations)
-  - [Deps](#deps)
+  - [Deps](#depsnew-in-v21)
   - [Notices](#notices)
   - [Access Control](#access-control)
   - [Customize](#customize)
