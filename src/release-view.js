@@ -192,6 +192,7 @@ const KTReleaseView = (() => {
     const suggestionRef = ` data-release-task="${esc(state.taskId)}" data-release-version="${esc(state.version)}"`;
     return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? `<ul>${behaviors.map(b => `<li>${b.origin === 'ai' ? '<strong data-release-required-support>実現に必要な補足：</strong>' : ''}${esc(textOf(b))}</li>`).join('')}</ul>` : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
       ${suggestions.length ? `<section data-release-panel="suggestions"><h3>任意の改善提案</h3><p class="ktr-note">選ばなくても基本案は進められます。チェックするだけでは、案の更新やAIの呼び出しは行いません。</p><div class="ktr-suggestion-choices">${suggestions.map(item => `<label class="ktr-suggestion-choice"><input type="checkbox" data-release-suggestion="${esc(item.id)}"${suggestionRef}${selected.has(item.id) ? ' checked' : ''}${!suggestionEditable ? ' disabled' : ''}><span>${esc(textOf(item))}</span></label>`).join('')}</div></section>` : ''}
+      ${p.approach?.js?.length ? `<section aria-label="JavaScriptの変更方針"><h3>JavaScriptの変更方針</h3>${list(p.approach.js)}</section>` : ''}
       ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
       ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => {
         const question = q.question || q.label || q.text || '確認したいこと';

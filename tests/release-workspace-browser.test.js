@@ -111,6 +111,10 @@ test('実ブラウザーの正式な操作で相談・採用・確認・反映�
     assert.equal(serviceCalls.filter(c=>c.name==='propose').length,0);
     await page.locator('[data-consent]').click();
     await phase('proposal');
+    const approach = page.getByRole('region', { name: 'JavaScriptの変更方針', exact: true });
+    assert.equal(await approach.isVisible(), true);
+    assert.ok((await approach.innerText()).includes('備考の編集制御'));
+    assert.equal(await page.locator('main').getByRole('region', { name: 'JavaScriptの変更方針', exact: true }).count(), 1);
     assert.equal(await page.locator('#kt-release-input').count(),1);
     assert.match(await page.locator('.ktr-chat-log').innerText(),/既存の設定と入力チェックを維持します/);
     assert.equal(serviceCalls.filter(c=>c.name==='plan').length,0);

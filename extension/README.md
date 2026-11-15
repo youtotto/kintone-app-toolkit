@@ -2,9 +2,9 @@
 
 ユーザースクリプト版（`kintoneAppToolkit.user.js`）と同じソースから、Chrome / Edge の拡張機能（Manifest V3）を作ります。ユーザースクリプトは変えず、違いはすべてビルドで作ります。
 
-**公開版：2.3.5**（2026年11月15日）。[変更内容と検証範囲](../docs/RELEASE-NOTES-2.3.5.md)
+**公開版：2.3.6**（2026年11月16日）。[変更内容と検証範囲](../docs/RELEASE-NOTES-2.3.6.md)
 
-GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.5/kintone-app-toolkit-2.3.5-chrome-extension.zip)を配布しています。Chromeウェブストアでの公開は別途審査対象で、このZIP配布はストア公開済みを意味しません。
+GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.6/kintone-app-toolkit-2.3.6-chrome-extension.zip)を配布しています。Chromeウェブストアでの公開は別途審査対象で、このZIP配布はストア公開済みを意味しません。
 
 ## ZIPから導入する
 
@@ -16,9 +16,11 @@ GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/relea
 
 Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どちらか一方だけを有効にしてください。
 
+導入後は、[無料機能の試し方・AI接続・最初の相談](../docs/getting-started.md#2-アプリの一覧画面で無料機能を試す)へ進んでください。
+
 ## ZIP版を更新する
 
-必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。その後kintoneアプリを再読み込みし、「Ver 2.3.5」を確認してください。ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。
+必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。その後kintoneアプリを再読み込みし、「Ver 2.3.6」を確認してください。ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。
 
 ## 作り方
 
@@ -74,7 +76,7 @@ Tampermonkey 版と同時に有効にすると、Toolkit が 2 つ動きます�
 
 同じテストをユーザースクリプトと拡張機能の本体に対して実行し、結果の一致と両方の失敗数を確認します。多くのテストは部品を直接読むため、この比較だけで拡張機能の実機動作すべてを確認したことにはなりません。[無料テストの準備](../docs/test-setup.md)・[版の更新と照合](../docs/versioning.md)
 
-今回の公開で、新たな実AI呼び出しや実機試験は行っていません。事前の実機動画では、Edgeに読み込んだ拡張機能版で相談から動作テスト環境への反映、PCでの入力チェックと保存成功を確認しました。[2.3.5の検証範囲](../docs/RELEASE-NOTES-2.3.5.md#検証範囲)に記載しています。版を2.3.5へ更新した後の実Chromeでの導入確認と、モバイル画面での動作確認は未実施です。
+今回の変更と検証範囲は[2.3.6のリリースノート](../docs/RELEASE-NOTES-2.3.6.md#検証範囲)をご覧ください。実AI・決済・モバイル動作など変更のない経路は、過去の検証と今回の確認を区別して記載しています。
 
 <details>
 <summary>試作時点の検証記録（2026-11-12、2.3.3）</summary>

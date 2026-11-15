@@ -507,3 +507,43 @@ test('確認が必要な変更と制約は、通知を閉じても反映前の�
   assert.equal((shown.match(/data-release-action="apply"/g) || []).length, 1);
   assert.equal(JSON.stringify(state), before);
 });
+
+
+test('既存JSの編集対象と理由を右の仮案に表示し、保存復元・相談更新でも保持する', async () => {
+  const response = proposal();
+  const pc = 'PCの既存expense-reason.jsを編集します。同じ理由欄の保存時チェックにタクシー利用時の条件をまとめるためです。';
+  const mobile = 'モバイルの既存mobile-expense-validation.jsを編集します。モバイルの理由チェックにも同じ条件を加えるためです。';
+  response.proposal.approach.js = [pc, mobile];
+  const f = await mounted({ fixture: { propose: async () => clone(response) } });
+  await type(f.host, REQUEST); await click(f.host, 'send');
+  const section = html => /<section aria-label="JavaScriptの変更方針">[\s\S]*?<\/section>/.exec(normal(html))?.[0] || '';
+  assert.ok(section(f.host.innerHTML).includes(pc));
+  assert.ok(section(f.host.innerHTML).includes(mobile));
+  assert.ok(f.host.innerHTML.indexOf(section(f.host.innerHTML)) < f.host.innerHTML.indexOf('data-release-action="adopt"'));
+  assert.equal(f.count('plan'), 0); assert.equal(f.count('generate'), 0); assert.equal(f.writes.length, 0);
+  const saved = f.controller.exportSession(), next = await mounted();
+  assert.equal(await next.controller.restoreSession(saved), true);
+  assert.deepEqual(next.controller.getState().proposal.approach.js, [pc, mobile]);
+  assert.ok(section(next.host.innerHTML).includes(pc));
+  assert.ok(section(next.host.innerHTML).includes(mobile));
+  const updated = proposal();
+  updated.proposal.approach.js = ['モバイル用JSを新規追加します。対応する登録済みファイルがないためです。'];
+  next.services.propose = async () => updated;
+  await type(next.host, 'モバイルだけを対象にしてください'); await click(next.host, 'send');
+  assert.ok(section(next.host.innerHTML).includes(updated.proposal.approach.js[0]));
+  assert.doesNotMatch(section(next.host.innerHTML), /expense-reason.js|mobile-expense-validation.js/);
+});
+
+test('JavaScript方針のない旧会話には説明を補わず、AIの文言を安全に表示する', async () => {
+  const f = await mounted(); await type(f.host, REQUEST); await click(f.host, 'send');
+  const state = f.controller.getState();
+  for (const approach of [undefined, {}, { js: [] }]) {
+    state.proposal.approach = approach;
+    assert.doesNotMatch(KTReleaseView.render(state), /aria-label="JavaScriptの変更方針"/);
+  }
+  state.proposal.approach = { standard: [], js: ['既存の<script>alert(1)</script>.jsを編集する。理由は同じ入力欄を扱うため。'] };
+  const before = JSON.stringify(state), html = KTReleaseView.render(state);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;.js/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.equal(JSON.stringify(state), before);
+});
