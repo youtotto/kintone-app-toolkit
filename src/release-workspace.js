@@ -82,7 +82,7 @@ const KTReleaseWorkspace = (() => {
   const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? budgetLimitText(e) : e?.code === 'MODEL_OUTPUT_INVALID' ? ((e?.details?.error?.detail || e?.details)?.reason === 'EXCESSIVE_JSON_WHITESPACE' ? 'AIの回答で空白の繰り返しを検出したため、受信を止めました。結果は未完成のため採用していません。設定を減らす必要があるとは限りません。会話を保存し、回答形式を確認してください。再実行するとAIを呼び直します。' : (e?.details?.error?.detail || e?.details)?.reason === 'OUTPUT_TRUNCATED' ? 'AIの回答が出力上限に達し、途中で終了しました。結果は未完成のため採用していません。設定を減らす必要があるとは限りません。会話を保存し、出力上限と回答量の調整を確認してください。再実行するとAIを呼び直します。' : 'AIの応答形式を確認できなかったため、処理を止めました。問題の詳細を確認してください。') : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
   const busyPhases = new Set(['recovering', 'consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
   const SESSION_VERSION = 'release-workspace-session-1';
-  const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
+  const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'decisionDrafts', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
   const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
   const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
   // Saved content is a document, never a credential store or an execution snapshot.
@@ -173,13 +173,14 @@ const KTReleaseWorkspace = (() => {
     const s = payload?.state, integer = n => Number.isSafeInteger(n) && n >= 0;
     if (!object(payload) || ![SESSION_VERSION,'release-workspace-session-2'].includes(payload.version) || !object(s) || !integer(payload.sequence) || !Array.isArray(payload.pendingPlanQuestions)) return false;
     // Older saved conversations predate response recovery; keep them readable.
-    if (!savedStateKeys.filter(key => key !== 'responseRecovery').concat('runs').every(key => Object.hasOwn(s, key))) return false;
+    if (!savedStateKeys.filter(key => !['responseRecovery', 'decisionDrafts'].includes(key)).concat('runs').every(key => Object.hasOwn(s, key))) return false;
     const arrays = (value, keys) => keys.every(key => value[key] == null || Array.isArray(value[key]));
     if (!['idle', 'proposal', 'blocked', 'incomplete', 'review', 'unchanged', 'result', 'rollback-confirm', ...busyPhases].includes(s.phase) ||
       !integer(s.taskId) || !s.taskId || !integer(s.version) || !integer(s.questionIdFloor) || typeof s.goal !== 'string' ||
       !['consultation', 'document', 'ideation'].includes(s.requestPurpose) || typeof s.proposalPending !== 'boolean') return false;
     if (!['selectedSuggestionIds', 'answers', 'messages', 'explanations', 'artifacts', 'runs'].every(key => Array.isArray(s[key]))) return false;
     if (s.selectedSuggestionIds.some(id => typeof id !== 'string') || s.answers.some(a => !object(a) || typeof a.id !== 'string' || typeof a.answer !== 'string')) return false;
+    if (s.decisionDrafts != null && (!object(s.decisionDrafts) || Object.values(s.decisionDrafts).some(a => !object(a) || typeof a.question !== 'string' || typeof a.answer !== 'string'))) return false;
     if (s.messages.some(m => !object(m) || !integer(m.id) || !m.id || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !arrays(m, ['facts']))) return false;
     if (s.explanations.some(e => !object(e) || !/^explanation-[1-9][0-9]*$/.test(e.id) || typeof e.title !== 'string' || !Array.isArray(e.sections))) return false;
     if (s.explanations.some(e => !arrays(e, ['unknowns', 'facts']) || e.sections.some(section => !object(section) || !arrays(section, ['paragraphs', 'items', 'evidenceIds']) || (section.table != null && (!object(section.table) || !Array.isArray(section.table.columns) || !Array.isArray(section.table.rows)))))) return false;
@@ -207,12 +208,11 @@ const KTReleaseWorkspace = (() => {
     (result?.artifactOutcome?.state === 'unverified' && !!generatedBody(result).trim());
   // Rechecking never regenerates code or reuses an approval. It is available only
   // while this task has no execution and every required artifact is complete.
-  const canReprepare = state => !!state.plan && !state.proposalPending &&
+  const canReprepare = state => !!state.plan && !state.proposalPending && !state.responseRecovery &&
     ['blocked', 'incomplete'].includes(state.phase) &&
     !(state.runs || []).some(run => run.taskId === state.taskId) &&
     !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
-    (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
-    (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
+    (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
   // Only service states and error codes choose recovery actions; prose is not interpreted.
   function creationStateOf(state) {
     const artifacts = state.artifacts || [], unfinished = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready');
@@ -224,7 +224,7 @@ const KTReleaseWorkspace = (() => {
     const kind = unverified ? 'unverified' : declined ? 'declined' : reserved ? 'reserved' : (codes.has('BUDGET_EXCEEDED') || codes.has('MONTHLY_LIMIT_EXCEEDED')) ? 'limit' :
       unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
       unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
-    return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
+    return { kind, canResume: !!state.plan && !canReprepare(state) && !state.responseRecovery && !state.proposalPending && state.phase === 'incomplete' &&
       !declined && (!unverified || artifacts.some(a => a.result?.artifactOutcome?.state === 'unverified' && generatedResultAvailable(a.result)) &&
         (state.plan.customizations || []).some(c =>
         !artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result))) &&
@@ -237,6 +237,17 @@ const KTReleaseWorkspace = (() => {
     const items = (state.proposal?.behaviors || []).filter(b => b.origin === 'suggestion' && ids.has(b.id));
     return items.length ? '選んだ追加提案を現在の案に取り込み、案を更新してください。\n\n' + items.map(b => '- ' + b.text).join('\n') : '';
   }
+  const questionText = q => q.question || q.label || q.text || '確認したいこと';
+  function activeDecisionDrafts(state) {
+    return (state.proposal?.decisions || []).filter(q => !q.answer && !(state.answers || []).some(a => a.id === q.id && a.answer))
+      .flatMap(q => { const draft = state.decisionDrafts?.[q.id]; return draft?.answer.trim() && draft.question === questionText(q) ? [{ id:q.id, ...draft }] : []; });
+  }
+  function proposalFeedbackRequest(state, text = '') {
+    const answers = activeDecisionDrafts(state);
+    return [answers.length ? '確認事項への回答をまとめて案に反映してください。\n\n' + answers.map(a => a.question + '\n回答：' + a.answer.trim()).join('\n\n') : '',
+      suggestionRequest(state), String(text).trim()].filter(Boolean).join('\n\n');
+  }
+  const hasProposalFeedback = state => activeDecisionDrafts(state).length > 0 || !!suggestionRequest(state);
   // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
   function mainPlan(value) {
     const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -288,13 +299,13 @@ const KTReleaseWorkspace = (() => {
   }
   function create({ services, loadBase, execution, scope = null, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-    const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+    const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
     Object.assign(state, { businessContext: null, businessArchive: [], businessMode: 'understand', businessResult: null, businessSelectedIds: [], businessReviewRequired: false, businessPlanContext: null, businessInvalid: null, businessAnswerDrafts: {}, businessPlanRequests: null, businessPlanSelectedIds: [] });
     const sourceScopeFor = (snapshot, fresh) => scope && String(snapshot?.appId ?? fresh?.appId) === String(scope.appId) ? { domain: scope.domain, appId: String(scope.appId), environment: snapshot?.environment || fresh?.env, startedAt: snapshot?.startedAt || new Date(now()).toISOString(), completedAt: snapshot?.completedAt || new Date(now()).toISOString(), revision: String(snapshot?.revision ?? fresh?.revision?.preview ?? ''), snapshotId: snapshot?.snapshotId || 'document-source-' + sequence } : null;
     let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null, restoringSession = false, restoredBaseline = null, documentPhase = null;
     const fingerprints = new WeakMap(), fingerprintTasks = new WeakMap();
     const listeners = new Set(onChange ? [onChange] : []);
-    const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
+    const emit = change => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot, change); } catch (e) { console.error(e); } } };
     const set = values => { Object.assign(state, values); emit(); };
     const available = () => !restoringSession && !busyPhases.has(state.phase);
     const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
@@ -326,6 +337,10 @@ const KTReleaseWorkspace = (() => {
       const outcome = result?.artifactOutcome;
       if (!outcome || outcome.version !== 'artifact-outcome-1' || !['ready', 'incomplete', 'unverified', 'failed'].includes(outcome.state)) throw Object.assign(new Error('AIサービスから検証結果を受け取れませんでした。接続先を確認してください。'), { code: 'OUTCOME_REQUIRED' });
       if (outcome.scope?.customizationId && outcome.scope.customizationId !== customization.customizationId) throw Object.assign(new Error('別の変更に対する検証結果を受け取りました。'), { code: 'ARTIFACT_MISMATCH' });
+      // Unavailable automatic checks are informational. Retain the original state,
+      // but still reject a different body or a result for another customization.
+      if (outcome.state === 'unverified' && outcome.contentHash && outcome.contentHash !== await hash(generatedBody(result)))
+        throw Object.assign(new Error('受け取ったJavaScriptの本文が保存時の内容と一致しません。'), { code: 'BODY_MISMATCH' });
       if (outcome.state === 'ready') {
         const code = generatedBody(result), digest = await hash(code);
         const verification = result.verification || result.generated?.verification;
@@ -361,12 +376,12 @@ const KTReleaseWorkspace = (() => {
         }
       }
       if (!live()) return;
-      const unfinished = all.some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'));
+      const unfinished = all.some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
       if (unfinished) { set({ phase: 'incomplete', progress: '' }); return; }
       await prepareInner(live);
     }
     async function prepareInner(live = () => true, acceptFresh = false) {
-      if ((state.plan?.customizations || []).some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'))) {
+      if ((state.plan?.customizations || []).some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)))) {
         set({ phase: 'incomplete', prepared: null, progress: '' }); return;
       }
       set({ phase: 'preparing', progress: '反映する内容を確認しています。' });
@@ -395,6 +410,8 @@ const KTReleaseWorkspace = (() => {
         if(liveServices.validateRecovery&&!(await liveServices.validateRecovery(kind,input,replayResult.record)))throw Object.assign(new Error('依頼時から設定や内容が変わっています。元の会話・設定で回答を取り直してください。'),{code:'RECOVERY_INPUT_CHANGED'});
         replayResult.used=true;return clone(replayResult.value);
       }
+      const requestEpoch=epoch;
+      const isCurrent=()=>requestEpoch===epoch&&!input.signal?.aborted;
       const before=kind==='propose'?recoveryAction?.before:exportSession();
       if(before){before.state.responseRecovery=null;if(kind!=='propose'){before.state.phase=kind==='plan'?'proposal':'incomplete';before.state.error=null;}}
       const action=kind==='plan'?'adopt':kind==='generate'?'resume':recoveryAction?.action;
@@ -402,12 +419,12 @@ const KTReleaseWorkspace = (() => {
       let prepared=null;
       try {
         const value=await liveServices[kind]({...input,onRecoveryPrepared:async record=>{
-          if(before&&action){prepared={action,args:historyData(args),before:clone(before),record:historyData(record)};set({responseRecovery:prepared});}
+          if(isCurrent()&&before&&action){prepared={action,args:historyData(args),before:clone(before),record:historyData(record)};set({responseRecovery:prepared});}
         }});
-        if(prepared&&state.responseRecovery?.record.body===prepared.record.body)set({responseRecovery:null});
+        if(prepared&&state.responseRecovery===prepared)set({responseRecovery:null});
         return value;
       }catch(e){
-        if(prepared&&(!e.recovery||e.tokenStage))set({responseRecovery:null});
+        if(prepared&&state.responseRecovery===prepared&&(!e.recovery||e.tokenStage))set({responseRecovery:null});
         throw e;
       }
     }]))};
@@ -416,8 +433,9 @@ const KTReleaseWorkspace = (() => {
       if(!available())return false;
       if(state.responseRecovery){set({error:{code:'RESULT_RECOVERY_REQUIRED',message:'前の回答を取り直すか、再取得を終了してから新しい依頼を送ってください。'}});return false;}
       const before=exportSession();before.state.responseRecovery=null;
-      recoveryAction={action,args:historyData(args),before};
-      try{return await fn(...args);}finally{recoveryAction=null;}
+      const activeAction={action,args:historyData(args),before};
+      recoveryAction=activeAction;
+      try{return await fn(...args);}finally{if(recoveryAction===activeAction)recoveryAction=null;}
     }
     async function recoverResponse() {
       if(!available()||!state.responseRecovery||!liveServices.recover)return false;
@@ -440,16 +458,23 @@ const KTReleaseWorkspace = (() => {
     }
     const matchesProposal = reference => reference?.taskId === state.taskId && reference?.version === state.version;
     function selectSuggestion(id, checked, reference) {
-      if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available() || typeof checked !== 'boolean') return false;
+      if (!matchesProposal(reference) || state.phase !== 'proposal' || state.responseRecovery || !available() || typeof checked !== 'boolean') return false;
       const items = (state.proposal?.behaviors || []).filter(b => b.id === id && b.origin === 'suggestion' && typeof b.text === 'string' && b.text.trim());
       if (items.length !== 1) return false;
       const selected = new Set(state.selectedSuggestionIds);
       if (checked) selected.add(id); else selected.delete(id);
       set({ selectedSuggestionIds: [...selected] }); return true;
     }
+    function setDecisionDraft(id, answer, reference) {
+      if (!matchesProposal(reference) || state.phase !== 'proposal' || !available() || state.responseRecovery || typeof answer !== 'string') return false;
+      const q = (state.proposal?.decisions || []).find(q => q.id === id && !q.answer && !state.answers.some(a => a.id === id && a.answer));
+      if (!q || ['__proto__','constructor','prototype'].includes(id)) return false;
+      if (answer) state.decisionDrafts[id] = { question:questionText(q), answer }; else delete state.decisionDrafts[id];
+      emit({ decisionDraftId:id }); return true;
+    }
     async function updateSuggestions(reference) {
-      if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
-      const request = suggestionRequest(state);
+      if (!matchesProposal(reference) || state.phase !== 'proposal' || !available()) return false;
+      const request = proposalFeedbackRequest(state, reference.text || '');
       return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
     }
     async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false, businessSnapshot = null, businessWorkflow = false } = {}) {
@@ -559,7 +584,7 @@ const KTReleaseWorkspace = (() => {
       invalidate(); userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
       // Retire the previous plan before a revision starts, including failed requests.
       pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-      Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
+      Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true });
       return activity('consulting', async (signal, live) => {
         const fresh = await getBase('consult');
         if (!live()) return;
@@ -589,7 +614,8 @@ const KTReleaseWorkspace = (() => {
         }
         const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
         state.answers = state.answers.filter(a => !rejected.has(a.id));
-        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; }
+        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; state.selectedSuggestionIds = [];
+          state.decisionDrafts = Object.fromEntries(activeDecisionDrafts(state).map(({id,...draft}) => [id,draft])); }
         // Retired question identifiers are never reused within the same conversation.
         state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
         base = fresh; restoredBaseline = null; pendingPlanQuestions = [];
@@ -599,7 +625,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function adopt() {
       if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-      if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
+      if (!state.proposal || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
       invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
       // Optional ideas are not adopted by the general create action.
       state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -719,6 +745,26 @@ const KTReleaseWorkspace = (() => {
         set({businessContext:h,businessResult:state.businessResult});return true;
       }catch(e){set({error:errorOf(e)});return false;}
     }
+    function prepareBusinessChange(id, text = '', relationToHypothesis = 'supplements') {
+      if (!available() || !state.businessContext || state.businessInvalid || state.responseRecovery) return false;
+      try {
+        let h = clone(state.businessContext), chosen = id ? h.statements.find(s => s.statementId === id && s.kind === 'desired_change' && s.state === 'recorded') : null;
+        if (id && !chosen) return false;
+        const value = String(text).trim();
+        if (!id && value) {
+          chosen = h.statements.find(s => s.kind === 'desired_change' && s.state === 'recorded' && s.text === value);
+          if (!chosen || chosen.relationToHypothesis !== relationToHypothesis) {
+            h = consultation().record(h, {kind:'desired_change',state:'recorded',text:value,relationToHypothesis,supersedes:chosen?.statementId||null}, new Date(now()).toISOString());
+            chosen = h.statements.at(-1);
+          }
+        }
+        const selected = new Set(state.businessSelectedIds.filter(id=>h.statements.some(s=>s.statementId===id&&s.state==='recorded'&&s.kind==='desired_change')));
+        if (chosen) { selected.add(chosen.statementId); h.attachmentExcludedIds = (h.attachmentExcludedIds || []).filter(x => x !== chosen.statementId); }
+        if (!selected.size) return false;
+        if (state.adopted || state.plan) { state.businessReviewRequired = true; invalidate(); }
+        set({businessContext:h,businessSelectedIds:[...selected],businessMode:'improve',requestPurpose:'consultation'}); return true;
+      } catch(e) { set({error:errorOf(e)}); return false; }
+    }
     function withdrawBusiness(id){if(!available()||!state.businessContext)return false;const s=state.businessContext.statements.find(x=>x.statementId===id);if(!s)return false;s.state='withdrawn';state.businessSelectedIds=state.businessSelectedIds.filter(x=>x!==id);if(state.plan||state.adopted){state.businessReviewRequired=true;invalidate();}emit();return true;}
     function selectBusinessChange(id,selected){if(!available())return false;const s=state.businessContext?.statements.find(x=>x.statementId===id&&x.kind==='desired_change'&&x.state==='recorded');if(!s||(state.businessContext.attachmentExcludedIds||[]).includes(id))return false;const ids=new Set(state.businessSelectedIds);selected?ids.add(id):ids.delete(id);set({businessSelectedIds:[...ids]});return true;}
     function setBusinessMode(mode){if(!available()||!state.businessContext||!['understand','improve'].includes(mode))return false;set({businessMode:mode});return true;}
@@ -765,7 +811,7 @@ const KTReleaseWorkspace = (() => {
             const context=consultation().wire(h);context.statements=context.statements.filter(s=>s.kind!=='desired_change'||chosen.some(c=>c.statementId===s.statementId));
             const text=chosen.map(s=>s.text).join('\n');
             // Only this explicit selection retires the previous proposal. Free-form understanding is never a requirement.
-            retired=true;invalidate();Object.assign(state,{plan:null,adopted:null,adoptedTarget:null,artifacts:[],proposalPending:true,selectedSuggestionIds:[]});
+            retired=true;invalidate();Object.assign(state,{plan:null,adopted:null,adoptedTarget:null,artifacts:[],proposalPending:true,selectedSuggestionIds:[],decisionDrafts:{}});
             const m=message('user',text);m.businessIntent='desired_change';m.requestPurpose='consultation';
             const response=await services.propose({text,requestPurpose:'consultation',businessMode:'improve',businessContext:context,previous:clone(state.proposal),questionIdFloor:state.questionIdFloor,base:current,requests:chosen.map(s=>s.text),answers:[],discussion:[],signal});if(!live())return;
             if(!response?.proposal||response.proposalUnchanged||!['propose','update'].includes(response.intent))throw new Error('変更希望から仮案を作成できませんでした。希望を確認してください。');
@@ -801,11 +847,11 @@ const KTReleaseWorkspace = (() => {
         if (!shouldContinue()) return false;
         if (baseline && ((baseline.appId !== null && String(appOf(fresh)) !== baseline.appId) ||
             (baseline.environment !== null && environmentOf(fresh) !== baseline.environment))) return false;
-        const next = { responseRecovery:null, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
+        const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
         if (!Array.isArray(next.businessArchive) || !Array.isArray(next.businessSelectedIds) || !['understand','improve'].includes(next.businessMode)) return false;
         if (next.businessContext) { try { await consultation().verify(next.businessContext,scope);if(next.businessResult&&consultation().validateOutput(next.businessResult,consultation().wire(next.businessContext)).length)throw new Error('保存した相談の根拠参照を確認できません'); } catch(e) { next.businessInvalid=e.message; next.businessReviewRequired=true; next.businessMode='understand'; } }
         for (const artifact of next.artifacts) {
-          if (artifact.result?.artifactOutcome?.state !== 'ready') continue;
+          if (!generatedResultAvailable(artifact.result)) continue;
           const customization = next.plan?.customizations.find(c => c.customizationId === artifact.customizationId);
           if (!customization) return false;
           await validateArtifact(artifact.result, customization);
@@ -827,7 +873,7 @@ const KTReleaseWorkspace = (() => {
           next.proposalPending = true; next.phase = next.proposal ? 'proposal' : 'idle';
           next.error = { code: 'CANCELLED', message: '相談の完了を確認できません。相談内容をもう一度送信してください。' };
         } else if (next.plan) {
-          const ready = next.plan.customizations.every(c => next.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'));
+          const ready = next.plan.customizations.every(c => next.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
           if (ready && !next.plan.questions.some(q => q && q.blocking !== false)) {
             next.phase = 'blocked'; next.error = { code: baseline && stampOf(fresh) !== baseline.stamp ? 'BASE_CHANGED' : 'APPROVAL_CHANGED',
               message: '保存した変更案を開きました。反映する前に、最新の設定で内容を確認し直してください。' };
@@ -862,18 +908,18 @@ const KTReleaseWorkspace = (() => {
       },
       saveBusinessSnapshot,
       getBusinessDraft(id) { const h=state.businessContext;return h ? state.businessAnswerDrafts[h.analysisId+':'+h.analysisHash+':'+id]||'' : ''; },
-      setBusinessDraft(id,value) { if(!available()||!state.businessContext||typeof value!=='string'||value.length>2000)return false; const key=state.businessContext.analysisId+':'+state.businessContext.analysisHash+':'+id;state.businessAnswerDrafts[key]=value;emit();return true; },
+      setBusinessDraft(id,value) { if(!available()||!state.businessContext||typeof value!=='string'||value.length>2000)return false; const key=state.businessContext.analysisId+':'+state.businessContext.analysisHash+':'+id;state.businessAnswerDrafts[key]=value;emit({ businessDraftId: id });return true; },
       attachBusinessStatement(id,attached) { if(!available()||!state.businessContext)return false;const s=state.businessContext.statements.find(s=>s.statementId===id);if(!s||s.kind==='open_question')return false;const excluded=new Set(state.businessContext.attachmentExcludedIds||[]);attached?excluded.delete(id):excluded.add(id);state.businessContext.attachmentExcludedIds=[...excluded];if(!attached)state.businessSelectedIds=state.businessSelectedIds.filter(x=>x!==id);emit();return true; },
-      startBusiness, recordBusiness, withdrawBusiness, selectBusinessChange, setBusinessMode, checkBusiness, acknowledgeBusiness,
+      startBusiness, recordBusiness, prepareBusinessChange, withdrawBusiness, selectBusinessChange, setBusinessMode, checkBusiness, acknowledgeBusiness,
       closeBusiness() { if (!available()) return false; if(state.businessContext) state.businessArchive.push(clone(state.businessContext)); set({businessContext:null,businessMode:'understand',businessResult:null}); return true; },
-      exportSession, restoreSession, recoverResponse, discardResponseRecovery() { if(!available())return false;set({responseRecovery:null,error:null});return true; }, send:(...args)=>recoverable('send',args,send), selectSuggestion, updateSuggestions:(...args)=>recoverable('updateSuggestions',args,updateSuggestions), adopt:(...args)=>recoverable('adopt',args,adopt), resume:(...args)=>recoverable('resume',args,resume), reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
+      exportSession, restoreSession, recoverResponse, discardResponseRecovery() { if(!available())return false;set({responseRecovery:null,error:null});return true; }, send:(...args)=>recoverable('send',args,send), setDecisionDraft, selectSuggestion, updateSuggestions:(...args)=>recoverable('updateSuggestions',args,updateSuggestions), adopt:(...args)=>recoverable('adopt',args,adopt), resume:(...args)=>recoverable('resume',args,resume), reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
       setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
       setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
       showExplanation(id) { if (restoringSession || !state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
       showChanges() { if (restoringSession) return false; set({ explanationId: null }); return true; },
       async prepare() { if (state.businessReviewRequired) return false; if (!state.plan || state.proposalPending || state.runs.some(r => r.archived && r.taskId === state.taskId) || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
       cancelRollback() { if (restoringSession || state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-      newTask() { if (!available()) return false; Object.assign(state,{ businessContext:null,businessArchive:[],businessMode:'understand',businessResult:null,businessSelectedIds:[],businessReviewRequired:false,businessPlanContext:null,businessInvalid:null,businessAnswerDrafts:{},businessPlanRequests:null,businessPlanSelectedIds:[] }); ++epoch; base = null; restoredBaseline = null; pendingPlanQuestions = []; Object.assign(state, { responseRecovery: null, phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+      newTask() { if (!available()) return false; Object.assign(state,{ businessContext:null,businessArchive:[],businessMode:'understand',businessResult:null,businessSelectedIds:[],businessReviewRequired:false,businessPlanContext:null,businessInvalid:null,businessAnswerDrafts:{},businessPlanRequests:null,businessPlanSelectedIds:[] }); ++epoch; base = null; restoredBaseline = null; pendingPlanQuestions = []; Object.assign(state, { responseRecovery: null, phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
       cancel() {
         if (!['consulting','building','preparing'].includes(state.phase)) return false;
         const consulting = state.phase === 'consulting';
@@ -885,7 +931,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

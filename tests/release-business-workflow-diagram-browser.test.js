@@ -20,7 +20,7 @@ test('概要図と工程詳細を分け、クリック往復・補足図・無�
   const context=await browser.newContext({viewport:{width:1360,height:1000}});
   await context.route('**/*',route=>route.request().url()==='https://workflow-diagram.test.invalid/'?route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="app" style="height:100vh"></div></body></html>'}):(unexpected.push(route.request().url()),route.abort()));
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto('https://workflow-diagram.test.invalid/');
-  let code=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
+  let code=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
   const end=code.lastIndexOf('})();');code=code.slice(0,end)+'\nglobalThis.WorkflowDiagramTest={KTReleaseView};\n'+code.slice(end);await page.addScriptTag({content:code});
   const mount=async doc=>page.evaluate(state=>{
    window.diagramView?.dispose();document.querySelector('#app').innerHTML='';

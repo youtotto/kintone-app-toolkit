@@ -77,11 +77,13 @@ test('第三者変更と判定された反映の部分結果から復元を開�
 });
 
 for (const [state, title, resume] of [
-  ['incomplete', '作成途中です', true], ['failed', '検証で不一致がありました', true], ['unverified', '自動確認できていない内容があります', false]
+  ['incomplete', '作成途中です', true], ['failed', '検証で不一致がありました', true]
 ]) test(state + 'を見出しと次の操作で区別する', async () => {
   const f = fixture(Workspace, { generate: ({ customization }) => generated(customization, { state, message: '検証の具体的な理由' }) });
   await build(f); const current = get(f), screen = html(current), counts = ai(f);
-  assert.match(screen, new RegExp('<h2>' + title)); assert.match(screen, /検証の具体的な理由/);
+  assert.match(screen, new RegExp('<h2>' + title)); assert.match(screen, /作成が終わっていません/);
+  assert.doesNotMatch(screen, /検証の具体的な理由/, '内部の検証messageを表示しない');
+  assert.equal(current.artifacts[0].result.artifactOutcome.message, '検証の具体的な理由', '制御用の結果データは保持');
   assert.equal(screen.includes('data-release-action="resume"'), resume);
   const codeScreen = View.render(current, { codePanelState: () => ({ open: true, available: true }) });
   assert.match(codeScreen, new RegExp('ktr-code-attention[\\s\\S]*?' + title));
@@ -96,7 +98,9 @@ test('完成済みと検証不能の混在では完成済みを保持し、再�
   const f = fixture(Workspace, { generate: ({ customization }) => generated(customization, { state: customization.customizationId === 'C1' ? 'ready' : 'unverified' }) });
   await build(f); const before = get(f), counts = ai(f), screen = html(before);
   assert.equal(before.artifacts[0].result.artifactOutcome.state, 'ready');
-  assert.match(screen, /自動確認が完了した内容/); assert.match(screen, /JavaScriptは作成済みです/);
+  assert.equal(before.phase, 'review'); assert.match(screen, /JavaScriptは作成済みです/);
+  assert.match(screen, /data-release-action="apply"/);
+  assert.doesNotMatch(screen, /自動確認できていない|検証は完了|一部未確認/);
   assert.doesNotMatch(screen, /data-release-action="resume"|反映する変更はありません/);
   assert.equal(await f.controller.resume(), false); assert.deepEqual(ai(f), counts);
   assert.deepEqual(get(f).artifacts, before.artifacts);
@@ -196,10 +200,10 @@ for (const outcome of ['unverified', 'declined']) test('後続の資料相談が
   f.services.propose = async () => { throw Object.assign(Error('budget'), { code: 'BUDGET_EXCEEDED' }); };
   await f.controller.send('資料を作って', { requestPurpose: 'document' });
   const before = get(f), counts = ai(f), screen = html(before);
-  assert.equal(before.error.code, 'BUDGET_EXCEEDED'); assert.equal(before.phase, 'incomplete');
+  assert.equal(before.error.code, 'BUDGET_EXCEEDED'); assert.equal(before.phase, outcome === 'unverified' ? 'review' : 'incomplete');
   assert.equal(Workspace.creationStateOf(before).kind, outcome);
   assert.doesNotMatch(screen, /data-release-action="resume"/);
-  assert.match(screen, /data-release-action="focus-consultation"/);
+  assert.match(screen, outcome === 'unverified' ? /data-release-action="apply"/ : /data-release-action="focus-consultation"/);
   assert.equal(await f.controller.resume(), false); assert.deepEqual(ai(f), counts);
   assert.deepEqual(get(f).artifacts, before.artifacts);
 });

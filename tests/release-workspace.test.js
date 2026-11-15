@@ -202,7 +202,7 @@ test('残りの作成は完成済みPCを使い、未完成のモバイルだけ
   assert.equal(f.count('plan'), 1);
 });
 
-for (const outcome of ['unverified', 'failed']) test(`必須の検証が${outcome}なら、AIの肯定的な要約で承認可能にしない`, async () => {
+for (const outcome of ['failed']) test(`必須の検証が${outcome}なら、AIの肯定的な要約で承認可能にしない`, async () => {
   const f = fresh({ generate: ({ customization }) => ({ ...generated(customization, { state: outcome, message: '必要な確認を完了できませんでした。' }), summary: 'すべて正しく完成しました。', coverage: [{ requirementId: 'R1', status: 'MET' }] }) });
   await built(f);
   assert.notEqual(stateOf(f).phase, 'review');
@@ -536,7 +536,7 @@ test('任意の関連案は別に表示し、そのまま作成しても採用�
   const f=fresh({propose:()=>response});
   await f.controller.send(REQUEST);
   const html=KTReleaseView.render(stateOf(f));
-  assert.match(html, /data-release-panel="suggestions"><h3>あわせて検討できること/);
+  assert.match(html, /data-release-panel="suggestions"><h3>任意の改善提案/);
   assert.ok(html.indexOf(optional.text)>html.indexOf('data-release-panel="suggestions"'));
   assert.equal(f.count('plan'),0);
   await f.controller.adopt();
@@ -557,7 +557,7 @@ test('一覧の追加を明示して更新した案だけが採用され、取�
   await f.controller.send(REQUEST);
   await f.controller.send('一覧への追加をお願いします。通知は不要です。');
   assert.equal(f.count('plan'),0);
-  assert.doesNotMatch(KTReleaseView.render(stateOf(f)),/あわせて検討できること/);
+  assert.doesNotMatch(KTReleaseView.render(stateOf(f)),/任意の改善提案/);
   await f.controller.adopt();
   assert.equal(f.calls.find(c=>c.method==='plan').proposal.behaviors.at(-1).id,'B3');
   assert.equal(stateOf(f).adopted.behaviors.at(-1).origin,'user');
@@ -570,24 +570,29 @@ test('自動確認できなくても後続のJSを作成し、コードと説明
     ? { state: 'unverified', body: testUnverifiedBody, message: '条件の自動確認は未対応です。' } : {}) });
   await built(f);
   assert.equal(f.count('generate'), 2);
-  assert.equal(stateOf(f).phase, 'incomplete');
+  assert.equal(stateOf(f).phase, 'review');
   assert.equal(stateOf(f).artifacts.length, 2);
-  assert.equal(f.count('prepare'), 0);
+  assert.equal(f.count('prepare'), 1);
   const saved=f.controller.exportSession(), restored=fresh();
   assert.equal(await restored.controller.restoreSession(JSON.parse(JSON.stringify(saved))),true);
+  assert.equal(stateOf(restored).phase,'blocked');
+  assert.equal(restored.writes.length,0);
+  await restored.controller.reprepare();
   const state=stateOf(restored), html=KTReleaseView.render(state);
+  assert.equal(state.phase,'review');
   assert.equal(state.artifacts[0].result.code,testUnverifiedBody);
   assert.equal(state.artifacts[0].result.artifactOutcome.state,'unverified');
   assert.match(html,/JavaScriptは作成済みです/);
-  assert.match(html,/コードの誤りとは判定していません/);
-  assert.match(html,/条件の自動確認は未対応です/);
+  assert.doesNotMatch(html,/コードの誤りとは判定していません|条件の自動確認は未対応です|検証は完了/);
+  assert.match(html,/data-release-action="apply"/);
   assert.match(html,/data-release-action="copy-code"/);
   assert.match(html,/data-release-action="download-code"/);
   assert.match(html,/JavaScriptを見る/);
   assert.doesNotMatch(html,/data-release-action="resume"/);
   await restored.controller.apply();
   assert.equal(restored.count('generate'),0);
-  assert.equal(restored.writes.length,0);
+  assert.equal(restored.count('apply'),1);
+  assert.ok(restored.writes.length>0);
 });
 
 test('一部未確認の後で通信断になっても、作成済みを再生成せず残りだけ再開する', async () => {

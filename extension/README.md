@@ -1,6 +1,24 @@
-# kintone App Toolkit — Chrome 拡張機能版（試作）
+# kintone App Toolkit — Chrome・Edge 拡張機能版
 
 ユーザースクリプト版（`kintoneAppToolkit.user.js`）と同じソースから、Chrome / Edge の拡張機能（Manifest V3）を作ります。ユーザースクリプトは変えず、違いはすべてビルドで作ります。
+
+**公開版：2.3.5**（2026年11月15日）。[変更内容と検証範囲](../docs/RELEASE-NOTES-2.3.5.md)
+
+GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.5/kintone-app-toolkit-2.3.5-chrome-extension.zip)を配布しています。Chromeウェブストアでの公開は別途審査対象で、このZIP配布はストア公開済みを意味しません。
+
+## ZIPから導入する
+
+1. 拡張機能ZIPをダウンロードし、使い続ける場所へ展開します。
+2. Chromeは `chrome://extensions`、Edgeは `edge://extensions` を開きます。
+3. 「デベロッパー モード」をオンにします。
+4. 「パッケージ化されていない拡張機能を読み込む」で、展開したフォルダー（`manifest.json` がある場所）を選びます。
+5. kintoneアプリの一覧画面を開き、Toolkitの表示版を確認します。
+
+Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どちらか一方だけを有効にしてください。
+
+## ZIP版を更新する
+
+必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。その後kintoneアプリを再読み込みし、「Ver 2.3.5」を確認してください。ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。
 
 ## 作り方
 
@@ -11,14 +29,14 @@ node extension/build.cjs
 できるもの（`dist/` はリポジトリの管理外）:
 
 - `dist/extension/` … 展開したまま読み込める形
-- `dist/kintone-app-toolkit-<版>-chrome-extension.zip` … ストアへ提出する ZIP
+- `dist/kintone-app-toolkit-<版>-chrome-extension.zip` … GitHubで配布するZIP。ストア提出にも使用する形式
 - `dist/extension-build.json` … 版・ファイル数・SHA-256 などの記録
 
 初回は npm レジストリから mermaid と Monaco Editor の配布物（tarball）を取得し、`extension/.vendor-cache/` に置きます（管理外）。取得したものは `vendor.lock.json` の integrity・sha256 と照合し、合わなければ止まります。
 
 `node extension/build.cjs --check` は、書き出さずに本体の変換と検査だけを行います。
 
-## 試しに読み込む
+## 手元でビルドしたものを読み込む
 
 1. Chrome（または Edge）で `chrome://extensions`（Edge は `edge://extensions`）を開く。
 2. 「デベロッパー モード」をオンにする。
@@ -35,8 +53,8 @@ Tampermonkey 版と同時に有効にすると、Toolkit が 2 つ動きます�
 | 動く画面 | `@match` / `@exclude` | 同じパターンを `matches` / `exclude_matches` に使う |
 | mermaid | `@require` で jsdelivr から（`mermaid@10`） | 10.9.8 を同梱 |
 | Monaco Editor | cdnjs から 0.36.1 | 0.36.1 を同梱（`web_accessible_resources`） |
-| 更新 | `@updateURL`（GitHub） | ストア |
-| 求める権限 | — | なし（content script だけ。`host_permissions` も無し） |
+| 更新 | `@updateURL`（GitHub） | ZIP手動導入版は新版を取得して更新。ストア配布は別途審査対象 |
+| アクセス範囲 | ヘッダーの対象サイト | kintoneの対象ページでcontent scriptが動作。`permissions` / `host_permissions`の追加指定はありませんが、対象サイトの内容へアクセスします |
 
 ビルドが本体に加える変更は、次の 2 つだけです。
 
@@ -52,7 +70,16 @@ Tampermonkey 版と同時に有効にすると、Toolkit が 2 つ動きます�
 
 ストアの審査では、外部から読み込んだコードの実行が禁止されています。
 
-## 確かめたこと（2026-11-12、2.3.3）
+## 検証範囲
+
+同じテストをユーザースクリプトと拡張機能の本体に対して実行し、結果の一致と両方の失敗数を確認します。多くのテストは部品を直接読むため、この比較だけで拡張機能の実機動作すべてを確認したことにはなりません。[無料テストの準備](../docs/test-setup.md)・[版の更新と照合](../docs/versioning.md)
+
+今回の公開で、新たな実AI呼び出しや実機試験は行っていません。事前の実機動画では、Edgeに読み込んだ拡張機能版で相談から動作テスト環境への反映、PCでの入力チェックと保存成功を確認しました。[2.3.5の検証範囲](../docs/RELEASE-NOTES-2.3.5.md#検証範囲)に記載しています。版を2.3.5へ更新した後の実Chromeでの導入確認と、モバイル画面での動作確認は未実施です。
+
+<details>
+<summary>試作時点の検証記録（2026-11-12、2.3.3）</summary>
+
+以下は当時の記録です。現在の公開版のテスト結果とは区別してください。
 
 - **既存のテスト:** `node extension/compare-tests.cjs` で、全 128 ファイルをユーザースクリプトと拡張機能版の本体の両方で実行しました。
   - ファイルごとの合否・件数・失敗した項目は、すべて同じでした（どちらも 1,916 件合格）。
@@ -68,17 +95,13 @@ Tampermonkey 版と同時に有効にすると、Toolkit が 2 つ動きます�
 | 管理画面（`/k/admin/…`）とレコード詳細（`/k/1/show`）では動かない | 動かなかった |
 | ページのエラー | 出なかった |
 
-**まだ確かめていないこと:**
+**当時の未確認範囲:**
 - 本物の kintone での動作（kintone の CSP、各タブ、AI への接続）。
 - Chrome 本体での動作（Edge で確認）。
 - モバイル版。
 
-## ストアに出す前に必要なこと
+</details>
 
-- **アイコン:** 今のアイコンは Nest Rec のロゴを縮小した仮のものです。差し替えるなら `extension/icons/` を置き換えます。
-- **ストアの掲載情報:** 説明・スクリーンショット・プライバシーポリシーが必要です。AI に接続すると、アプリの設定を Nest Rec AI へ送るため、データの扱いの申告が要ります。
-- **外部への通信（コードではない）:**
-  - パネルの見出しのアイコン画像を `www.google.com/s2/favicons` から読み込んでいます。
-  - AI に接続したときは `appinsight-ai-api…workers.dev` と通信します。
-  - どちらもコードの読み込みではありませんが、申告の対象です。
-- **開発者登録:** Chrome ウェブストアの開発者登録（初回のみ登録料）が必要です。
+## AI接続とデータの取扱い
+
+無料の設定確認にAI契約は不要です。AIへ接続すると、相談に必要なアプリ設定・取得したJavaScript本文・入力文などをNest Rec AIへ送ります。パネルの見出しには外部のアイコン画像を使用します。[料金・接続案内とデータの取扱い](https://www.nestrec.com/toolkit)をご確認ください。

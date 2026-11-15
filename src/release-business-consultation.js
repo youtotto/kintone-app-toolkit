@@ -58,7 +58,6 @@ const KTBusinessConsultation = (() => {
       if(s.sourceMessageId!==null&&!h.messages?.some(m=>m.id===s.sourceMessageId&&m.role==='user'))bad('回答元の発言がありません');
       if(!wire&&s.supersedes!==null&&!h.statements.some(x=>x.statementId===s.supersedes&&x.statementId!==s.statementId))bad('訂正元がありません');
     }
-    if(wire&&(h.statements||[]).filter(active).length>30)bad('添付する運用記録は30件までです');
     return errors;
   }
   async function create(doc,scope,ruleId=null){
@@ -69,7 +68,7 @@ const KTBusinessConsultation = (() => {
   }
   async function verify(h,scope){const e=validate(h);if(e.length)fail(e[0]);if(h.sourceScope.domain!==scope?.domain||h.sourceScope.appId!==String(scope?.appId))fail('別アプリ・ドメインの分析は相談できません');if(await hash(sourceOf(h))!==h.analysisHash)fail('元の分析内容が変わっています');}
   function wire(h){
-    const out=clone(h);delete out.freshness.source;if(out.freshness.preview){out.freshness.previewRevision=out.freshness.preview.revision;delete out.freshness.preview;}out.statements=out.statements.filter(s=>active(s)&&(s.kind==='open_question'||!(h.attachmentExcludedIds||[]).includes(s.statementId)));out.omittedStatementCount=h.statements.filter(active).length-out.statements.length;out.questionHistory=(h.questionHistory||[]).filter(q=>out.statements.some(s=>s.sourceQuestionRef?.questionId===q.questionId));if(out.statements.length>30)fail('運用記録が30件を超えています。添付対象を整理してください。');
+    const out=clone(h);delete out.freshness.source;if(out.freshness.preview){out.freshness.previewRevision=out.freshness.preview.revision;delete out.freshness.preview;}out.statements=out.statements.filter(s=>active(s)&&(s.kind==='open_question'||!(h.attachmentExcludedIds||[]).includes(s.statementId)));out.omittedStatementCount=h.statements.filter(active).length-out.statements.length;out.questionHistory=(h.questionHistory||[]).filter(q=>out.statements.some(s=>s.sourceQuestionRef?.questionId===q.questionId));
     if(h.snapshot){const rs=selectedRules(h),ids=new Set(rs.flatMap(r=>r.evidenceRefs.map(x=>x.evidenceId)));
       if(h.selection.type==='all')h.snapshot.evidence.forEach(e=>ids.add(e.evidenceId));
       for(const s of out.statements){for(const r of s.sourceEvidenceRefs)ids.add(r.evidenceId);for(const ref of s.sourceRuleRefs)for(const e of rules(h).find(r=>r.ruleId===ref.ruleId)?.evidenceRefs||[])ids.add(e.evidenceId);}
@@ -90,7 +89,7 @@ const KTBusinessConsultation = (() => {
   }
   const STR=n=>({type:'string',minLength:1,maxLength:n}),ARR=(items,n)=>({type:'array',items,maxItems:n}),OBJ=p=>({type:'object',properties:p,required:Object.keys(p),additionalProperties:false});
   const RR=OBJ({analysisId:STR(100),snapshotId:STR(200),ruleId:STR(40)}),ER=OBJ({snapshotId:STR(200),evidenceId:STR(80),pointer:{type:['string','null'],maxLength:1000}});
-  const refs={ruleRefs:ARR(RR,8),evidenceRefs:ARR(ER,20),statementRefs:ARR(STR(80),30),messageRefs:ARR(STR(100),30)};
+  const refs={ruleRefs:ARR(RR,8),evidenceRefs:ARR(ER,20),statementRefs:{type:'array',items:STR(80)},messageRefs:ARR(STR(100),30)};
   const OUTPUT_SCHEMA=OBJ({schemaVersion:{type:'string',enum:[VERSION]},handoffId:STR(200),mode:{type:'string',enum:['understand']},blocks:ARR(OBJ({kind:{type:'string',enum:['setting_fact','inference','user_report','desired_change','discrepancy']},text:STR(1000),...refs}),8),questions:ARR(OBJ({questionId:STR(80),text:STR(500),purpose:STR(500),blockingFor:{type:'string',enum:['none','proposal','plan']},...refs}),5),statementDrafts:ARR(OBJ({kind:{type:'string',enum:kinds},text:STR(2000),sourceMessageId:STR(100),state:{type:'string',enum:['draft']}}),5)});
   // The generation schema and both validators share the same read-only envelope.
   const EMPTY={type:'array',items:{type:'string'},maxItems:0};

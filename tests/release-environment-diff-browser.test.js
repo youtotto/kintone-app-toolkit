@@ -52,7 +52,7 @@ test('独立Config Lensで無料の比較・設定保存、説明時だけAIへ�
       throw Error('Unexpected ' + name);
     });
     await page.goto('https://diff.test.invalid/');
-    let source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+    let source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
     const end = source.lastIndexOf('})();');
     source = source.slice(0, end) + '\nglobalThis.DiffTest={mountReleaseWorkspace,mountReleaseConfigLens,KTAiClient};\n' + source.slice(end);
     await page.addScriptTag({ content: source });

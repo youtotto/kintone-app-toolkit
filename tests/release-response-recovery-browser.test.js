@@ -30,7 +30,7 @@ test('通信断・再読込後に実クライアントで回答を回収し、�
    }
    throw Error('Unexpected endpoint '+route);
   });
-  let source=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.RecoveryTest={mountReleaseWorkspace,KTAiClient};\n'+source.slice(end);
+  let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.RecoveryTest={mountReleaseWorkspace,KTAiClient};\n'+source.slice(end);
   async function mount(){await page.addScriptTag({content:source});await page.evaluate(({prod,names})=>{
    const C=RecoveryTest.KTAiClient,settings=C.createSettingsStore();settings.setConsent(true,'release-raw-source-1');
    const session=C.createSession({store:settings,hostname:location.hostname,transport:req=>window.gateway(req)});session.adopt({accessToken:'SYNTHETIC-BROWSER-ONLY',expiresAt:'2099-01-01T00:00:00Z',refreshToken:'SYNTHETIC-REFRESH-ONLY',refreshExpiresAt:'2099-01-01T00:00:00Z',scope:{product:'toolkit'}});

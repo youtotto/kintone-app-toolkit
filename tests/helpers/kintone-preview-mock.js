@@ -13,7 +13,19 @@ function normalizeStatus({ enable, states, actions }) {
 }
 
 function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources = [] } = {}) {
-  const rowsFrom = (fields) => Object.values(fields).filter(f => !['SUBTABLE', 'GROUP'].includes(f.type)).map(f => ({ type: 'ROW', fields: [{ type: f.type, code: f.code, size: { width: '200' } }] }));
+  const rowsFrom = (fields) => Object.values(fields).filter(f => f.type !== 'GROUP' && !f.parent).map(f => f.type === 'SUBTABLE'
+    ? { type: 'SUBTABLE', code: f.code, fields: Object.values(f.fields || {}).map(c => ({ type: c.type, code: c.code, size: { width: '200' } })) }
+    : { type: 'ROW', fields: [{ type: f.type, code: f.code, size: { width: '200' } }] });
+  const findField = (properties, code, parent = null) => {
+    for (const [table, p] of Object.entries(properties)) if (p.type === 'SUBTABLE') { const found = findField(p.fields || {}, code, table); if (found) return found; }
+    return properties[code] ? { field: properties[code], properties, parent } : null;
+  };
+  const findTable = (rows, code) => { for (const row of rows) { if (row.type === 'SUBTABLE' && row.code === code) return row; const found = row.layout && findTable(row.layout, code); if (found) return found; } return null; };
+  const removeLayoutField = (rows, code) => rows.flatMap(row => {
+    if (row.code === code) return [];
+    const next = { ...row, ...(row.fields ? { fields: row.fields.filter(f => f.code !== code) } : {}), ...(row.layout ? { layout: removeLayoutField(row.layout, code) } : {}) };
+    return next.type === 'ROW' && !next.fields?.length ? [] : [next];
+  });
   const st = {
     fields: clone(data.fields), layout: rowsFrom(data.fields), views: clone(data.views?.views || {}),
     general: clone(data.generalNotify?.notifications || []), notifyToCommenter: data.generalNotify?.notifyToCommenter ?? false,
@@ -120,12 +132,30 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
     async getPreviewReminders() { calls.push('GET reminders'); guard(); return { notifications: clone(st.reminders), timezone: st.timezone, revision: String(st.revision) }; },
     async addPreviewFields(app, properties, revision) {
       write('POST fields'); guard(); checkRev(revision);
-      if (ctl.failAddField && Object.keys(properties).includes(ctl.failAddField)) throw err('GAIA_IL04', `フィールド「${ctl.failAddField}」の追加に失敗しました（モック）`);
+      const entries = [];
       for (const [code, p] of Object.entries(properties)) {
-        if (st.fields[code]) throw err('GAIA_FC01', `フィールドコード「${code}」は既に使われています。`);
         if (!p.type || !p.label) throw err('GAIA_IL02', 'type / label は必須です');
-        st.fields[code] = { ...clone(p), label: ctl.mangleLabel ? p.label + '!' : p.label };
-        if (autoPlace) st.layout.push({ type: 'ROW', fields: [{ type: p.type, code, size: { width: '200' } }] });
+        if (p.type === 'SUBTABLE') {
+          const table = st.fields[code];
+          if (!table || table.type !== 'SUBTABLE') throw err('GAIA_IL04', '既存テーブルがありません（モック）');
+          if (p.label !== table.label || !!p.noLabel !== !!table.noLabel) throw err('GAIA_IL04', '既存テーブルの表示は保持してください（モック）');
+          for (const [childCode, child] of Object.entries(p.fields || {})) entries.push({ code: childCode, p: child, parent: code });
+        } else entries.push({ code, p, parent: null });
+      }
+      for (const {code, p, parent} of entries) {
+        if (ctl.failAddField === code) throw err('GAIA_IL04', 'フィールド「' + code + '」の追加に失敗しました（モック）');
+        if (findField(st.fields, code)) throw err('GAIA_FC01', 'フィールドコード「' + code + '」は既に使われています。');
+        if (!p.type || !p.label || p.code !== code) throw err('GAIA_IL02', 'type / label / code は必須です');
+        if (parent && ['SUBTABLE', 'GROUP', 'LABEL', 'SPACER', 'HR', 'REFERENCE_TABLE'].includes(p.type)) throw err('GAIA_IL04', 'テーブル内に追加できない種類です');
+      }
+      for (const {code, p, parent} of entries) {
+        const properties = parent ? st.fields[parent].fields : st.fields;
+        properties[code] = { ...clone(p), label: ctl.mangleLabel ? p.label + '!' : p.label };
+        if (autoPlace) {
+          const field = { type: p.type, code, size: { width: '200' } };
+          if (parent) { const table = findTable(st.layout, parent); if (!table) throw err('GAIA_IL04', 'テーブルの配置がありません'); table.fields.push(field); }
+          else st.layout.push({ type: 'ROW', fields: [field] });
+        }
       }
       st.revision += 1;
       return { revision: String(st.revision) };
@@ -247,20 +277,34 @@ function makeKintoneMock(data, { permission = true, autoPlace = true, jsSources 
       write('DELETE fields'); guard(); checkRev(revision);
       if (ctl.failDelete) throw err('GAIA_XX', 'モックの失敗（DELETE fields）');
       for (const code of fields || []) {
-        const cur = st.fields[code];
+        const found = findField(st.fields, code), cur = found?.field;
         if (!cur) throw err('GAIA_IL04', `フィールド「${code}」が存在しません`);
         if (['STATUS', 'STATUS_ASSIGNEE', 'CATEGORY'].includes(cur.type)) throw err('GAIA_IL04', 'このフィールドは削除できません');
-        delete st.fields[code];
-        st.layout = st.layout.map(r => ({ ...r, fields: (r.fields || []).filter(x => x.code !== code) })).filter(r => (r.fields || []).length || r.type !== 'ROW');
+        delete found.properties[code]; if (found.parent && st.fields[code]?.parent === found.parent) delete st.fields[code];
+        st.layout = removeLayoutField(st.layout, code);
       }
       st.revision += 1;
       return { revision: String(st.revision) };
     },
     async putPreviewLayout(app, layout, revision) {
       write('PUT layout'); guard(); checkRev(revision);
-      const codes = new Set(); const walk = (rows) => { for (const r of rows) { for (const f of r.fields || []) if (f.code) { if (!st.fields[f.code] && !['LABEL', 'SPACER', 'HR'].includes(f.type)) throw err('GAIA_IL03', `レイアウトのフィールド「${f.code}」が存在しません`); codes.add(f.code); } if (r.layout) walk(r.layout); } };
+      const codes = new Set();
+      const walk = rows => { for (const r of rows) {
+        for (const f of r.fields || []) if (f.code) {
+          const found = findField(st.fields, f.code);
+          if (!found && !['LABEL', 'SPACER', 'HR'].includes(f.type)) throw err('GAIA_IL03', 'レイアウトのフィールド「' + f.code + '」が存在しません');
+          if (found && found.parent !== (r.type === 'SUBTABLE' ? r.code : null)) throw err('GAIA_IL04', 'フィールドのテーブル所属が違います');
+          if (codes.has(f.code)) throw err('GAIA_IL04', 'レイアウト内に重複したフィールドがあります');
+          codes.add(f.code);
+        }
+        if (r.layout) walk(r.layout);
+      }};
       walk(layout);
-      for (const code of Object.keys(st.fields)) if (!codes.has(code) && !['SUBTABLE', 'GROUP'].includes(st.fields[code].type) && !st.fields[code].parent) throw err('GAIA_IL04', `フィールド「${code}」がレイアウトに含まれていません`);
+      const requireFields = props => { for (const [code, p] of Object.entries(props)) {
+        if (p.type === 'SUBTABLE') requireFields(p.fields || {});
+        else if (!codes.has(code) && p.type !== 'GROUP' && !p.parent) throw err('GAIA_IL04', 'フィールド「' + code + '」がレイアウトに含まれていません');
+      }};
+      requireFields(st.fields);
       st.layout = clone(layout); st.revision += 1;
       return { revision: String(st.revision) };
     },

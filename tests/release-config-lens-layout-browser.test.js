@@ -35,7 +35,7 @@ test('無料の配置再現：行・寸法・グループ・テーブル、対�
     await context.route('**/*',route=>{if(route.request().url()==='https://layout.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="lens"></div><textarea id="draft">未送信の相談</textarea></body></html>'});unexpected.push(route.request().url());return route.abort();});
     const page=await context.newPage();page.setDefaultTimeout(6000);page.on('pageerror',e=>errors.push(e.message));
     await page.exposeFunction('loadBase',load);await page.goto('https://layout.test.invalid/');
-    let source=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
+    let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
     const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.mountLens=mountReleaseConfigLens;\n'+source.slice(end);
     await page.addScriptTag({content:source});
     await page.evaluate(async()=>{window.aiCalls=0;window.lens=mountLens(document.querySelector('#lens'),{loadBase:window.loadBase,domain:'fixture.cybozu.com',explain:()=>{aiCalls++;},localEdits:()=>[]});await lens.onVisible();});

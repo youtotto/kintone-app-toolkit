@@ -8,8 +8,7 @@ const clone = x => JSON.parse(JSON.stringify(x));
 const field = (code, label, type = 'SINGLE_LINE_TEXT', extra = {}) => ({ code, label, type, required: false, ...extra });
 function mock(autoPlace = true) {
   const fields = { a: field('a', '案件名'), b: field('b', '金額', 'NUMBER'), c: field('c', '担当者'),
-    g: field('g', '経理情報', 'GROUP'), t: field('t', '明細', 'SUBTABLE', { fields: { col: field('col', '品名') } }),
-    col: field('col', '品名', 'SINGLE_LINE_TEXT', { parent: 't' }) };
+    g: field('g', '経理情報', 'GROUP'), t: field('t', '明細', 'SUBTABLE', { noLabel: true, fields: { col: field('col', '品名') } }) };
   const m = makeKintoneMock({ fields, views: { views: {}, revision: '10' }, status: { enable: false, states: {}, actions: [] } }, { autoPlace });
   m.st.layout = [
     { type: 'ROW', fields: [{ type: 'LABEL', label: '<b>既存の説明</b>', size: { width: '240', height: '40' } }, { type: 'SPACER', elementId: 'space_1', size: { width: '80', height: '40' } }] },
@@ -83,7 +82,6 @@ for (const [name, operations, fields, extra] of [
   ['group end with ordinary field', [operation('GROUP_END', 'a')]],
   ['same row at a group', [operation('AFTER_FIELD', 'g')]],
   ['same row at a table', [operation('BEFORE_FIELD', 't')]],
-  ['inside table column', [operation('AFTER_FIELD', 'col')]],
   ['above table column', [operation('BEFORE_ROW', 'col')]],
   ['self reference', [operation('AFTER_FIELD', 'F1')]],
   ['unexecuted new anchor', [operation('AFTER_FIELD', 'F2')], [definition(), definition('F2', 'new_second')]],
@@ -173,4 +171,109 @@ test('rollback checks again after its confirmation', async () => {
   m.st.layout[0].fields[0].label = '確認後の変更'; m.st.revision++; const count = writes(m).length;
   await P.executeRollback(rb, { api: m.api, execution: e });
   assert.equal(rb.status, 'ROLLBACK_FAILED'); assert.equal(writes(m).length, count); assert.ok(m.st.fields.new_field);
+});
+
+for (const autoPlace of [true, false]) for (const position of ['BEFORE_FIELD', 'AFTER_FIELD']) test('existing table column ' + position + ', auto placement ' + autoPlace, async () => {
+  const m = mock(autoPlace), originalFields = clone(m.st.fields), originalLayout = clone(m.st.layout);
+  const p = await prep(m, [operation(position, 'col')]);
+  assert.equal(p.status, 'PREPARED', JSON.stringify(p.blockers));
+  const prepared = p.steps[0].prepared;
+  assert.equal(prepared.expect.subtable, 't');
+  assert.match(prepared.placementDescription, /テーブル「明細」/);
+  assert.deepEqual(Object.keys(prepared.payload.properties), ['t']);
+  assert.equal(prepared.payload.properties.t.label, '明細');
+  assert.equal(prepared.payload.properties.t.noLabel, true);
+  assert.deepEqual(Object.keys(prepared.payload.properties.t.fields), ['new_field']);
+  const e = await P.executePreview(p, { api: m.api });
+  assert.equal(e.status, 'DONE', JSON.stringify(e.steps));
+  assert.equal(m.st.fields.new_field, undefined, 'new column must not become a top-level field');
+  assert.equal(m.st.fields.t.fields.new_field.code, 'new_field');
+  assert.deepEqual(where(m.st.layout, 'col').node.fields.map(f => f.code), position === 'AFTER_FIELD' ? ['col', 'new_field'] : ['new_field', 'col']);
+  const deleteCodes = [], del = m.api.deletePreviewFields;
+  m.api.deletePreviewFields = async (app, codes, revision) => { deleteCodes.push(...codes); return del(app, codes, revision); };
+  const rb = await P.prepareRollback(e, p, { api: m.api });
+  assert.equal(rb.status, 'PREPARED', JSON.stringify(rb.blockers));
+  await P.executeRollback(rb, { api: m.api, execution: e });
+  assert.equal(rb.status, 'ROLLED_BACK_VERIFIED', JSON.stringify(rb.steps));
+  assert.deepEqual(deleteCodes, ['new_field'], 'never delete the table to undo a new column');
+  assert.deepEqual(m.st.fields, originalFields); assert.deepEqual(m.st.layout, originalLayout);
+});
+
+test('temporary column IDs chain within one table and readback tolerates API defaults on previous additions', async () => {
+  const m = mock(), original = clone({ fields: m.st.fields, layout: m.st.layout });
+  const operations = [operation('AFTER_FIELD', 'F1', { id: 'P2', targetRef: 'F2', dependsOn: ['P1'] }), operation('AFTER_FIELD', 'col')];
+  const p = await prep(m, operations, [definition(), definition('F2', 'new_second')]);
+  assert.equal(p.status, 'PREPARED', JSON.stringify(p.blockers));
+  assert.equal(p.steps[1].prepared.expect.subtable, 't');
+  const post = m.api.addPreviewFields;
+  m.api.addPreviewFields = async (...args) => { const r = await post(...args); for (const f of Object.values(m.st.fields.t.fields)) if (f.code.startsWith('new_')) f.defaultValue = ''; return r; };
+  const e = await P.executePreview(p, { api: m.api }); assert.equal(e.status, 'DONE', JSON.stringify(e.steps));
+  assert.deepEqual(where(m.st.layout, 'col').node.fields.map(f => f.code), ['col', 'new_field', 'new_second']);
+  const rb = await P.prepareRollback(e, p, { api: m.api }); assert.equal(rb.status, 'PREPARED', JSON.stringify(rb.blockers));
+  await P.executeRollback(rb, { api: m.api, execution: e });
+  assert.equal(rb.status, 'ROLLED_BACK_VERIFIED', JSON.stringify(rb.steps));
+  assert.deepEqual({ fields: m.st.fields, layout: m.st.layout }, original);
+});
+
+for (const type of ['USER_SELECT', 'ORGANIZATION_SELECT', 'GROUP_SELECT', 'DATE', 'NUMBER']) test('table supports permitted field type ' + type, async () => {
+  const m = mock(), p = await prep(m, [operation('AFTER_FIELD', 'col')], [{ ...definition(), type }]);
+  assert.equal(p.status, 'PREPARED', JSON.stringify(p.blockers));
+  const e = await P.executePreview(p, { api: m.api }); assert.equal(e.status, 'DONE', JSON.stringify(e.steps));
+  assert.equal(m.st.fields.t.fields.new_field.type, type);
+});
+
+test('mismatched layout and field membership blocks before POST', async () => {
+  const m = mock(); const table = m.st.layout.find(r => r.type === 'SUBTABLE');
+  table.fields.push({ type: 'NUMBER', code: 'b' }); m.st.layout[1].fields.pop();
+  const p = await prep(m, [operation('AFTER_FIELD', 'b')]);
+  assert.equal(p.status, 'BLOCKED'); assert.equal(writes(m).length, 0);
+});
+
+test('a nested code collision is not converted into a top-level field', async () => {
+  const m = mock(), p = await prep(m, [operation('AFTER_FIELD', 'b')], [definition('F1', 'col')]);
+  assert.equal(p.status, 'BLOCKED'); assert.equal(writes(m).length, 0);
+});
+
+for (const mutation of ['change-existing-column', 'drop-existing-column', 'wrong-parent']) test('nested readback rejects ' + mutation, async () => {
+  const m = mock(), p = await prep(m, [operation('BEFORE_FIELD', 'col')]), post = m.api.addPreviewFields;
+  m.api.addPreviewFields = async (...args) => {
+    const r = await post(...args);
+    if (mutation === 'change-existing-column') m.st.fields.t.fields.col.label = '勝手に変更';
+    if (mutation === 'drop-existing-column') delete m.st.fields.t.fields.col;
+    if (mutation === 'wrong-parent') { m.st.fields.new_field = m.st.fields.t.fields.new_field; delete m.st.fields.t.fields.new_field; }
+    return r;
+  };
+  const e = await P.executePreview(p, { api: m.api }); assert.equal(e.status, 'FAILED', JSON.stringify(e.steps));
+  assert.notEqual(e.steps[0].status, 'DONE');
+});
+
+test('table column revision changes before creation do not write', async () => {
+  const m = mock(), p = await prep(m, [operation('AFTER_FIELD', 'col')]);
+  m.st.fields.t.fields.col.label = 'ほかの人の更新'; m.st.revision++;
+  const e = await P.executePreview(p, { api: m.api }); assert.equal(e.status, 'FAILED');
+  assert.equal(writes(m).length, 0); assert.equal(m.st.fields.t.fields.new_field, undefined);
+});
+
+test('table layout failure can roll back only the newly created column', async () => {
+  const m = mock(), original = clone({ fields: m.st.fields, layout: m.st.layout }), p = await prep(m, [operation('BEFORE_FIELD', 'col')]);
+  m.ctl.failPut = 'layout'; const e = await P.executePreview(p, { api: m.api });
+  assert.equal(e.status, 'FAILED'); assert.ok(e.steps[0].partial); assert.ok(m.st.fields.t.fields.new_field);
+  m.ctl.failPut = null; const rb = await P.prepareRollback(e, p, { api: m.api });
+  await P.executeRollback(rb, { api: m.api, execution: e }); assert.equal(rb.status, 'ROLLED_BACK_VERIFIED', JSON.stringify(rb.steps));
+  assert.deepEqual({ fields: m.st.fields, layout: m.st.layout }, original);
+});
+
+test('rollback detects a later changed column definition', async () => {
+  const m = mock(), p = await prep(m, [operation('AFTER_FIELD', 'col')]), e = await P.executePreview(p, { api: m.api });
+  assert.equal(e.status, 'DONE'); m.st.fields.t.fields.new_field.label = 'ほかの人が変更'; m.st.revision++;
+  const rb = await P.prepareRollback(e, p, { api: m.api }); assert.equal(rb.status, 'BLOCKED');
+  assert.equal(rb.steps[0].reason, 'FIELD_CHANGED'); assert.ok(m.st.fields.t.fields.new_field);
+});
+
+test('rollback sees references from sibling table columns rather than treating membership as a reference', async () => {
+  const m = mock(), p = await prep(m, [operation('AFTER_FIELD', 'col')]), e = await P.executePreview(p, { api: m.api });
+  assert.equal(e.status, 'DONE');
+  m.st.fields.t.fields.col.type = 'CALC'; m.st.fields.t.fields.col.expression = 'new_field'; m.st.revision++;
+  const rb = await P.prepareRollback(e, p, { api: m.api }); assert.equal(rb.status, 'BLOCKED');
+  assert.equal(rb.steps[0].reason, 'FIELD_REFERENCED'); assert.ok(m.st.fields.t.fields.new_field);
 });

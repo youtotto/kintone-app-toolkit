@@ -13,22 +13,21 @@ const KTReleaseSmalltalk=(()=>{
    const text=state.draft.trim();
    if(!text||[...text].length>100){state.error='雑談は100文字以内で入力してください。';emit();return false;}
    state.pending=true;state.error='';abort=new AbortController();const signal=abort.signal;emit();
-   let started=false;
    try{
     if(!await beforeSend()||disposed||signal.aborted)return false;
     if(!available())throw Error('雑談を利用できません。接続先・契約・AIサービスの更新を確認してください。');
     const history=state.turns.filter(t=>typeof t.reply==='string').slice(-3).map(t=>({user:t.user,assistant:t.reply}));
     const id=makeId(),turn={id,user:text,reply:null,handoff:false};
-    state.turns.push(turn);state.draft='';started=true;emit();
+    state.turns.push(turn);state.draft='';emit();
     const result=await send({text,history,requestId:id,signal});
     if(disposed||signal.aborted)return false;
     if(result?.ok!==true||result.version!==1||typeof result.reply!=='string'||!result.reply.trim()||[...result.reply].length>1200||typeof result.handoff!=='boolean')throw Error('雑談の返答を確認できませんでした。');
     turn.reply=result.reply;turn.handoff=result.handoff;state.usage=usageOf(result.smalltalkUsage);
     return true;
    }catch(error){
-    if(!disposed){state.error=signal.aborted?'雑談を中断しました。送信開始後の無料枠は戻りません。':error?.message||'雑談の返答を受け取れませんでした。';state.usage=usageOf(error?.details?.error?.detail?.smalltalkUsage||error?.details?.smalltalkUsage||error?.detail?.smalltalkUsage)||state.usage;if(started&&!state.draft)state.draft=text;}
+    if(!disposed){state.error=signal.aborted?'雑談を中断しました。送信開始後の無料枠は戻りません。':'雑談の返答を受け取れませんでした。接続状態を確認してください。';state.usage=usageOf(error?.details?.error?.detail?.smalltalkUsage||error?.details?.smalltalkUsage||error?.detail?.smalltalkUsage)||state.usage;}
     return false;
-   }finally{if(signal.aborted&&started&&!state.draft)state.draft=text;state.pending=false;abort=null;if(!disposed)emit();}
+   }finally{state.pending=false;abort=null;if(!disposed)emit();}
   }
   return {getState:()=>clone(state),setDraft,submit,
    toggle(){if(disposed||state.pending||!canSend())return false;state.open=!state.open;state.error='';emit();return true;},

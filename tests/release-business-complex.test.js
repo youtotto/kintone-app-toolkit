@@ -119,12 +119,21 @@ test('30件の運用記録・質問への回答・選択希望と複数の下書
  assert.equal(overviews(main(restored)),1);assert.equal(g.count('propose'),0);assert.equal(g.writes.length,0);assert.equal(f.writes.length,0);
 });
 
-test('31件目は送信形を黙って切らず停止し、添付を外しても保存記録と確認事項は失わない',async()=>{
+test('30件を超えても全記録を添付し、明示除外と未確認事項・保存復元を維持する',async()=>{
  const f=await setup(),c=f.c;assert.equal(await c.startBusiness(f.docs[0].id,'R1'),true);
- for(let i=0;i<31;i++)assert.equal(c.recordBusiness({kind:'current_operation',text:'部門で確認した運用 '+(i+1)}),true);
- const calls=counts(f);assert.throws(()=>B.context(c.getState().businessContext,'確認'),/30件/);assert.equal(c.getState().businessContext.statements.length,31);
- assert.equal(c.attachBusinessStatement('BS1',false),true);let wire=B.wire(c.getState().businessContext);assert.equal(wire.statements.length,30);assert.equal(wire.omittedStatementCount,1);assert.equal(c.getState().businessContext.statements.length,31);
- assert.equal(c.recordBusiness({kind:'open_question',state:'unknown',text:'例外時の承認責任者は未確認です。'}),true);assert.equal(c.attachBusinessStatement('BS32',false),false);assert.throws(()=>B.wire(c.getState().businessContext),/30件/);
- assert.equal(c.attachBusinessStatement('BS2',false),true);wire=B.wire(c.getState().businessContext);assert.equal(wire.statements.length,30);assert.equal(wire.omittedStatementCount,2);assert.ok(wire.statements.some(s=>s.statementId==='BS32'&&s.state==='unknown'));
- const g=controllerFor(f.fixtures);assert.equal(await g.controller.restoreSession(c.exportSession()),true);assert.equal(g.controller.getState().businessContext.statements.length,32);assert.deepEqual(B.wire(g.controller.getState().businessContext),wire);assert.deepEqual(counts(f),calls);assert.equal(g.count('propose'),0);assert.equal(f.writes.length,0);assert.equal(g.writes.length,0);
+ for(let i=0;i<40;i++)assert.equal(c.recordBusiness({kind:'current_operation',text:'部門で確認した運用 '+(i+1)}),true);
+ const calls=counts(f),before=c.getState().businessContext,context=B.context(before,'確認');
+ assert.equal(context.businessContext.statements.length,40);assert.deepEqual(context.businessContext.statements,before.statements);assert.deepEqual(B.validate(context.businessContext,{wire:true}),[]);
+ assert.equal(c.attachBusinessStatement('BS1',false),true);let wire=B.wire(c.getState().businessContext);assert.equal(wire.statements.length,39);assert.equal(wire.omittedStatementCount,1);assert.equal(c.getState().businessContext.statements.length,40);
+ assert.equal(c.recordBusiness({kind:'open_question',state:'unknown',text:'例外時の承認責任者は未確認です。'}),true);assert.equal(c.attachBusinessStatement('BS41',false),false);
+ wire=B.context(c.getState().businessContext,'未確認の責任者も含めて確認').businessContext;assert.equal(wire.statements.length,40);assert.ok(wire.statements.some(s=>s.statementId==='BS41'&&s.state==='unknown'));
+ const g=controllerFor(f.fixtures);assert.equal(await g.controller.restoreSession(c.exportSession()),true);assert.equal(g.controller.getState().businessContext.statements.length,41);assert.deepEqual(B.wire(g.controller.getState().businessContext),wire);assert.deepEqual(counts(f),calls);assert.equal(g.count('propose'),0);assert.equal(f.writes.length,0);assert.equal(g.writes.length,0);
+});
+
+test('実際の送信容量を超える場合だけAIの前に止め、全記録を保存・復元できる',async()=>{
+ const f=await setup(),c=f.c;assert.equal(await c.startBusiness(f.docs[0].id,'R1'),true);
+ for(let i=0;i<50;i++)assert.equal(c.recordBusiness({kind:'current_operation',text:('運用'+i+'：')+'あ'.repeat(1900)}),true);
+ const before=c.getState().businessContext,calls=counts(f),wire=B.wire(before);
+ assert.equal(wire.statements.length,50);assert.ok(Buffer.byteLength(JSON.stringify(wire))>256*1024);assert.throws(()=>B.context(before,'容量の確認'),/送信上限/);
+ assert.deepEqual(c.getState().businessContext,before);const saved=c.exportSession(),g=controllerFor(f.fixtures);assert.equal(await g.controller.restoreSession(saved),true);assert.deepEqual(g.controller.getState().businessContext,before);assert.deepEqual(counts(f),calls);assert.equal(g.count('propose'),0);assert.equal(f.writes.length,0);assert.equal(g.writes.length,0);
 });

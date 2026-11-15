@@ -22,7 +22,8 @@ function mount(options = {}, methods = {}) {
   const controller = { getState: () => state, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     newTask() { calls.push('newTask'); state = { ...stateOf(), taskId: state.taskId + 1 }; publish(); return true; },
     send: async text => { calls.push(['send', text]); return true; },
-    setRequestPurpose(purpose) { state.requestPurpose = purpose; publish(); }, ...methods };
+    setRequestPurpose(purpose) { state.requestPurpose = purpose; publish(); },
+    setDecisionDraft(id, answer, reference) { calls.push(['setDecisionDraft', id, answer, reference]); return true; }, ...methods };
   const host = hostOf(), view = View.create(host, { controller, ...options });
   return { host, view, controller, calls, publish };
 }
@@ -46,7 +47,7 @@ test('保存した会話はチャット上部に置き、ヘッダーは接続�
   await click(host, 'saved-history'); assert.equal(opened, 1); view.dispose();
 });
 
-test('保存状況は短く表示し、失敗の詳しい理由をキーボードで開ける', () => {
+test('保存状況は短く表示し、内部例外を出さず保存案内をキーボードで開ける', () => {
   for (const state of ['saving', 'saved', 'loading']) {
     const html = clean(View.render(stateOf(), { historyStatus: () => ({ state }) }));
     assert.match(html, new RegExp('data-release-history-state="' + state + '" role="status"'));
@@ -54,13 +55,13 @@ test('保存状況は短く表示し、失敗の詳しい理由をキーボー�
   for (const state of ['error', 'unavailable']) {
     const html = clean(View.render(stateOf(), { historyStatus: () => ({ state, message: '<img src=x onerror="evil()">保存容量が足りません' }) }));
     assert.match(html, /<details class="ktr-history-status-detail"[^>]*><summary><span[^>]* role="alert"/);
-    assert.match(html, /保存容量が足りません/); assert.match(html, /&lt;img/); assert.doesNotMatch(html, /<img|onerror="evil/);
+    assert.match(html, /会話を保存できませんでした/); assert.doesNotMatch(html, /保存容量が足りません|&lt;img|<img|onerror/);
     assert.equal((html.match(/ktr-history-status-message/g) || []).length, 1);
   }
-  assert.match(clean(View.render(stateOf(), { historyStatus() { throw new Error('read failed'); } })), /保存の状態を確認できません/);
+  assert.match(clean(View.render(stateOf(), { historyStatus() { throw new Error('read failed'); } })), /会話を保存できませんでした/);
 });
 
-test('下書き通知は入力・復元・回答・相談補助の実際の変更ごとに一度だけ発行する', async () => {
+test('下書き通知は入力・復元・相談補助に限り、確認事項の選択で本文を上書きしない', async () => {
   const f = mount(), values = [], unsubscribe = f.view.subscribeDraft(text => values.push(text));
   assert.equal(f.view.getDraft(), ''); assert.deepEqual(values, []);
   await type(f.host, '入力中'); await type(f.host, '入力中');
@@ -70,9 +71,11 @@ test('下書き通知は入力・復元・回答・相談補助の実際の変�
   assert.equal(f.host.querySelector('#kt-release-input').value, '復元した下書き');
   f.view.focusConsultation('上書きしない'); assert.equal(f.view.getDraft(), '復元した下書き');
   f.view.setDraft(''); f.view.focusConsultation('対象を相談');
-  await click(f.host, 'answer', { releaseAnswer: '質問への回答' });
-  assert.deepEqual(values, ['入力中', '復元した下書き', '', '対象を相談', '質問への回答']);
-  unsubscribe(); f.view.setDraft('通知解除後'); assert.equal(values.length, 5);
+  await click(f.host, 'answer', { releaseId: 'Q1', releaseTask: '1', releaseVersion: '1', releaseAnswer: '質問への回答' });
+  assert.deepEqual(values, ['入力中', '復元した下書き', '', '対象を相談']);
+  assert.equal(f.view.getDraft(), '対象を相談');
+  assert.deepEqual(f.calls.at(-1), ['setDecisionDraft', 'Q1', '質問への回答', { taskId: 1, version: 1 }]);
+  unsubscribe(); f.view.setDraft('通知解除後'); assert.equal(values.length, 4);
   f.view.dispose(); assert.equal(f.view.setDraft('破棄後'), false); assert.equal(f.view.getDraft(), '通知解除後');
 });
 
@@ -167,10 +170,18 @@ test('保存状態だけの更新は入力DOMと下書き通知を変えず、�
   const slot = { querySelector: () => panel };
   Object.defineProperty(slot, 'innerHTML', { get: () => html, set(value) { html = value; panel = value.includes('<details') ? { open: false, querySelector: () => null } : null; } });
   const query = f.host.querySelector; f.host.querySelector = selector => selector === '[data-release-history-status]' ? slot : query(selector);
-  f.view.updateHistoryStatus(); assert.equal(panel.open, true); assert.match(html, /最初の保存エラー/);
+  f.view.updateHistoryStatus(); assert.equal(panel.open, true); assert.match(html, /会話を保存できませんでした/);assert.doesNotMatch(html,/最初の保存エラー/);
   status = { state: 'error', message: '次の保存エラー' }; f.view.updateHistoryStatus();
-  assert.equal(panel.open, true); assert.match(html, /次の保存エラー/);
+  assert.equal(panel.open, true); assert.match(html, /会話を保存できませんでした/);assert.doesNotMatch(html,/次の保存エラー/);
   status = { state: 'saved' }; f.view.updateHistoryStatus(); assert.equal(panel, null); assert.match(html, /保存済み/);
   assert.equal(f.host.querySelector('#kt-release-input'), input); assert.equal(f.view.getDraft(), '入力中'); assert.deepEqual(values, []);
   f.view.dispose(); status = { state: 'saving' }; f.view.updateHistoryStatus(); assert.match(html, /保存済み/);
+});
+
+
+test('保存の容量不足と競合はcodeから具体的な案内を表示し、内部messageは出さない', () => {
+  for (const [code, expected] of [['HISTORY_LIMIT', /保存容量が足りません/], ['HISTORY_CONFLICT', /別のタブで保存内容が変わりました/]]) {
+    const html = clean(View.render(stateOf(), { historyStatus: { state: 'error', code, message: 'private internal storage details' } }));
+    assert.match(html, expected); assert.doesNotMatch(html, /private internal|HISTORY_LIMIT|HISTORY_CONFLICT/);
+  }
 });

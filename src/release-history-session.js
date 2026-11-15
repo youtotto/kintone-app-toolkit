@@ -18,7 +18,7 @@ const KTReleaseHistorySession = (() => {
     let current = null, lastSignature = '', lastSnapshot = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;
     let initialization = null, initializing = false, editEpoch = 0, selectionDirty = false;
     let queue = Promise.resolve(), status = { state: 'saved', message: '' };
-    const notify = (state, message = '') => { status = { state, message, completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
+    const notify = (state, message = '', code = null) => { status = { state, message, ...(code ? { code } : {}), completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
     const serial = work => { const next = queue.catch(() => {}).then(work); queue = next; return next; };
     const requireUnchanged = expected => {
       if (signature(capture()) !== expected) throw failure('HISTORY_EDITED', '読み込み中に内容が変わったため、会話の切り替えを止めました。追記は残しています。');
@@ -27,7 +27,7 @@ const KTReleaseHistorySession = (() => {
       dirty = true;
       notify('error', error?.code === 'HISTORY_CONFLICT' ? '別のタブで保存内容が変わりました。手元の内容は残っています。書き出してから会話を開き直してください。'
         : error?.code === 'HISTORY_LIMIT' || error?.name === 'QuotaExceededError' ? '保存容量が足りません。手元の内容は残っています。保存した会話を整理してください。'
-        : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。');
+        : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。', error?.name === 'QuotaExceededError' ? 'HISTORY_LIMIT' : error?.code);
     };
     async function saveCurrent({ completedAt, pinned, snapshot } = {}) {
       const payload = snapshot || clone(capture()), nextSignature = signature(payload);

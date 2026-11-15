@@ -33,7 +33,7 @@ test('接続の残数を応答ごとに更新し、相談上限でも作成で�
       return { ...body, usage: current };
     });
     await page.goto('https://quota.test.invalid/');
-    let source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+    let source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
     const end = source.lastIndexOf('})();'); source = source.slice(0, end) + '\nglobalThis.QuotaTest={mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
     await page.addScriptTag({ content: source });
     await page.evaluate(({ prod, names }) => {
@@ -67,7 +67,7 @@ test('接続の残数を応答ごとに更新し、相談上限でも作成で�
     assert.equal(await action('copy-explanation').isEnabled(), true); await action('copy-explanation').click(); assert.equal(await page.evaluate(() => copies.length), 1);
     assert.equal(await action('send').isDisabled(), true); await action('focus-consultation').click(); assert.equal(await action('send').isEnabled(), true);
     failNext = true; await page.locator('#kt-release-input').fill('修正の相談'); await action('send').click(); await page.waitForFunction(() => work.controller.getState().error?.code === 'MONTHLY_LIMIT_EXCEEDED');
-    assert.equal(await page.locator('#kt-release-input').inputValue(), '修正の相談'); assert.equal(await action('send').isDisabled(), true); assert.equal(await page.evaluate(() => work.controller.getState().explanations.length), 1);
+    assert.equal(await page.locator('#kt-release-input').inputValue(), ''); assert.equal(await page.evaluate(() => work.controller.getState().messages.filter(m => m.role === 'user' && m.text === '修正の相談').length), 1, '送信済み本文は履歴に一度だけ保持'); assert.equal(await action('send').isDisabled(), true); assert.equal(await page.evaluate(() => work.controller.getState().explanations.length), 1);
     dialog = await open(); assert.match(await dialog.locator('[data-usage-bucket="consultation"]').innerText(), /残り 0回/);
     current = null; await page.evaluate(() => work.refreshCapability(true)); assert.match(await dialog.locator('[data-usage]').innerText(), /未確認/); assert.doesNotMatch(await dialog.locator('[data-usage]').innerText(), /残り 0/);
     current = { yyyymm: '209910', plan: 'old', monthlyLimit: 30, usedThisMonth: 30, remainingThisMonth: 0 }; await page.evaluate(() => work.refreshCapability(true)); assert.match(await dialog.locator('[data-usage-legacy]').innerText(), /残り 0回.*月 30回/);

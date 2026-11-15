@@ -17,7 +17,7 @@ test('H05 運用の確認は取得も変更も採用もしない',async()=>{cons
 test('H06/H07 運用と希望・訂正・保留を分離し元資料を保持',async()=>{const f=await setup();await f.c.startBusiness(f.doc.id);assert.equal(f.c.recordBusiness({kind:'current_operation',text:'確認は部門長です'}),true);assert.equal(f.c.recordBusiness({kind:'desired_change',text:'確認をアプリへ記録したい'}),true);const h=f.c.getState().businessContext;assert.equal(h.statements[0].statementId,'BS1');assert.deepEqual(h.snapshot,f.s);assert.equal(f.c.recordBusiness({kind:'current_operation',text:'実際は課長',supersedes:'BS1'}),true);assert.equal(f.c.getState().businessContext.statements[0].state,'superseded');assert.deepEqual(B.validate(B.wire(f.c.getState().businessContext),{wire:true}),[]);assert.equal(f.c.recordBusiness({kind:'open_question',state:'deferred',text:'確認場所は後で調査'}),true);assert.equal(f.c.withdrawBusiness('BS2'),true);assert.equal(f.count('propose'),1);});
 test('H08 不正な変更応答は採用せず保存済み回答を保つ',async()=>{const f=await setup({propose:args=>({...answer(args.businessContext),turn:{ops:[{op:'add'}],answers:[],requirementOps:[]}})});await f.c.startBusiness(f.doc.id);f.c.recordBusiness({kind:'current_operation',text:'部門長が確認'});assert.equal(await f.c.send('確認'),false);assert.equal(f.c.getState().businessContext.statements.length,1);assert.equal(f.c.getState().proposal,null);});
 test('H09 汎用資料の全体参照のみ許可・偽の設定事実を拒否',async()=>{const f=await setup(),doc={...f.doc,kind:undefined,title:'参考分析',sections:[],unknowns:['実操作未確認']};const h=await B.create(doc,scope);await assert.rejects(()=>B.create(doc,scope,'R1'));const a=answer(h).businessConsultation;a.blocks=[{kind:'setting_fact',text:'断定',ruleRefs:[],evidenceRefs:[],statementRefs:[],messageRefs:[]}];assert.ok(B.validateOutput(a,h).length);});
-test('H10 上限超過は送信前に停止・無言の切り捨てなし',async()=>{const f=await setup(),h=await B.create(f.doc,scope);h.messages=[{id:'1',role:'user',text:'x'.repeat(10000)}];for(let i=0;i<31;i++)h.statements=B.record(h,{kind:'current_operation',text:'説明'+i}).statements;assert.throws(()=>B.context(h,'確認'),/30件/);const many=await B.create(f.doc,scope);for(let i=0;i<30;i++)many.messages.push({id:String(i),role:'user',text:'あ'.repeat(10000)});assert.throws(()=>B.context(many,'確認'),/上限/);});
+test('H10 31件も容量内なら送信し、実容量超過だけを停止・無言の切り捨てなし',async()=>{const f=await setup(),h=await B.create(f.doc,scope);h.messages=[{id:'1',role:'user',text:'x'.repeat(10000)}];for(let i=0;i<31;i++)h.statements=B.record(h,{kind:'current_operation',text:'説明'+i}).statements;assert.equal(B.context(h,'確認').businessContext.statements.length,31);assert.equal(h.statements.length,31);const many=await B.create(f.doc,scope);for(let i=0;i<30;i++)many.messages.push({id:String(i),role:'user',text:'あ'.repeat(10000)});assert.throws(()=>B.context(many,'確認'),/上限/);});
 test('H11 回答・下書き・参照を保存復旧、破損時は資料を残す',async()=>{const f=await setup();await f.c.startBusiness(f.doc.id);f.c.recordBusiness({kind:'current_operation',text:'部門長が確認'});f.c.setBusinessDraft('new','保存前の入力');const saved=f.c.exportSession();assert.equal(saved.version,'release-workspace-session-2');const g=await setup();assert.equal(await g.c.restoreSession(saved),true);assert.equal(g.c.getBusinessDraft('new'),'保存前の入力');assert.deepEqual(g.c.getState().businessContext,f.c.getState().businessContext);const bad=F.clone(saved);bad.state.businessContext.analysisHash='0'.repeat(64);assert.equal(await g.c.restoreSession(bad),true);assert.ok(g.c.getState().businessInvalid);assert.equal(await g.c.send('送信'),false);assert.equal(g.c.getState().explanations.length,1);});
 test('H12 中断後の遅延応答を破棄',async()=>{const gate=deferred(),f=await setup({propose:()=>gate.promise});await f.c.startBusiness(f.doc.id);const running=f.c.send('確認');await new Promise(r=>setTimeout(r,10));assert.equal(f.c.cancel(),true);gate.resolve(answer(f.c.getState().businessContext));assert.equal(await running,false);assert.equal(f.c.getState().businessResult,null);});
 test('H13/H14 時点差と環境差・取得失敗を区別',async()=>{const f=await setup(),h=await B.create(f.doc,scope);let a=B.assess(h,f.s,f.preview);assert.equal(a.status,'unchanged');const changed=F.clone(f.preview);changed.evidence.find(e=>e.kind==='notification_record').value.title='別の連絡';a=B.assess(h,f.s,changed);assert.ok(a.rows.some(r=>r.comparison==='environment'&&r.status==='changed'));assert.ok(a.rows.filter(r=>r.comparison==='history').every(r=>r.status==='unchanged'));changed.categories.find(c=>c.category==='acl_record').acquisition='forbidden';assert.equal(B.assess(h,f.s,changed).status,'unavailable');});
@@ -86,4 +86,45 @@ test('旧8カテゴリの保存済み分析も相談用の根拠に引き継げ�
  const h=await B.create(doc,scope,'R1'),ctx=B.context(h,'以前の分析について確認したい');
  assert.equal(ctx.businessContext.sourceBundle.categories.length,8);assert.deepEqual(B.validate(ctx.businessContext,{wire:true}),[]);
  const bad=F.clone(ctx.businessContext);bad.sourceBundle.categories[0].category='javascript';assert.ok(B.validate(bad,{wire:true}).length);
+});
+
+
+test('30件を超える運用記録への回答参照を保持し、存在しない参照だけを拒否する',async()=>{
+ const f=await setup();let h=await B.create(f.doc,scope);
+ for(let i=0;i<40;i++)h=B.record(h,{kind:'current_operation',text:'確認した運用 '+(i+1)});
+ const wire=B.context(h,'すべての運用を整理してください').businessContext,a=answer(wire);
+ a.businessConsultation.blocks=[{kind:'user_report',text:'利用者が記録した運用です。',ruleRefs:[],evidenceRefs:[],statementRefs:wire.statements.map(s=>s.statementId),messageRefs:[]}];
+ assert.equal(a.businessConsultation.blocks[0].statementRefs.length,40);assert.deepEqual(B.responseIssues(a,wire),[]);
+ a.businessConsultation.blocks[0].statementRefs.push('BS999');assert.deepEqual(B.responseIssues(a,wire).map(e=>e.path),['businessConsultation.blocks[0].statementRefs[40]']);
+});
+
+
+test('変更相談の準備1操作で記録・添付・選択し、運用事実は変えずAIも呼ばない',async()=>{
+ const f=await setup();await f.c.startBusiness(f.doc.id);f.c.recordBusiness({kind:'current_operation',text:'実際は部門長が確認します'});f.c.recordBusiness({kind:'desired_change',text:'先に選んだ希望'});f.c.selectBusinessChange('BS2',true);
+ const before=f.c.getState(),calls=f.count('propose');let emits=0;const stop=f.c.subscribe(()=>emits++);emits=0;
+ assert.equal(f.c.prepareBusinessChange(null,'申請一覧で確認状況を見たい'),true);stop();const after=f.c.getState();
+ assert.equal(emits,1);assert.equal(after.businessMode,'improve');assert.deepEqual(after.businessSelectedIds,['BS2','BS3']);assert.equal(after.businessContext.statements[2].kind,'desired_change');assert.equal(after.businessContext.statements[2].text,'申請一覧で確認状況を見たい');assert.deepEqual(after.businessContext.statements[0],before.businessContext.statements[0]);assert.deepEqual(after.businessContext.snapshot,before.businessContext.snapshot);assert.equal(f.count('propose'),calls);assert.equal(f.count('plan'),0);assert.equal(f.writes.length,0);
+});
+
+test('保存済み希望の直接相談は添付除外を戻し、同じ希望の再送準備で二重記録しない',async()=>{
+ const f=await setup();await f.c.startBusiness(f.doc.id);f.c.recordBusiness({kind:'desired_change',text:'申請者へ差し戻し理由を通知したい'});f.c.attachBusinessStatement('BS1',false);
+ assert.equal(f.c.prepareBusinessChange('BS1'),true);assert.deepEqual(f.c.getState().businessSelectedIds,['BS1']);assert.ok(!f.c.getState().businessContext.attachmentExcludedIds.includes('BS1'));
+ assert.equal(f.c.prepareBusinessChange(null,'申請者へ差し戻し理由を通知したい'),true);assert.equal(f.c.getState().businessContext.statements.length,1);assert.deepEqual(f.c.getState().businessSelectedIds,['BS1']);assert.equal(f.count('propose'),1);assert.equal(f.writes.length,0);
+});
+
+test('運用事実・存在しない記録・空文は変更希望へ変換せず、送信準備で書き換えない',async()=>{
+ const f=await setup();await f.c.startBusiness(f.doc.id);f.c.recordBusiness({kind:'current_operation',text:'現在は部門長が確認します'});const before=f.c.getState();
+ for(const[id,text]of [['BS1',undefined],['BS999',undefined],[null,'  ']]){assert.equal(f.c.prepareBusinessChange(id,text),false);assert.deepEqual(f.c.getState().businessContext,before.businessContext);assert.deepEqual(f.c.getState().businessSelectedIds,before.businessSelectedIds);assert.equal(f.c.getState().businessMode,'understand');}
+ assert.equal(f.count('propose'),1);assert.equal(f.writes.length,0);
+});
+
+
+test('任意の関係指定を直接相談に保存し、訂正時は旧希望を履歴に残して新しい版を選ぶ',async()=>{
+ const f=await setup();await f.c.startBusiness(f.doc.id);const text='承認者の説明を訂正したい';
+ assert.equal(f.c.prepareBusinessChange(null,text,'corrects'),true);assert.equal(f.c.getState().businessContext.statements[0].relationToHypothesis,'corrects');
+ assert.equal(f.c.prepareBusinessChange(null,text,'corrects'),true);assert.equal(f.c.getState().businessContext.statements.length,1,'同一内容・同一関係の再送準備は重複しない');
+ assert.equal(f.c.prepareBusinessChange('BS1'),true);assert.equal(f.c.getState().businessContext.statements[0].relationToHypothesis,'corrects','保存済み希望の直接相談は元の関係を保持');
+ assert.equal(f.c.prepareBusinessChange(null,text,'supplements'),true);const h=f.c.getState().businessContext;
+ assert.equal(h.statements.length,2);assert.equal(h.statements[0].state,'superseded');assert.equal(h.statements[0].relationToHypothesis,'corrects');assert.equal(h.statements[1].supersedes,'BS1');assert.equal(h.statements[1].relationToHypothesis,'supplements');assert.deepEqual(f.c.getState().businessSelectedIds,['BS2']);assert.deepEqual(B.wire(h).statements.map(s=>s.statementId),['BS2']);
+ const g=await setup();assert.equal(await g.c.restoreSession(f.c.exportSession()),true);assert.deepEqual(g.c.getState().businessContext,h);assert.deepEqual(g.c.getState().businessSelectedIds,['BS2']);assert.equal(f.count('propose'),1);assert.equal(f.writes.length,0);
 });

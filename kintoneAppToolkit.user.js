@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.4
+// @version      2.3.5
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.4';
+  const SCRIPT_VERSION = '2.3.5';
   // Published build identifier.
-  const KT_BUILD = '2.3.4';
+  const KT_BUILD = '2.3.5';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -7886,8 +7886,14 @@
         };
       },
       async apply({ api, appId, revision, layoutPolicy }, p) {
+        let fieldsBefore = null;
+        if (p.expect.subtable) {
+          const before = await api.getPreviewFields(appId);
+          if (String(before?.revision ?? '') !== String(revision ?? '')) throw Object.assign(new Error('列の追加前にフォームの設定が変わったため、処理を止めました。'), { code: 'GAIA_CO02' });
+          fieldsBefore = clone(before.properties);
+        }
         const res = await api.addPreviewFields(appId, p.payload.properties, revision);
-        const out = { revision: String(res?.revision ?? ''), requests: [{ method: 'POST', path: '/k/v1/preview/app/form/fields.json', codes: Object.keys(p.payload.properties) }] };
+        const out = { revision: String(res?.revision ?? ''), ...(fieldsBefore ? { fieldsBefore } : {}), requests: [{ method: 'POST', path: '/k/v1/preview/app/form/fields.json', codes: [p.expect.code] }] };
         if (p.placement || layoutPolicy === 'APPEND_ROW') {
           try { await placeField(); } catch (e) { const err = (e && typeof e === 'object') ? e : new Error(String(e)); err.applied = { ...out, partial: 'FIELD_ADDED_LAYOUT_FAILED' }; throw err; }
         }
@@ -7898,7 +7904,7 @@
           // Do not adopt a newer form revision between field creation and its layout PUT.
           if (!out.revision || String(lay?.revision ?? '') !== out.revision) throw Object.assign(new Error('フィールドを追加した後にフォームの設定が変わったため、配置を止めました。'), { code: 'GAIA_CO02' });
           const found = layoutLocations(rows, code);
-          if (found.length > 1 || found.some(x => x.kind !== 'field' || x.node.type !== 'ROW')) throw Object.assign(new Error('追加したフィールドの配置を一つに特定できません。'), { code: 'TARGET_CHANGED' });
+          if (found.length > 1 || found.some(x => x.kind !== 'field' || (p.expect.subtable ? x.node.type !== 'SUBTABLE' || x.node.code !== p.expect.subtable : x.node.type !== 'ROW'))) throw Object.assign(new Error('追加したフィールドの配置を一つに特定できません。'), { code: 'TARGET_CHANGED' });
           const before = withoutLayoutField(rows, code);
           if (p.layoutBefore && !same(layoutShape(before), layoutShape(p.layoutBefore))) throw Object.assign(new Error('既存のフォームの配置が変わったため、追加したフィールドの配置を止めました。'), { code: 'TARGET_CHANGED' });
           const field = found[0] ? clone(found[0].node.fields[found[0].fieldIndex]) : { type: p.expect.type, code };
@@ -7913,8 +7919,9 @@
       },
       async verify({ api, appId, snapshot }, p, applied) {
         const cur = await api.getPreviewFields(appId);
-        const f = cur?.properties?.[p.expect.code];
+        const foundField = nestedField(cur?.properties, p.expect.code), f = foundField?.field;
         const checks = [];
+        if (p.expect.subtable) checks.push({ name: 'subtable', ok: foundField?.parent === p.expect.subtable, expected: p.expect.subtable, actual: foundField?.parent ?? null });
         const check = (name, ok, expected, actual) => checks.push({ name, ok, expected, actual });
         check('exists', !!f, true, !!f);
         if (f) {
@@ -7926,6 +7933,10 @@
             const actual = Object.keys(f.options || {}).sort((a, b) => Number(f.options[a]?.index ?? 0) - Number(f.options[b]?.index ?? 0));
             check('options', same(actual, p.expect.options), p.expect.options, actual);
           }
+        }
+        if (applied?.fieldsBefore) {
+          const actual = clone(cur?.properties || {}); removeNestedField(actual, p.expect.code);
+          check('existingFieldDefinitionsPreserved', same(actual, applied.fieldsBefore), applied.fieldsBefore, actual);
         }
         // 既存フィールドが減っていない（追加のみ）
         const beforeCodes = Object.keys(snapshot?.fields?.properties || {});
@@ -9233,10 +9244,20 @@
       } };
       walk(rows); return found;
     }
+    // Field definitions remain nested in REST payloads; temporary-ID maps stay flat.
+    function nestedField(properties, code, parent = null) {
+      if (properties?.[code]) return { field: properties[code], parent, properties };
+      for (const [tableCode, field] of Object.entries(properties || {})) if (field.type === 'SUBTABLE') {
+        const found = nestedField(field.fields, code, tableCode); if (found) return found;
+      }
+      return null;
+    }
+    function removeNestedField(properties, code) { const found = nestedField(properties, code); if (found) delete found.properties[code]; }
+
     function withoutLayoutField(rows, code) {
       return clone(rows).flatMap(node => {
-        if (node.type === 'ROW' && (node.fields || []).some(f => f.code === code)) {
-          node.fields = node.fields.filter(f => f.code !== code); if (!node.fields.length) return [];
+        if (['ROW', 'SUBTABLE'].includes(node.type) && (node.fields || []).some(f => f.code === code)) {
+          node.fields = node.fields.filter(f => f.code !== code); if (node.type === 'ROW' && !node.fields.length) return [];
         }
         if (Array.isArray(node.layout)) node.layout = withoutLayoutField(node.layout, code);
         return [node];
@@ -9255,7 +9276,7 @@
         if (at.kind !== 'node' || at.node.type !== 'GROUP' || !Array.isArray(at.node.layout)) invalid('配置先のグループがありません。');
         at.node.layout.push(row);
       } else if (placement.position === 'BEFORE_FIELD' || placement.position === 'AFTER_FIELD') {
-        if (at.kind !== 'field' || at.node.type !== 'ROW') invalid('同じ行に追加する場合は、テーブルの外にあるフィールドを指定してください。');
+        if (at.kind !== 'field' || !['ROW', 'SUBTABLE'].includes(at.node.type)) invalid('左右に追加する場合は、通常の行またはテーブル内のフィールドを指定してください。');
         at.node.fields.splice(at.fieldIndex + (placement.position === 'AFTER_FIELD' ? 1 : 0), 0, clone(field));
       } else {
         if (at.kind === 'field' ? at.node.type !== 'ROW' : !['GROUP', 'SUBTABLE'].includes(at.node.type)) invalid('テーブル内のフィールドを、別の行に配置する基準にはできません。');
@@ -9264,7 +9285,8 @@
       return next;
     }
     const fieldPlacementDescription = (placement, fields) => {
-      const label = fields[placement.anchor]?.label || placement.anchor;
+      const anchor = fields[placement.anchor], label = anchor?.label || placement.anchor;
+      if (anchor?.subtable && ['BEFORE_FIELD', 'AFTER_FIELD'].includes(placement.position)) return 'テーブル「' + (fields[anchor.subtable]?.label || anchor.subtable) + '」の「' + label + '」の' + (placement.position === 'BEFORE_FIELD' ? '左側' : '右側') + 'に配置します。';
       return ({ BEFORE_ROW: '「' + label + '」のある行の上に配置します。', AFTER_ROW: '「' + label + '」のある行の下に配置します。',
         BEFORE_FIELD: '「' + label + '」と同じ行の左側に配置します。', AFTER_FIELD: '「' + label + '」と同じ行の右側に配置します。',
         GROUP_END: 'グループ「' + label + '」の末尾に配置します。', FORM_END: 'フォームの末尾に配置します。' })[placement.position];
@@ -9365,6 +9387,13 @@
                 }
               }
               nextLayout = insertLayoutField(layoutNow, { type: after.type, code }, placement);
+              const location = layoutLocations(nextLayout, code)[0];
+              if (location?.node.type === 'SUBTABLE') {
+                const table = location.node.code, anchor = fields[placement.anchor], tableField = fieldState[table];
+                if (!table || !tableField || tableField.type !== 'SUBTABLE' || anchor?.subtable !== table) fail('TABLE_PLACEMENT_MISMATCH', '配置先のテーブルと基準フィールドの所属が一致しません。');
+                if (p.unique === true) fail('TABLE_FIELD_UNIQUE_UNSUPPORTED', 'テーブル内の列には値の重複禁止を設定できません。');
+                after.subtable = table;
+              }
             } else nextLayout = [...clone(layoutNow), { type: 'ROW', fields: [{ type: after.type, code }] }];
             change = { after }; claim('field:' + code);
           } else if (type === 'DELETE_FIELD' || (type === 'UPDATE_FIELD' && (s.optionEdits != null || s.expression != null))) {
@@ -9505,6 +9534,13 @@
           if (type === 'DELETE_FIELD') { delete fieldState[ref]; delete fields[ref]; layoutNow = withoutLayoutField(layoutNow, ref); }
           if (built.sensitive?.length) st.warnings = clone(built.sensitive);
           if (type === 'ADD_FIELD') {
+            if (change.after.subtable) {
+              const table = change.after.subtable, prop = built.payload.properties[built.expect.code];
+              delete prop.unique;
+              built.payload.properties = { [table]: { type: 'SUBTABLE', code: table, label: fieldState[table].label, noLabel: !!fieldState[table].noLabel, fields: { [built.expect.code]: prop } } };
+              built.expect.subtable = table;
+              fieldState[table].fields[built.expect.code] = clone(prop);
+            }
             built.layoutBefore = clone(layoutNow); built.layoutAfter = nextLayout;
             if (placement) { built.placement = placement; built.placementDescription = fieldPlacementDescription(placement, fields); }
             layoutNow = nextLayout;
@@ -9739,7 +9775,7 @@
     }
     const condMentions = (text, code) => { const t = String(text ?? ''); if (!t || !code) return false; if (!/^[A-Za-z0-9_]+$/.test(code)) return t.includes(code); return new RegExp(`(^|[^A-Za-z0-9_])${code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_])`).test(t); };
     /** 現在の preview でフィールドコードを参照している設定（削除すると壊れるもの） */
-    function fieldReferences(code, cur) {
+    function fieldReferences(code, cur, ignoreContainer = null) {
       const refs = [];
       for (const [name, v] of Object.entries(cur.views?.views || {})) {
         if ((v.fields || []).includes(code)) refs.push({ kind: 'VIEW', id: name, where: `一覧「${name}」の表示項目` });
@@ -9757,9 +9793,9 @@
         if (['CALC', 'SINGLE_LINE_TEXT'].includes(f.type) && condMentions(f.expression, code)) refs.push({ kind: 'FIELD', id: c, where: `計算フィールド「${f.label}」（${c}）の計算式` });
         if (f.lookup && (f.lookup.fieldMappings || []).some(m => m.field === code)) refs.push({ kind: 'FIELD', id: c, where: `ルックアップ「${f.label}」（${c}）のコピー先` });
         if (f.type === 'REFERENCE_TABLE' && f.referenceTable?.condition?.field === code) refs.push({ kind: 'FIELD', id: c, where: `関連レコード「${f.label}」（${c}）の条件` });
-        if (f.type === 'SUBTABLE' && f.fields && f.fields[code]) refs.push({ kind: 'FIELD', id: c, where: `テーブル「${f.label}」（${c}）` });
+        if (f.type === 'SUBTABLE' && f.fields && f.fields[code] && c !== ignoreContainer) refs.push({ kind: 'FIELD', id: c, where: `テーブル「${f.label}」（${c}）` });
       }
-      for (const f of Object.values(cur.fields?.properties || {})) if (f.type === 'SUBTABLE' && f.fields && !f.fields[code]) refs.push(...fieldReferences(code, { fields: { properties: f.fields } }));
+      for (const [table, f] of Object.entries(cur.fields?.properties || {})) if (f.type === 'SUBTABLE' && f.fields && (!f.fields[code] || table === ignoreContainer)) refs.push(...fieldReferences(code, { fields: { properties: f.fields } }, ignoreContainer));
       return refs;
     }
     /** 集合の復元（全体置換 API）: check は「反映直後 == 現在」か（違えば stale）・「現在 == snapshot」なら戻す必要なし */
@@ -9886,17 +9922,18 @@
         collection: 'fields',
         check({ current, expected, snapshot, step, state = current }) {
           const code = step.target;
-          if (snapshot.fields?.properties?.[code]) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」は実行前からあるため削除しません` };
-          const curF = current.fields?.properties?.[code], expF = expected.fields?.properties?.[code];
-          if (!state.fields?.properties?.[code]) return { ok: true, alreadyRestored: true };
+          if (nestedField(snapshot.fields?.properties, code)?.field) return { ok: false, code: 'FIELD_MISSING', message: `フィールド「${code}」は実行前からあるため削除しません` };
+          const currentField = nestedField(current.fields?.properties, code), expectedField = nestedField(expected.fields?.properties, code), curF = currentField?.field, expF = expectedField?.field;
+          if (!nestedField(state.fields?.properties, code)) return { ok: true, alreadyRestored: true };
+          if (currentField?.parent !== expectedField?.parent) return { ok: false, code: 'FIELD_CHANGED', message: '追加したフィールドの所属が変わっています。' };
           if (!same(layoutShape(current.layout?.layout || [], false), layoutShape(expected.layout?.layout || [], false))) return { ok: false, code: 'LAYOUT_CHANGED', message: '反映後にフォームの配置が変更されているため、自動では元に戻せません。' };
           if (curF && expF && !same(curF, expF)) return { ok: false, code: 'FIELD_CHANGED', message: `追加したフィールド「${curF.label || code}」（${code}）が反映後に変更されています（自動では削除しません）`, diffs: [{ kind: 'FIELD', id: code, change: 'CHANGED', message: `フィールド「${curF.label || code}」（${code}）の定義が反映直後と違います`, before: fieldKey(expF), after: fieldKey(curF) }] };
           // 参照は「先行する手順が戻した後の状態」で見る（この実行で追加した一覧の参照は、先にその一覧が戻るので壊れない）
-          const refs = fieldReferences(code, state);
+          const refs = fieldReferences(code, state, currentField?.parent);
           if (refs.length) return { ok: false, code: 'FIELD_REFERENCED', message: `追加したフィールド「${(curF && curF.label) || code}」（${code}）は ${refs.map(r => r.where).join('、')} から参照されています（削除すると壊れるため自動では削除しません）`, diffs: refs.map(r => ({ kind: r.kind, id: r.id, change: 'REFERENCED', message: `${r.where}が ${code} を参照` })) };
           return { ok: true };
         },
-        project(state, snapshot, step) { const next = { ...state, fields: clone(state.fields), layout: { ...clone(state.layout), layout: withoutLayoutField(state.layout?.layout || [], step.target) } }; if (next.fields?.properties) delete next.fields.properties[step.target]; return next; },
+        project(state, snapshot, step) { const next = { ...state, fields: clone(state.fields), layout: { ...clone(state.layout), layout: withoutLayoutField(state.layout?.layout || [], step.target) } }; if (next.fields?.properties) removeNestedField(next.fields.properties, step.target); return next; },
         async apply({ api, appId, current, expected, snapshot, step }) {
           const code = step.target;
           const res = await api.deletePreviewFields(appId, [code], String(current.fields?.revision ?? ''));
@@ -9911,7 +9948,7 @@
             const put = await api.putPreviewLayout(appId, clone(next), revision);
             revision = String(put?.revision ?? revision); requests.push({ method: 'PUT', path: '/k/v1/preview/app/form/layout.json', rows: next.length });
           }
-          const expFields = clone(expected.fields); if (expFields?.properties) delete expFields.properties[code];
+          const expFields = clone(expected.fields); if (expFields?.properties) removeNestedField(expFields.properties, code);
           return { revision, requests, expected: { fields: expFields, layout: { layout: clone(next), revision } } };
         },
         async verify({ api, appId, expected, snapshot, step }) {
@@ -9920,7 +9957,7 @@
           const lay = await api.getPreviewLayout(appId);
           const checks = [];
           const check = (name, ok, exp, act) => checks.push({ name, ok, expected: exp, actual: act });
-          check('fieldAbsent', !cur?.properties?.[code], true, !cur?.properties?.[code]);
+          check('fieldAbsent', !nestedField(cur?.properties, code), true, !nestedField(cur?.properties, code));
           const expProps = expected.fields?.properties || {};
           const mutated = Object.keys({ ...expProps, ...(cur?.properties || {}) }).filter(k => k !== code && !same(expProps[k], cur?.properties?.[k]));
           check('otherFieldsPreserved', mutated.length === 0, [], mutated);
@@ -14183,7 +14220,7 @@
       let current = null, lastSignature = '', lastSnapshot = '', dirty = false, timer = null, disposed = false, suppress = false, switching = false;
       let initialization = null, initializing = false, editEpoch = 0, selectionDirty = false;
       let queue = Promise.resolve(), status = { state: 'saved', message: '' };
-      const notify = (state, message = '') => { status = { state, message, completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
+      const notify = (state, message = '', code = null) => { status = { state, message, ...(code ? { code } : {}), completed: current?.completedAt != null, pinned: !!current?.pinned }; onStatus({ ...status }); };
       const serial = work => { const next = queue.catch(() => {}).then(work); queue = next; return next; };
       const requireUnchanged = expected => {
         if (signature(capture()) !== expected) throw failure('HISTORY_EDITED', '読み込み中に内容が変わったため、会話の切り替えを止めました。追記は残しています。');
@@ -14192,7 +14229,7 @@
         dirty = true;
         notify('error', error?.code === 'HISTORY_CONFLICT' ? '別のタブで保存内容が変わりました。手元の内容は残っています。書き出してから会話を開き直してください。'
           : error?.code === 'HISTORY_LIMIT' || error?.name === 'QuotaExceededError' ? '保存容量が足りません。手元の内容は残っています。保存した会話を整理してください。'
-          : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。');
+          : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。', error?.name === 'QuotaExceededError' ? 'HISTORY_LIMIT' : error?.code);
       };
       async function saveCurrent({ completedAt, pinned, snapshot } = {}) {
         const payload = snapshot || clone(capture()), nextSignature = signature(payload);
@@ -15507,7 +15544,6 @@
         if(s.sourceMessageId!==null&&!h.messages?.some(m=>m.id===s.sourceMessageId&&m.role==='user'))bad('回答元の発言がありません');
         if(!wire&&s.supersedes!==null&&!h.statements.some(x=>x.statementId===s.supersedes&&x.statementId!==s.statementId))bad('訂正元がありません');
       }
-      if(wire&&(h.statements||[]).filter(active).length>30)bad('添付する運用記録は30件までです');
       return errors;
     }
     async function create(doc,scope,ruleId=null){
@@ -15518,7 +15554,7 @@
     }
     async function verify(h,scope){const e=validate(h);if(e.length)fail(e[0]);if(h.sourceScope.domain!==scope?.domain||h.sourceScope.appId!==String(scope?.appId))fail('別アプリ・ドメインの分析は相談できません');if(await hash(sourceOf(h))!==h.analysisHash)fail('元の分析内容が変わっています');}
     function wire(h){
-      const out=clone(h);delete out.freshness.source;if(out.freshness.preview){out.freshness.previewRevision=out.freshness.preview.revision;delete out.freshness.preview;}out.statements=out.statements.filter(s=>active(s)&&(s.kind==='open_question'||!(h.attachmentExcludedIds||[]).includes(s.statementId)));out.omittedStatementCount=h.statements.filter(active).length-out.statements.length;out.questionHistory=(h.questionHistory||[]).filter(q=>out.statements.some(s=>s.sourceQuestionRef?.questionId===q.questionId));if(out.statements.length>30)fail('運用記録が30件を超えています。添付対象を整理してください。');
+      const out=clone(h);delete out.freshness.source;if(out.freshness.preview){out.freshness.previewRevision=out.freshness.preview.revision;delete out.freshness.preview;}out.statements=out.statements.filter(s=>active(s)&&(s.kind==='open_question'||!(h.attachmentExcludedIds||[]).includes(s.statementId)));out.omittedStatementCount=h.statements.filter(active).length-out.statements.length;out.questionHistory=(h.questionHistory||[]).filter(q=>out.statements.some(s=>s.sourceQuestionRef?.questionId===q.questionId));
       if(h.snapshot){const rs=selectedRules(h),ids=new Set(rs.flatMap(r=>r.evidenceRefs.map(x=>x.evidenceId)));
         if(h.selection.type==='all')h.snapshot.evidence.forEach(e=>ids.add(e.evidenceId));
         for(const s of out.statements){for(const r of s.sourceEvidenceRefs)ids.add(r.evidenceId);for(const ref of s.sourceRuleRefs)for(const e of rules(h).find(r=>r.ruleId===ref.ruleId)?.evidenceRefs||[])ids.add(e.evidenceId);}
@@ -15539,7 +15575,7 @@
     }
     const STR=n=>({type:'string',minLength:1,maxLength:n}),ARR=(items,n)=>({type:'array',items,maxItems:n}),OBJ=p=>({type:'object',properties:p,required:Object.keys(p),additionalProperties:false});
     const RR=OBJ({analysisId:STR(100),snapshotId:STR(200),ruleId:STR(40)}),ER=OBJ({snapshotId:STR(200),evidenceId:STR(80),pointer:{type:['string','null'],maxLength:1000}});
-    const refs={ruleRefs:ARR(RR,8),evidenceRefs:ARR(ER,20),statementRefs:ARR(STR(80),30),messageRefs:ARR(STR(100),30)};
+    const refs={ruleRefs:ARR(RR,8),evidenceRefs:ARR(ER,20),statementRefs:{type:'array',items:STR(80)},messageRefs:ARR(STR(100),30)};
     const OUTPUT_SCHEMA=OBJ({schemaVersion:{type:'string',enum:[VERSION]},handoffId:STR(200),mode:{type:'string',enum:['understand']},blocks:ARR(OBJ({kind:{type:'string',enum:['setting_fact','inference','user_report','desired_change','discrepancy']},text:STR(1000),...refs}),8),questions:ARR(OBJ({questionId:STR(80),text:STR(500),purpose:STR(500),blockingFor:{type:'string',enum:['none','proposal','plan']},...refs}),5),statementDrafts:ARR(OBJ({kind:{type:'string',enum:kinds},text:STR(2000),sourceMessageId:STR(100),state:{type:'string',enum:['draft']}}),5)});
     // The generation schema and both validators share the same read-only envelope.
     const EMPTY={type:'array',items:{type:'string'},maxItems:0};
@@ -15612,8 +15648,9 @@
    function questions(state){const h=state.businessContext;if(!h)return [];return state.businessResult?.questions||B().selectedRules(h).flatMap(r=>r.questions.map((q,i)=>({questionId:'source:'+r.ruleId+':'+i,text:q.question,purpose:q.whyItMatters,blockingFor:'none'})));}
    function render(state,connection,disabled){const h=state.businessContext;if(!h)return '';if(state.businessInvalid)return '<section class="ktr-section"><h3>相談の参照元を確認できません</h3>'+sourceSummary(h)+'<p>'+esc(state.businessInvalid)+'</p><p>元資料と保存内容は残っています。資料を確認して参照元を選び直してください。</p>'+unverified+'<button type="button" data-release-action="business-close">参照元を外す</button></section>';const off=disabled?' disabled':'';const prefix=h.analysisId+':'+h.analysisHash+':',drafts=Object.fromEntries(Object.entries(state.businessAnswerDrafts||{}).filter(([key])=>key.startsWith(prefix)).map(([key,value])=>[key.slice(prefix.length),value]));
     const button=(action,label,id='',extra='')=>'<button type="button" data-release-action="business-'+action+'" data-release-id="'+esc(id)+'"'+extra+off+'>'+esc(label)+'</button>';
-    const input=(id,value='')=>'<label>推測との関係 <select data-business-input="relation:'+esc(id)+'"'+off+'>'+[['supplements','補足する'],['supports','同意する'],['corrects','訂正する'],['unclear','判断できない']].map(([value,label])=>'<option value="'+value+'"'+((drafts['relation:'+id]||'supplements')===value?' selected':'')+'>'+label+'</option>').join('')+'</select></label><textarea rows="2" maxlength="2000" aria-label="運用の回答・変更希望" data-business-input="'+esc(id)+'"'+off+'>'+esc(drafts[id]??value)+'</textarea>';
+    const input=(id,value='')=>'<textarea rows="2" maxlength="2000" aria-label="運用の回答・変更希望" data-business-input="'+esc(id)+'"'+off+'>'+esc(drafts[id]??value)+'</textarea><details class="ktr-business-relation" data-release-panel="'+esc('business-relation-'+h.handoffId+'-'+id)+'"><summary>補足・訂正の種類を指定（任意）</summary><label>推測との関係 <select data-business-input="relation:'+esc(id)+'"'+off+'>'+[['supplements','補足する'],['supports','同意する'],['corrects','訂正する'],['unclear','判断できない']].map(([value,label])=>'<option value="'+value+'"'+((drafts['relation:'+id]||'supplements')===value?' selected':'')+'>'+label+'</option>').join('')+'</select></label></details>';
     const save=(id,kind,state='recorded',supersedes='')=>button('record',state==='unknown'?'わからない':state==='deferred'?'後で確認':kind==='desired_change'?'変更希望として記録':'実際の運用として記録',id,' data-business-kind="'+kind+'" data-business-state="'+state+'"'+(supersedes?' data-business-supersedes="'+esc(supersedes)+'"':''));
+    const consult=(id='',inputId='')=>button('consult-change',inputId?'この内容で変更を相談':'この希望で変更を相談',id,(inputId?' data-business-input-id="'+esc(inputId)+'"':'')+(connection.canConsultBusiness===true?'':' disabled'));
     const references=b=>'<details><summary>根拠・出所を見る</summary>'+b.ruleRefs.map(r=>'<p>推測 '+esc(r.analysisId+' / '+r.ruleId)+'</p>').join('')+b.evidenceRefs.map(r=>{const e=h.snapshot?.evidence.find(x=>x.evidenceId===r.evidenceId);return '<p>'+esc(r.snapshotId+' / '+r.evidenceId+(r.pointer||''))+'</p><pre>'+esc(e?JSON.stringify(B().checkRef(h,r)?(typeof KTBusinessContract!=='undefined'?KTBusinessContract:require('./release-business-contract.js').KTBusinessContract).pointer(e.value,r.pointer):null,null,2):'未確認')+'</pre>';}).join('')+b.statementRefs.map(id=>'<p>'+esc(id+'：'+(h.statements.find(s=>s.statementId===id)?.text||'未確認'))+'</p>').join('')+(b.messageRefs||[]).map(id=>'<p>利用者の発言：'+esc(h.messages.find(m=>m.id===id)?.text||'未確認')+'</p>').join('')+'</details>';
     const workflow=h.analysis?.schemaVersion==='business-workflow-1'&&!!h.snapshot;
     const selected=B().selectedRules(h),panelId=suffix=>esc('business-consultation-'+h.analysisId+'-'+h.analysisHash+'-'+suffix);
@@ -15630,12 +15667,12 @@
     '<details data-release-panel="'+panelId('inventory')+'"><summary>取得状態と元の根拠</summary>'+(h.snapshot?V().inventoryHtml(h.snapshot):'<p>参考資料の記述です。設定の取得状態は未確認です。</p><pre>'+esc(JSON.stringify(h.referenceDocument,null,2))+'</pre>')+'</details>'+
     '<p>現在の設定との照合は別の操作です。</p>'+button('check','現在の設定と照合')+(h.freshness.rows?.length?'<details data-release-panel="'+panelId('freshness')+'"><summary>照合結果</summary><ul>'+h.freshness.rows.map(r=>'<li>'+esc((r.comparison==='history'?'分析時→現在':h.sourceScope.environment==='production'?'現在の運用環境→動作テスト環境':'現在の動作テスト環境')+' / '+r.category+'：'+labels[r.status])+'</li>').join('')+'</ul>'+button('ack',h.freshness.acknowledged?'差分確認済み':'差分と未確認範囲を確認しました')+'</details>':'')+'</details>'+
     '<p>回答の保存は無料です。AIに送ると相談のクレジットを使用します。</p>'+
-    '<div class="ktr-actions">'+button('mode','業務の確認','understand')+button('mode','変更したいことを整理する','improve')+'</div><p>現在：'+(state.businessMode==='understand'?'業務の確認（変更案は更新しません）':'改善相談（選択した希望を仮案へ渡します）')+'</p>'+
+    '<details class="ktr-business-modes" data-release-panel="'+panelId('modes')+'"><summary>相談の種類を切り替える</summary><div class="ktr-actions">'+button('mode','業務の確認','understand')+button('mode','変更したいことを整理する','improve')+'</div></details>'+
     (state.businessResult?.blocks||[]).map(b=>'<section><h4>'+esc(labels[b.kind])+'</h4><p>'+esc(b.text)+'</p>'+references(b)+'</section>').join('')+
     questionGroups+
-    '<fieldset><legend>運用の説明・変更希望を追加する</legend>'+input('new')+save('new','current_operation')+save('new','desired_change')+'</fieldset>'+
+    '<fieldset><legend>運用の説明・変更希望を追加する</legend>'+input('new')+consult('','new')+'<p class="ktr-note">入力を変更希望として保存し、1クレジットで相談します。実際の運用の記録は下の保存ボタンで残せます。</p>'+save('new','current_operation')+save('new','desired_change')+'</fieldset>'+
     (state.businessResult?.statementDrafts||[]).map((d,i)=>'<p>確認待ち：'+esc(labels[d.kind]+' / '+d.text)+button('draft','この内容を記録する',String(i))+'</p>').join('')+
-    '<h4>保存した運用・希望</h4><p>添付は30件まで。記録を外しても履歴は残ります。未確認事項は省略しません。</p>'+h.statements.map(s=>'<details data-release-panel="business-statement-'+esc(h.handoffId+'-'+s.statementId)+'"><summary>'+esc(s.statementId+' '+labels[s.kind]+' / '+labels[s.state]+'：'+s.text)+'</summary>'+(B().active(s)?(s.kind!=='open_question'?button('attach',(h.attachmentExcludedIds||[]).includes(s.statementId)?'相談に添付する':'今回の相談から外す',s.statementId):'')+(s.kind==='desired_change'&&s.state==='recorded'?button('select',state.businessSelectedIds.includes(s.statementId)?'選択済み（外す）':'仮案へ渡す',s.statementId):'')+input('edit:'+s.statementId,s.text)+save('edit:'+s.statementId,s.kind,'recorded',s.statementId)+button('withdraw','取り消す',s.statementId):'')+'</details>').join('')+
+    '<h4>保存した運用・希望</h4><p>記録はまとめて相談に添付します。自分で外した記録も履歴に残ります。</p>'+h.statements.map(s=>'<details data-release-panel="business-statement-'+esc(h.handoffId+'-'+s.statementId)+'"><summary>'+esc(s.statementId+' '+labels[s.kind]+' / '+labels[s.state]+'：'+s.text)+'</summary>'+(B().active(s)?(s.kind!=='open_question'?button('attach',(h.attachmentExcludedIds||[]).includes(s.statementId)?'相談に添付する':'今回の相談から外す',s.statementId):'')+(s.kind==='desired_change'&&s.state==='recorded'?consult(s.statementId)+button('select',state.businessSelectedIds.includes(s.statementId)?'まとめて相談する希望に選択済み（外す）':'まとめて相談する希望に選ぶ',s.statementId):'')+input('edit:'+s.statementId,s.text)+save('edit:'+s.statementId,s.kind,'recorded',s.statementId)+button('withdraw','取り消す',s.statementId):'')+'</details>').join('')+
     (state.businessReviewRequired?'<p role="alert">採用時の前提を再確認するまで、案の再開・反映を止めています。</p>':'')+
     (state.businessMode==='improve'?button('send','選択した希望で仮案を相談'):'')+(connection.canConsultBusiness!==true?'<p>資料と回答は保存できます。AI相談には対応サービスへの更新が必要です。</p>':'')+'</section>';
    }
@@ -15726,7 +15763,7 @@
     const errorOf = e => ({ code: e?.code || 'ERROR', message: e?.code === 'MONTHLY_LIMIT_EXCEEDED' ? monthlyLimitText(e) : e?.code === 'BUDGET_EXCEEDED' ? budgetLimitText(e) : e?.code === 'MODEL_OUTPUT_INVALID' ? ((e?.details?.error?.detail || e?.details)?.reason === 'EXCESSIVE_JSON_WHITESPACE' ? 'AIの回答で空白の繰り返しを検出したため、受信を止めました。結果は未完成のため採用していません。設定を減らす必要があるとは限りません。会話を保存し、回答形式を確認してください。再実行するとAIを呼び直します。' : (e?.details?.error?.detail || e?.details)?.reason === 'OUTPUT_TRUNCATED' ? 'AIの回答が出力上限に達し、途中で終了しました。結果は未完成のため採用していません。設定を減らす必要があるとは限りません。会話を保存し、出力上限と回答量の調整を確認してください。再実行するとAIを呼び直します。' : 'AIの応答形式を確認できなかったため、処理を止めました。問題の詳細を確認してください。') : e?.message || '処理を完了できませんでした。', detail: clone(e?.details || null) });
     const busyPhases = new Set(['recovering', 'consulting', 'building', 'preparing', 'applying', 'rolling-back', 'checking-result']);
     const SESSION_VERSION = 'release-workspace-session-1';
-    const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
+    const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'decisionDrafts', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
     const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
     const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
     // Saved content is a document, never a credential store or an execution snapshot.
@@ -15817,13 +15854,14 @@
       const s = payload?.state, integer = n => Number.isSafeInteger(n) && n >= 0;
       if (!object(payload) || ![SESSION_VERSION,'release-workspace-session-2'].includes(payload.version) || !object(s) || !integer(payload.sequence) || !Array.isArray(payload.pendingPlanQuestions)) return false;
       // Older saved conversations predate response recovery; keep them readable.
-      if (!savedStateKeys.filter(key => key !== 'responseRecovery').concat('runs').every(key => Object.hasOwn(s, key))) return false;
+      if (!savedStateKeys.filter(key => !['responseRecovery', 'decisionDrafts'].includes(key)).concat('runs').every(key => Object.hasOwn(s, key))) return false;
       const arrays = (value, keys) => keys.every(key => value[key] == null || Array.isArray(value[key]));
       if (!['idle', 'proposal', 'blocked', 'incomplete', 'review', 'unchanged', 'result', 'rollback-confirm', ...busyPhases].includes(s.phase) ||
         !integer(s.taskId) || !s.taskId || !integer(s.version) || !integer(s.questionIdFloor) || typeof s.goal !== 'string' ||
         !['consultation', 'document', 'ideation'].includes(s.requestPurpose) || typeof s.proposalPending !== 'boolean') return false;
       if (!['selectedSuggestionIds', 'answers', 'messages', 'explanations', 'artifacts', 'runs'].every(key => Array.isArray(s[key]))) return false;
       if (s.selectedSuggestionIds.some(id => typeof id !== 'string') || s.answers.some(a => !object(a) || typeof a.id !== 'string' || typeof a.answer !== 'string')) return false;
+      if (s.decisionDrafts != null && (!object(s.decisionDrafts) || Object.values(s.decisionDrafts).some(a => !object(a) || typeof a.question !== 'string' || typeof a.answer !== 'string'))) return false;
       if (s.messages.some(m => !object(m) || !integer(m.id) || !m.id || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !arrays(m, ['facts']))) return false;
       if (s.explanations.some(e => !object(e) || !/^explanation-[1-9][0-9]*$/.test(e.id) || typeof e.title !== 'string' || !Array.isArray(e.sections))) return false;
       if (s.explanations.some(e => !arrays(e, ['unknowns', 'facts']) || e.sections.some(section => !object(section) || !arrays(section, ['paragraphs', 'items', 'evidenceIds']) || (section.table != null && (!object(section.table) || !Array.isArray(section.table.columns) || !Array.isArray(section.table.rows)))))) return false;
@@ -15851,12 +15889,11 @@
       (result?.artifactOutcome?.state === 'unverified' && !!generatedBody(result).trim());
     // Rechecking never regenerates code or reuses an approval. It is available only
     // while this task has no execution and every required artifact is complete.
-    const canReprepare = state => !!state.plan && !state.proposalPending &&
+    const canReprepare = state => !!state.plan && !state.proposalPending && !state.responseRecovery &&
       ['blocked', 'incomplete'].includes(state.phase) &&
       !(state.runs || []).some(run => run.taskId === state.taskId) &&
       !(state.plan.questions || []).some(q => q && q.blocking !== false) &&
-      (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready')) &&
-      (['BASE_CHANGED', 'APPROVAL_CHANGED', 'BASE_UNAVAILABLE'].includes(state.error?.code) || state.prepared?.ok === false);
+      (state.plan.customizations || []).every(c => (state.artifacts || []).some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
     // Only service states and error codes choose recovery actions; prose is not interpreted.
     function creationStateOf(state) {
       const artifacts = state.artifacts || [], unfinished = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready');
@@ -15868,7 +15905,7 @@
       const kind = unverified ? 'unverified' : declined ? 'declined' : reserved ? 'reserved' : (codes.has('BUDGET_EXCEEDED') || codes.has('MONTHLY_LIMIT_EXCEEDED')) ? 'limit' :
         unfinished.some(a => a.result?.artifactOutcome?.state === 'failed') ? 'failed' :
         unfinished.some(a => a.error) ? 'interrupted' : 'incomplete';
-      return { kind, canResume: !!state.plan && !state.proposalPending && state.phase === 'incomplete' &&
+      return { kind, canResume: !!state.plan && !canReprepare(state) && !state.responseRecovery && !state.proposalPending && state.phase === 'incomplete' &&
         !declined && (!unverified || artifacts.some(a => a.result?.artifactOutcome?.state === 'unverified' && generatedResultAvailable(a.result)) &&
           (state.plan.customizations || []).some(c =>
           !artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result))) &&
@@ -15881,6 +15918,17 @@
       const items = (state.proposal?.behaviors || []).filter(b => b.origin === 'suggestion' && ids.has(b.id));
       return items.length ? '選んだ追加提案を現在の案に取り込み、案を更新してください。\n\n' + items.map(b => '- ' + b.text).join('\n') : '';
     }
+    const questionText = q => q.question || q.label || q.text || '確認したいこと';
+    function activeDecisionDrafts(state) {
+      return (state.proposal?.decisions || []).filter(q => !q.answer && !(state.answers || []).some(a => a.id === q.id && a.answer))
+        .flatMap(q => { const draft = state.decisionDrafts?.[q.id]; return draft?.answer.trim() && draft.question === questionText(q) ? [{ id:q.id, ...draft }] : []; });
+    }
+    function proposalFeedbackRequest(state, text = '') {
+      const answers = activeDecisionDrafts(state);
+      return [answers.length ? '確認事項への回答をまとめて案に反映してください。\n\n' + answers.map(a => a.question + '\n回答：' + a.answer.trim()).join('\n\n') : '',
+        suggestionRequest(state), String(text).trim()].filter(Boolean).join('\n\n');
+    }
+    const hasProposalFeedback = state => activeDecisionDrafts(state).length > 0 || !!suggestionRequest(state);
     // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
     function mainPlan(value) {
       const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -15932,13 +15980,13 @@
     }
     function create({ services, loadBase, execution, scope = null, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
-      const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
+      const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       Object.assign(state, { businessContext: null, businessArchive: [], businessMode: 'understand', businessResult: null, businessSelectedIds: [], businessReviewRequired: false, businessPlanContext: null, businessInvalid: null, businessAnswerDrafts: {}, businessPlanRequests: null, businessPlanSelectedIds: [] });
       const sourceScopeFor = (snapshot, fresh) => scope && String(snapshot?.appId ?? fresh?.appId) === String(scope.appId) ? { domain: scope.domain, appId: String(scope.appId), environment: snapshot?.environment || fresh?.env, startedAt: snapshot?.startedAt || new Date(now()).toISOString(), completedAt: snapshot?.completedAt || new Date(now()).toISOString(), revision: String(snapshot?.revision ?? fresh?.revision?.preview ?? ''), snapshotId: snapshot?.snapshotId || 'document-source-' + sequence } : null;
       let base = null, controller = null, epoch = 0, sequence = 0, pendingPlanQuestions = [], cancelDocument = null, restoringSession = false, restoredBaseline = null, documentPhase = null;
       const fingerprints = new WeakMap(), fingerprintTasks = new WeakMap();
       const listeners = new Set(onChange ? [onChange] : []);
-      const emit = () => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot); } catch (e) { console.error(e); } } };
+      const emit = change => { const snapshot = clone(state); for (const fn of listeners) { try { fn(snapshot, change); } catch (e) { console.error(e); } } };
       const set = values => { Object.assign(state, values); emit(); };
       const available = () => !restoringSession && !busyPhases.has(state.phase);
       const message = (role, text, facts = null) => { const entry = { id: ++sequence, role, text, ...(facts ? { facts: clone(facts) } : {}) }; state.messages.push(entry); return entry; };
@@ -15970,6 +16018,10 @@
         const outcome = result?.artifactOutcome;
         if (!outcome || outcome.version !== 'artifact-outcome-1' || !['ready', 'incomplete', 'unverified', 'failed'].includes(outcome.state)) throw Object.assign(new Error('AIサービスから検証結果を受け取れませんでした。接続先を確認してください。'), { code: 'OUTCOME_REQUIRED' });
         if (outcome.scope?.customizationId && outcome.scope.customizationId !== customization.customizationId) throw Object.assign(new Error('別の変更に対する検証結果を受け取りました。'), { code: 'ARTIFACT_MISMATCH' });
+        // Unavailable automatic checks are informational. Retain the original state,
+        // but still reject a different body or a result for another customization.
+        if (outcome.state === 'unverified' && outcome.contentHash && outcome.contentHash !== await hash(generatedBody(result)))
+          throw Object.assign(new Error('受け取ったJavaScriptの本文が保存時の内容と一致しません。'), { code: 'BODY_MISMATCH' });
         if (outcome.state === 'ready') {
           const code = generatedBody(result), digest = await hash(code);
           const verification = result.verification || result.generated?.verification;
@@ -16005,12 +16057,12 @@
           }
         }
         if (!live()) return;
-        const unfinished = all.some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'));
+        const unfinished = all.some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
         if (unfinished) { set({ phase: 'incomplete', progress: '' }); return; }
         await prepareInner(live);
       }
       async function prepareInner(live = () => true, acceptFresh = false) {
-        if ((state.plan?.customizations || []).some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'))) {
+        if ((state.plan?.customizations || []).some(c => !state.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)))) {
           set({ phase: 'incomplete', prepared: null, progress: '' }); return;
         }
         set({ phase: 'preparing', progress: '反映する内容を確認しています。' });
@@ -16039,6 +16091,8 @@
           if(liveServices.validateRecovery&&!(await liveServices.validateRecovery(kind,input,replayResult.record)))throw Object.assign(new Error('依頼時から設定や内容が変わっています。元の会話・設定で回答を取り直してください。'),{code:'RECOVERY_INPUT_CHANGED'});
           replayResult.used=true;return clone(replayResult.value);
         }
+        const requestEpoch=epoch;
+        const isCurrent=()=>requestEpoch===epoch&&!input.signal?.aborted;
         const before=kind==='propose'?recoveryAction?.before:exportSession();
         if(before){before.state.responseRecovery=null;if(kind!=='propose'){before.state.phase=kind==='plan'?'proposal':'incomplete';before.state.error=null;}}
         const action=kind==='plan'?'adopt':kind==='generate'?'resume':recoveryAction?.action;
@@ -16046,12 +16100,12 @@
         let prepared=null;
         try {
           const value=await liveServices[kind]({...input,onRecoveryPrepared:async record=>{
-            if(before&&action){prepared={action,args:historyData(args),before:clone(before),record:historyData(record)};set({responseRecovery:prepared});}
+            if(isCurrent()&&before&&action){prepared={action,args:historyData(args),before:clone(before),record:historyData(record)};set({responseRecovery:prepared});}
           }});
-          if(prepared&&state.responseRecovery?.record.body===prepared.record.body)set({responseRecovery:null});
+          if(prepared&&state.responseRecovery===prepared)set({responseRecovery:null});
           return value;
         }catch(e){
-          if(prepared&&(!e.recovery||e.tokenStage))set({responseRecovery:null});
+          if(prepared&&state.responseRecovery===prepared&&(!e.recovery||e.tokenStage))set({responseRecovery:null});
           throw e;
         }
       }]))};
@@ -16060,8 +16114,9 @@
         if(!available())return false;
         if(state.responseRecovery){set({error:{code:'RESULT_RECOVERY_REQUIRED',message:'前の回答を取り直すか、再取得を終了してから新しい依頼を送ってください。'}});return false;}
         const before=exportSession();before.state.responseRecovery=null;
-        recoveryAction={action,args:historyData(args),before};
-        try{return await fn(...args);}finally{recoveryAction=null;}
+        const activeAction={action,args:historyData(args),before};
+        recoveryAction=activeAction;
+        try{return await fn(...args);}finally{if(recoveryAction===activeAction)recoveryAction=null;}
       }
       async function recoverResponse() {
         if(!available()||!state.responseRecovery||!liveServices.recover)return false;
@@ -16084,16 +16139,23 @@
       }
       const matchesProposal = reference => reference?.taskId === state.taskId && reference?.version === state.version;
       function selectSuggestion(id, checked, reference) {
-        if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available() || typeof checked !== 'boolean') return false;
+        if (!matchesProposal(reference) || state.phase !== 'proposal' || state.responseRecovery || !available() || typeof checked !== 'boolean') return false;
         const items = (state.proposal?.behaviors || []).filter(b => b.id === id && b.origin === 'suggestion' && typeof b.text === 'string' && b.text.trim());
         if (items.length !== 1) return false;
         const selected = new Set(state.selectedSuggestionIds);
         if (checked) selected.add(id); else selected.delete(id);
         set({ selectedSuggestionIds: [...selected] }); return true;
       }
+      function setDecisionDraft(id, answer, reference) {
+        if (!matchesProposal(reference) || state.phase !== 'proposal' || !available() || state.responseRecovery || typeof answer !== 'string') return false;
+        const q = (state.proposal?.decisions || []).find(q => q.id === id && !q.answer && !state.answers.some(a => a.id === id && a.answer));
+        if (!q || ['__proto__','constructor','prototype'].includes(id)) return false;
+        if (answer) state.decisionDrafts[id] = { question:questionText(q), answer }; else delete state.decisionDrafts[id];
+        emit({ decisionDraftId:id }); return true;
+      }
       async function updateSuggestions(reference) {
-        if (!matchesProposal(reference) || state.phase !== 'proposal' || state.proposalPending || !available()) return false;
-        const request = suggestionRequest(state);
+        if (!matchesProposal(reference) || state.phase !== 'proposal' || !available()) return false;
+        const request = proposalFeedbackRequest(state, reference.text || '');
         return request ? send(request, { requestPurpose: 'consultation', requireProposalUpdate: true, consultationTarget: state.proposalTarget }) : false;
       }
       async function send(text, { requestPurpose = state.requestPurpose, requireProposalUpdate = false, consultationTarget = state.consultationTarget, environmentComparison = null, diagnosis = false, businessSnapshot = null, businessWorkflow = false } = {}) {
@@ -16203,7 +16265,7 @@
         invalidate(); userMessage = message('user', value); userMessage.requestPurpose = requestPurpose; userMessage.consultationTarget = clone(selectedTarget);
         // Retire the previous plan before a revision starts, including failed requests.
         pendingPlanQuestions = clone(state.plan?.questions || pendingPlanQuestions);
-        Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true, selectedSuggestionIds: [] });
+        Object.assign(state, { plan: null, adopted: null, adoptedTarget: null, artifacts: [], proposalPending: true });
         return activity('consulting', async (signal, live) => {
           const fresh = await getBase('consult');
           if (!live()) return;
@@ -16233,7 +16295,8 @@
           }
           const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
           state.answers = state.answers.filter(a => !rejected.has(a.id));
-          if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; }
+          if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; state.selectedSuggestionIds = [];
+            state.decisionDrafts = Object.fromEntries(activeDecisionDrafts(state).map(({id,...draft}) => [id,draft])); }
           // Retired question identifiers are never reused within the same conversation.
           state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
           base = fresh; restoredBaseline = null; pendingPlanQuestions = [];
@@ -16243,7 +16306,7 @@
       }
       async function adopt() {
         if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-        if (!state.proposal || state.proposalPending || state.selectedSuggestionIds.length || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
+        if (!state.proposal || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
         invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -16363,6 +16426,26 @@
           set({businessContext:h,businessResult:state.businessResult});return true;
         }catch(e){set({error:errorOf(e)});return false;}
       }
+      function prepareBusinessChange(id, text = '', relationToHypothesis = 'supplements') {
+        if (!available() || !state.businessContext || state.businessInvalid || state.responseRecovery) return false;
+        try {
+          let h = clone(state.businessContext), chosen = id ? h.statements.find(s => s.statementId === id && s.kind === 'desired_change' && s.state === 'recorded') : null;
+          if (id && !chosen) return false;
+          const value = String(text).trim();
+          if (!id && value) {
+            chosen = h.statements.find(s => s.kind === 'desired_change' && s.state === 'recorded' && s.text === value);
+            if (!chosen || chosen.relationToHypothesis !== relationToHypothesis) {
+              h = consultation().record(h, {kind:'desired_change',state:'recorded',text:value,relationToHypothesis,supersedes:chosen?.statementId||null}, new Date(now()).toISOString());
+              chosen = h.statements.at(-1);
+            }
+          }
+          const selected = new Set(state.businessSelectedIds.filter(id=>h.statements.some(s=>s.statementId===id&&s.state==='recorded'&&s.kind==='desired_change')));
+          if (chosen) { selected.add(chosen.statementId); h.attachmentExcludedIds = (h.attachmentExcludedIds || []).filter(x => x !== chosen.statementId); }
+          if (!selected.size) return false;
+          if (state.adopted || state.plan) { state.businessReviewRequired = true; invalidate(); }
+          set({businessContext:h,businessSelectedIds:[...selected],businessMode:'improve',requestPurpose:'consultation'}); return true;
+        } catch(e) { set({error:errorOf(e)}); return false; }
+      }
       function withdrawBusiness(id){if(!available()||!state.businessContext)return false;const s=state.businessContext.statements.find(x=>x.statementId===id);if(!s)return false;s.state='withdrawn';state.businessSelectedIds=state.businessSelectedIds.filter(x=>x!==id);if(state.plan||state.adopted){state.businessReviewRequired=true;invalidate();}emit();return true;}
       function selectBusinessChange(id,selected){if(!available())return false;const s=state.businessContext?.statements.find(x=>x.statementId===id&&x.kind==='desired_change'&&x.state==='recorded');if(!s||(state.businessContext.attachmentExcludedIds||[]).includes(id))return false;const ids=new Set(state.businessSelectedIds);selected?ids.add(id):ids.delete(id);set({businessSelectedIds:[...ids]});return true;}
       function setBusinessMode(mode){if(!available()||!state.businessContext||!['understand','improve'].includes(mode))return false;set({businessMode:mode});return true;}
@@ -16409,7 +16492,7 @@
               const context=consultation().wire(h);context.statements=context.statements.filter(s=>s.kind!=='desired_change'||chosen.some(c=>c.statementId===s.statementId));
               const text=chosen.map(s=>s.text).join('\n');
               // Only this explicit selection retires the previous proposal. Free-form understanding is never a requirement.
-              retired=true;invalidate();Object.assign(state,{plan:null,adopted:null,adoptedTarget:null,artifacts:[],proposalPending:true,selectedSuggestionIds:[]});
+              retired=true;invalidate();Object.assign(state,{plan:null,adopted:null,adoptedTarget:null,artifacts:[],proposalPending:true,selectedSuggestionIds:[],decisionDrafts:{}});
               const m=message('user',text);m.businessIntent='desired_change';m.requestPurpose='consultation';
               const response=await services.propose({text,requestPurpose:'consultation',businessMode:'improve',businessContext:context,previous:clone(state.proposal),questionIdFloor:state.questionIdFloor,base:current,requests:chosen.map(s=>s.text),answers:[],discussion:[],signal});if(!live())return;
               if(!response?.proposal||response.proposalUnchanged||!['propose','update'].includes(response.intent))throw new Error('変更希望から仮案を作成できませんでした。希望を確認してください。');
@@ -16445,11 +16528,11 @@
           if (!shouldContinue()) return false;
           if (baseline && ((baseline.appId !== null && String(appOf(fresh)) !== baseline.appId) ||
               (baseline.environment !== null && environmentOf(fresh) !== baseline.environment))) return false;
-          const next = { responseRecovery:null, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
+          const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
           if (!Array.isArray(next.businessArchive) || !Array.isArray(next.businessSelectedIds) || !['understand','improve'].includes(next.businessMode)) return false;
           if (next.businessContext) { try { await consultation().verify(next.businessContext,scope);if(next.businessResult&&consultation().validateOutput(next.businessResult,consultation().wire(next.businessContext)).length)throw new Error('保存した相談の根拠参照を確認できません'); } catch(e) { next.businessInvalid=e.message; next.businessReviewRequired=true; next.businessMode='understand'; } }
           for (const artifact of next.artifacts) {
-            if (artifact.result?.artifactOutcome?.state !== 'ready') continue;
+            if (!generatedResultAvailable(artifact.result)) continue;
             const customization = next.plan?.customizations.find(c => c.customizationId === artifact.customizationId);
             if (!customization) return false;
             await validateArtifact(artifact.result, customization);
@@ -16471,7 +16554,7 @@
             next.proposalPending = true; next.phase = next.proposal ? 'proposal' : 'idle';
             next.error = { code: 'CANCELLED', message: '相談の完了を確認できません。相談内容をもう一度送信してください。' };
           } else if (next.plan) {
-            const ready = next.plan.customizations.every(c => next.artifacts.some(a => a.customizationId === c.customizationId && a.result?.artifactOutcome?.state === 'ready'));
+            const ready = next.plan.customizations.every(c => next.artifacts.some(a => a.customizationId === c.customizationId && generatedResultAvailable(a.result)));
             if (ready && !next.plan.questions.some(q => q && q.blocking !== false)) {
               next.phase = 'blocked'; next.error = { code: baseline && stampOf(fresh) !== baseline.stamp ? 'BASE_CHANGED' : 'APPROVAL_CHANGED',
                 message: '保存した変更案を開きました。反映する前に、最新の設定で内容を確認し直してください。' };
@@ -16506,18 +16589,18 @@
         },
         saveBusinessSnapshot,
         getBusinessDraft(id) { const h=state.businessContext;return h ? state.businessAnswerDrafts[h.analysisId+':'+h.analysisHash+':'+id]||'' : ''; },
-        setBusinessDraft(id,value) { if(!available()||!state.businessContext||typeof value!=='string'||value.length>2000)return false; const key=state.businessContext.analysisId+':'+state.businessContext.analysisHash+':'+id;state.businessAnswerDrafts[key]=value;emit();return true; },
+        setBusinessDraft(id,value) { if(!available()||!state.businessContext||typeof value!=='string'||value.length>2000)return false; const key=state.businessContext.analysisId+':'+state.businessContext.analysisHash+':'+id;state.businessAnswerDrafts[key]=value;emit({ businessDraftId: id });return true; },
         attachBusinessStatement(id,attached) { if(!available()||!state.businessContext)return false;const s=state.businessContext.statements.find(s=>s.statementId===id);if(!s||s.kind==='open_question')return false;const excluded=new Set(state.businessContext.attachmentExcludedIds||[]);attached?excluded.delete(id):excluded.add(id);state.businessContext.attachmentExcludedIds=[...excluded];if(!attached)state.businessSelectedIds=state.businessSelectedIds.filter(x=>x!==id);emit();return true; },
-        startBusiness, recordBusiness, withdrawBusiness, selectBusinessChange, setBusinessMode, checkBusiness, acknowledgeBusiness,
+        startBusiness, recordBusiness, prepareBusinessChange, withdrawBusiness, selectBusinessChange, setBusinessMode, checkBusiness, acknowledgeBusiness,
         closeBusiness() { if (!available()) return false; if(state.businessContext) state.businessArchive.push(clone(state.businessContext)); set({businessContext:null,businessMode:'understand',businessResult:null}); return true; },
-        exportSession, restoreSession, recoverResponse, discardResponseRecovery() { if(!available())return false;set({responseRecovery:null,error:null});return true; }, send:(...args)=>recoverable('send',args,send), selectSuggestion, updateSuggestions:(...args)=>recoverable('updateSuggestions',args,updateSuggestions), adopt:(...args)=>recoverable('adopt',args,adopt), resume:(...args)=>recoverable('resume',args,resume), reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
+        exportSession, restoreSession, recoverResponse, discardResponseRecovery() { if(!available())return false;set({responseRecovery:null,error:null});return true; }, send:(...args)=>recoverable('send',args,send), setDecisionDraft, selectSuggestion, updateSuggestions:(...args)=>recoverable('updateSuggestions',args,updateSuggestions), adopt:(...args)=>recoverable('adopt',args,adopt), resume:(...args)=>recoverable('resume',args,resume), reprepare, apply, requestRollback, rollback, recheckApply, recheckRollback,
         setRequestPurpose(value) { if (!available() || !['consultation', 'document', 'ideation'].includes(value)) return false; set({ requestPurpose: value }); return true; },
         setConsultationTarget(value) { if (!available()) return false; const target = consultationTargetOf(value); if (target === false) return false; set({ consultationTarget: target, ...(target ? { requestPurpose: 'consultation' } : {}) }); return true; },
         showExplanation(id) { if (restoringSession || !state.explanations.some(e => e.id === id)) return false; set({ explanationId: id }); return true; },
         showChanges() { if (restoringSession) return false; set({ explanationId: null }); return true; },
         async prepare() { if (state.businessReviewRequired) return false; if (!state.plan || state.proposalPending || state.runs.some(r => r.archived && r.taskId === state.taskId) || !available()) return false; return activity('preparing', async (_, live) => prepareInner(live)); },
         cancelRollback() { if (restoringSession || state.phase !== 'rollback-confirm') return false; set({ phase: 'result', rollback: null }); return true; },
-        newTask() { if (!available()) return false; Object.assign(state,{ businessContext:null,businessArchive:[],businessMode:'understand',businessResult:null,businessSelectedIds:[],businessReviewRequired:false,businessPlanContext:null,businessInvalid:null,businessAnswerDrafts:{},businessPlanRequests:null,businessPlanSelectedIds:[] }); ++epoch; base = null; restoredBaseline = null; pendingPlanQuestions = []; Object.assign(state, { responseRecovery: null, phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
+        newTask() { if (!available()) return false; Object.assign(state,{ businessContext:null,businessArchive:[],businessMode:'understand',businessResult:null,businessSelectedIds:[],businessReviewRequired:false,businessPlanContext:null,businessInvalid:null,businessAnswerDrafts:{},businessPlanRequests:null,businessPlanSelectedIds:[] }); ++epoch; base = null; restoredBaseline = null; pendingPlanQuestions = []; Object.assign(state, { responseRecovery: null, phase: 'idle', taskId: state.taskId + 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null }); emit(); return true; },
         cancel() {
           if (!['consulting','building','preparing'].includes(state.phase)) return false;
           const consulting = state.phase === 'consulting';
@@ -16529,7 +16612,7 @@
         },
       };
     }
-    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
+    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
   })();
 
   /* Current application facts, existing Deps results and explicitly accepted input.
@@ -16708,7 +16791,7 @@
       const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
         ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
         : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
-      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation', ...(diagnosis ? ['appDiagnosisCredits3'] : []), ...(businessContext ? ['businessConsultationV1'] : [])], question: text, ...(businessContext ? {businessMode,businessContext:clone(businessContext)} : {}), app: appOf(base),
+      return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance', 'appExplanation', ...(diagnosis ? ['appDiagnosisCredits3'] : []), ...(businessContext ? ['businessConsultationV1'] : [])], question: text, ...(businessContext ? {businessMode,businessContext:clone(businessContext)} : {}), app: appOf(base),
         focus: diagnosis ? { resolution: 'resolved', target: { type: 'app-diagnosis', id: String(base.appId) }, candidates: [] } : comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget, diagnosis), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
         conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
           itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -16724,7 +16807,7 @@
     }
     function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], businessPremises = [], version, base }, dependencyTools = null) {
       const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
-      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
+      return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
         coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
         ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
         ...(businessPremises.length ? { businessPremises: clone(businessPremises) } : {}),
@@ -16743,12 +16826,28 @@
       // Planned names come from typed plan fields; no replacement inside natural-language strings.
       const proposed = (plan.proposedFields || []).map(p => ({ code: p.suggestedCode, label: p.label, type: p.type, temporaryId: p.temporaryId, proposed: true, ...(p.options ? { options: clone(p.options) } : {}) }));
       const map = new Map(proposed.map(p => [p.temporaryId, p.code]));
+      // Resolve table membership from typed placement anchors, including new-column chains.
+      // This is plan structure, never interpretation of the request or generated code.
+      const existingByCode = new Map(allFields.map(f => [f.code, f]));
+      const proposedByCode = new Map(proposed.map(f => [f.code, f]));
+      const parentOf = (code, seen = new Set()) => {
+        code = map.get(code) || code;
+        if (existingByCode.has(code)) return existingByCode.get(code).subtable || null;
+        const field = proposedByCode.get(code);
+        if (!field || seen.has(code)) return null;
+        const step = (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && [s.targetRef, s.spec?.fieldCode].some(ref => ref === field.temporaryId || ref === code));
+        const placement = step?.spec?.placement;
+        if (!['BEFORE_FIELD', 'AFTER_FIELD'].includes(placement?.position)) return null;
+        return parentOf(placement.anchor, new Set([...seen, code]));
+      };
+      for (const f of proposed) { const parent = parentOf(f.code); if (parent) f.subtable = parent; }
       c.fields = (c.fields || []).map(f => ({ ...f, code: map.get(f.code) || f.code }));
-      const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
+      const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, ...(f.subtable ? { subtable: f.subtable } : {}), stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
       const plannedStatuses = (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.status?.name, stepId: s.id })).filter(x => x.name);
       const removed = new Set((plan.steps || []).filter(s => s.actionType === 'DELETE_FIELD').map(s => s.targetRef));
       const fields = allFields.filter(f => !removed.has(f.code)).map(f => {
         const update = (plan.steps || []).find(s => s.actionType === 'UPDATE_FIELD' && s.targetRef === f.code)?.spec;
+        if (f.type === 'SUBTABLE') return { ...f, columns: [...new Set([...(f.columns || []), ...proposed.filter(p => p.subtable === f.code).map(p => p.code)])] };
         return update?.optionEdits ? { ...f, options: update.optionEdits.items.map(i => i.label) } : f;
       }).concat(proposed), dictionary = dictionaryOf(base);
       dictionary.fieldCodes = fields.map(f => f.code); dictionary.fieldTypes = Object.fromEntries(fields.map(f => [f.code, f.type]));
@@ -16784,25 +16883,57 @@
     const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
     function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
       const toCurrent = b => b.current || currentOf(b);
-      function fileOperations(artifacts, plan) {
+      async function fileOperations(artifacts, plan, current) {
         const dependencies = {
           fields: (plan.proposedFields || []).map(f => ({ code: f.suggestedCode, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && [s.targetRef, s.spec?.fieldCode, s.spec?.temporaryId].includes(f.temporaryId))?.id })),
           statuses: (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.statusName || s.spec?.status?.name, stepId: s.id })).filter(s => s.name)
         };
-        return artifacts.flatMap(a => {
+        return (await Promise.all(artifacts.map(async a => {
           const outcome = a.result?.artifactOutcome, g = a.result?.generated || a.result;
-          if (outcome?.state !== 'ready') throw new Error('検証が終わっていないJavaScriptがあります。');
+          if (!['ready', 'unverified'].includes(outcome?.state)) throw new Error('作成が完了していないJavaScriptがあります。');
           const code = g.strategy === 'EXTEND_EXISTING_JS' ? g.body : g.code;
-          return (outcome.operations || []).map((op, i) => {
+          let registration = outcome.operations || [];
+          if (outcome.state === 'unverified') {
+            const c = (plan.customizations || []).find(c => c.customizationId === a.customizationId);
+            if (!c || !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(g.strategy) || g.strategy !== c.strategy ||
+                !Array.isArray(c.platform) || !c.platform.length || new Set(c.platform).size !== c.platform.length ||
+                c.platform.some(p => !['desktop', 'mobile'].includes(p)) ||
+                (outcome.scope?.customizationId && outcome.scope.customizationId !== c.customizationId) ||
+                typeof g.targetFile !== 'string' || !g.targetFile.trim() || typeof code !== 'string' || !code.trim())
+              throw new Error('JavaScriptの本文・登録先と変更計画の対応を確認できません。');
+            const basicFailures = (a.result.verification || g.verification)?.machine?.filter(check =>
+              ['syntax', 'fields', 'events', 'security', 'patch'].includes(check.name) && check.ok === false && check.severity === 'error') || [];
+            if (basicFailures.length) throw new Error(basicFailures.map(check => check.message || check.name).join(' / '));
+            const contentHash = await hash(code);
+            if (outcome.contentHash && outcome.contentHash !== contentHash)
+              throw new Error('受け取ったJavaScriptの本文が保存時の内容と一致しません。');
+            // Old saved responses deliberately have no operations when unverified.
+            // Build registration from explicit plan targets and the saved source only;
+            // do not reinterpret behavior or claim that automatic verification passed.
+            registration = c.platform.map(targetPlatform => {
+              if (outcome.scope?.platforms && !outcome.scope.platforms.includes(targetPlatform))
+                throw new Error('JavaScriptの登録先と生成時の対象が一致しません。');
+              if (g.strategy === 'NEW_JS_FILE') return { action: 'create', targetPlatform, targetFile: g.targetFile, contentHash };
+              const candidates = (current.customize?.[targetPlatform]?.js || []).filter(f => f.type === 'FILE' && (f.file?.name || f.name) === g.targetFile);
+              const sourceId = candidates[0]?.file?.fileKey || candidates[0]?.fileKey;
+              if (!(c.existingFiles || []).some(f => f.name === g.targetFile && f.target === targetPlatform) ||
+                  candidates.length !== 1 || !sourceId || !g.patch?.baseHash)
+                throw new Error('置き換える既存JavaScriptを一意に確認できません。');
+              return { action: 'replace', targetPlatform, targetFile: g.targetFile, contentHash,
+                baseHash: g.patch.baseHash, targetExistingFileId: sourceId };
+            });
+          }
+          return registration.map((op, i) => {
             if (!['create', 'replace', 'unchanged'].includes(op.action)) throw new Error('JavaScriptの登録方法を確認できません。');
             return ({
             id: a.customizationId + '-' + i, customizationId: a.customizationId, kind: op.action === 'create' ? 'ADD_FILE' : 'REPLACE_FILE',
             target: op.targetPlatform, name: op.targetFile, code, contentHash: op.contentHash, baseHash: op.baseHash || null,
             sourceId: op.targetExistingFileId || null, expectedUnchanged: op.action === 'unchanged', summary: a.title,
-            verification: { accepted: true, contentHash: op.contentHash },
+            // accepted authorizes preparation of this exact body, not a passed behavior test.
+            verification: { accepted: true, state: outcome.state, contentHash: op.contentHash },
             dependsOn: dependencies
           }); });
-        });
+        }))).flat();
       }
       function fileIdentityReasons(operations, current) {
         return operations.filter(op => op.kind === 'REPLACE_FILE').flatMap(op => {
@@ -16847,7 +16978,7 @@
         return { steps: ordered, ids: js.map(s => s.id) };
       }
       async function prepare({ plan, artifacts, base, previousBase = null }) {
-        const current = toCurrent(base), operations = fileOperations(artifacts, plan);
+        const current = toCurrent(base), operations = await fileOperations(artifacts, plan, current);
         if (previousBase && artifacts.length) {
           const verificationBasis = value => ({ fields: value.fields?.properties || {},
             status: { enable: value.status?.enable ?? false, states: value.status?.states ?? null, actions: value.status?.actions ?? null },
@@ -17219,22 +17350,21 @@
      const text=state.draft.trim();
      if(!text||[...text].length>100){state.error='雑談は100文字以内で入力してください。';emit();return false;}
      state.pending=true;state.error='';abort=new AbortController();const signal=abort.signal;emit();
-     let started=false;
      try{
       if(!await beforeSend()||disposed||signal.aborted)return false;
       if(!available())throw Error('雑談を利用できません。接続先・契約・AIサービスの更新を確認してください。');
       const history=state.turns.filter(t=>typeof t.reply==='string').slice(-3).map(t=>({user:t.user,assistant:t.reply}));
       const id=makeId(),turn={id,user:text,reply:null,handoff:false};
-      state.turns.push(turn);state.draft='';started=true;emit();
+      state.turns.push(turn);state.draft='';emit();
       const result=await send({text,history,requestId:id,signal});
       if(disposed||signal.aborted)return false;
       if(result?.ok!==true||result.version!==1||typeof result.reply!=='string'||!result.reply.trim()||[...result.reply].length>1200||typeof result.handoff!=='boolean')throw Error('雑談の返答を確認できませんでした。');
       turn.reply=result.reply;turn.handoff=result.handoff;state.usage=usageOf(result.smalltalkUsage);
       return true;
      }catch(error){
-      if(!disposed){state.error=signal.aborted?'雑談を中断しました。送信開始後の無料枠は戻りません。':error?.message||'雑談の返答を受け取れませんでした。';state.usage=usageOf(error?.details?.error?.detail?.smalltalkUsage||error?.details?.smalltalkUsage||error?.detail?.smalltalkUsage)||state.usage;if(started&&!state.draft)state.draft=text;}
+      if(!disposed){state.error=signal.aborted?'雑談を中断しました。送信開始後の無料枠は戻りません。':'雑談の返答を受け取れませんでした。接続状態を確認してください。';state.usage=usageOf(error?.details?.error?.detail?.smalltalkUsage||error?.details?.smalltalkUsage||error?.detail?.smalltalkUsage)||state.usage;}
       return false;
-     }finally{if(signal.aborted&&started&&!state.draft)state.draft=text;state.pending=false;abort=null;if(!disposed)emit();}
+     }finally{state.pending=false;abort=null;if(!disposed)emit();}
     }
     return {getState:()=>clone(state),setDraft,submit,
      toggle(){if(disposed||state.pending||!canSend())return false;state.open=!state.open;state.error='';emit();return true;},
@@ -17274,7 +17404,7 @@
     }[phase] || 'empty');
     const stageLabel = { proposal: ['01', '提案を相談する'], working: ['↻', '処理中'], review: ['02', '反映前の確認'], result: ['▤', '結果'], attention: ['!', '確認が必要です'], empty: ['○', 'ここに変更案を表示します'], explanation: ['≡', '説明を読む'], business: ['≡', '業務工程と相談'] };
     const activity = '<span class="ktr-activity" aria-hidden="true"><i></i><i></i><i></i></span>';
-    const draftActions = new Set(['adopt', 'resume', 'apply', 'rollback', 'reprepare', 'update-suggestions']);
+    const draftActions = new Set(['adopt', 'resume', 'apply', 'rollback', 'reprepare']);
     const draftPending = options => !!options.smalltalk?.getState().open || !!String(options.draft || '').trim() || !!options.sending;
     const draftNotice = options => `<p class="ktr-note" data-release-draft-note${draftPending(options) ? '' : ' hidden'}>${options.smalltalk?.getState().open ? '変更案の操作は、アプリの相談に戻ってから行ってください。' : '入力した内容を送信するか、消してから操作してください。'}</p>`;
     const button = (action, label, { primary = false, disabled = false, blockedByDraft = false, id = '', extra = '' } = {}) => `<button type="button" data-release-action="${action}"${id ? ` data-release-id="${esc(id)}"` : ''}${draftActions.has(action) ? ` data-release-base-disabled="${disabled}"` : ''} class="${primary ? 'ktr-primary' : 'ktr-secondary'}"${disabled || blockedByDraft ? ' disabled' : ''}${extra}>${esc(label)}</button>`;
@@ -17306,7 +17436,8 @@
       if (!label) return '';
       const detail = [label, status.completed ? '完了' : '', status.pinned ? '保護中' : ''].filter(Boolean).join('・');
       const failed = status.state === 'error' || status.state === 'unavailable';
-      const message = status.message || (failed ? '保存した会話を開いて、保存の状態を確認してください。' : detail);
+      const historyMessages = { HISTORY_CONFLICT: '別のタブで保存内容が変わりました。手元の内容は残っています。ファイルに保存してから会話を開き直してください。', HISTORY_LIMIT: '保存容量が足りません。手元の内容は残っています。保存した会話を整理してください。' };
+      const message = failed ? historyMessages[status.code] || '会話を保存できませんでした。保存した会話の状態を確認してください。' : detail;
       const indicator = '<span class="ktr-history-status" data-release-history-state="' + esc(status.state) + '" role="' + (failed ? 'alert' : 'status') + '">' + esc(detail) + '</span>';
       return failed ? '<details class="ktr-history-status-detail" data-release-panel="history-status"><summary>' + indicator + '</summary><div class="ktr-history-status-message"><p>' + esc(message) + '</p></div></details>' : '<span title="' + esc(message) + '">' + indicator + '</span>';
     }
@@ -17420,12 +17551,18 @@
       if (!messages?.length) return '<p class="ktr-empty-chat">変更したいことや、アプリについて知りたいことを教えてください。</p>';
       return `<ol class="ktr-messages">${messages.map(m => `<li class="ktr-message ${m.role === 'user' ? 'ktr-user' : ''}"><span class="ktr-speaker">${m.role === 'user' ? 'あなた' : 'AI'}</span>${m.consultationTarget ? `<span class="ktr-note"> / ${esc(consultationLabel(m.consultationTarget))}</span>` : ''}<p>${esc(m.text)}</p>${m.role !== 'user' ? factsHtml([m]) : ''}</li>`).join('')}</ol>`;
     }
+    const proposalFeedbackPending = state => !state.businessContext && state.phase === 'proposal' && workspace.hasProposalFeedback(state);
+    const composerPurpose = state => proposalFeedbackPending(state) ? 'consultation' : state.requestPurpose;
+    function composerHint(state, options, conn) {
+      const document = composerPurpose(state) === 'document', blocked = document ? documentBlocked(conn) : conn.canConsult === false;
+      return options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : blocked ? quotaNotice(conn, document ? 'document' : 'consultation') : (sharedCredits(conn.usage) ? '送信ごとに' + (conn.usage?.version === 4 && document ? 2 : 1) + 'クレジット' : document ? '送信ごとに作成1回' : '送信ごとに相談1回') + '・Enterで送信';
+    }
     function composer(state, options = {}) {
-      const conn = connectionOf(options), disabled = busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical || !!options.switching;
-      const document = state.requestPurpose === 'document', ideation = state.requestPurpose === 'ideation';
-      const quotaBlocked = document ? documentBlocked(conn) : conn.canConsult === false, shared = sharedCredits(conn.usage), bundled = conn.usage?.version === 4;
+      const conn = connectionOf(options), disabled = !!state.responseRecovery || busy.has(state.phase) || conn.connected === false || conn.available === false || !!options.historical || !!options.switching;
+      const document = composerPurpose(state) === 'document', ideation = composerPurpose(state) === 'ideation', feedback = proposalFeedbackPending(state);
+      const quotaBlocked = document ? documentBlocked(conn) : conn.canConsult === false;
       const purpose = document || ideation ? `<div class="ktr-request-purpose"><span class="ktr-note">${document ? '資料の修正を相談中です。変更案はそのまま残ります。' : '検討用のアイディアです。変更案にはまだ取り込んでいません。'}</span>${button('focus-consultation', '変更を相談する', { disabled })}</div>` : '';
-      return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(state.requestPurpose || 'consultation')}">${purpose}${state.businessContext ? '<p class="ktr-note">'+esc(state.businessMode==='improve'?'変更希望を選んで仮案を相談します。':'工程を見ながら、知りたいことを相談できます。確認事項への回答は必要なものだけ記録できます。')+'</p>' : ''}<label for="kt-release-input">${state.businessContext && state.businessMode==='understand' ? '工程について知りたいこと' : '変更したいこと、質問、修正内容'}</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${state.businessContext && state.businessMode==='understand' ? '例：申請後、誰が何を入力し、誰へ通知されますか。' : document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${options.historical ? '過去の反映記録を表示中です。現在の作業に戻ると入力できます。' : quotaBlocked ? quotaNotice(conn, document ? 'document' : 'consultation') : (shared ? '送信ごとに' + (bundled && document ? 2 : 1) + 'クレジット' : document ? '送信ごとに作成1回' : '送信ごとに相談1回') + '・Enterで送信'}</span>${button('send', '送信', { primary: true, disabled: disabled || quotaBlocked })}</div></form>`;
+      return `<form class="ktr-composer" data-release-form="consult" data-release-purpose="${esc(composerPurpose(state) || 'consultation')}">${purpose}${state.businessContext ? '<p class="ktr-note">'+esc(state.businessMode==='improve'?'変更したいことを入力して送信してください。選択済みの希望もまとめて相談します。':'工程を見ながら、知りたいことを相談できます。確認事項への回答は必要なものだけ記録できます。')+'</p>' : ''}<label for="kt-release-input">${state.businessContext && state.businessMode==='understand' ? '工程について知りたいこと' : '変更したいこと、質問、修正内容'}</label>${state.consultationTarget ? `<div class="ktr-consult-target"><span>相談の対象：${esc(consultationLabel(state.consultationTarget))}</span>${button('clear-consultation-target', '対象を外す', { disabled })}<small>${state.consultationTarget.type === 'FILE' ? '送信時に取得する登録済みコードを使います。手元の編集は送信しません。' : '送信時に動作テスト環境の設定・登録済みコードと依存関係を取得し直します。手元の編集は送信しません。'}</small></div>` : ''}<textarea id="kt-release-input" rows="2" placeholder="${state.businessContext && state.businessMode==='understand' ? '例：申請後、誰が何を入力し、誰へ通知されますか。' : document ? '例：引継ぎ資料にまとめて。説明を短くするなど、資料の修正も依頼できます。' : ideation ? '例：このアプリの入力を楽にする工夫をいくつか考えて。' : '例：このアプリの仕組みを教えて。変更したいことも相談できます。'}"${disabled ? ' disabled' : ''}>${esc(options.draft || '')}</textarea><div class="ktr-compose-actions"><span class="ktr-note">${composerHint(state, options, conn)}</span>${button('send', feedback ? 'まとめて送信' : '送信', { primary: true, disabled: disabled || quotaBlocked })}</div></form>`;
     }
     function proposalHtml(state, options) {
       const p = options.proposal || state.proposal || {}, answered = new Map((state.answers || []).filter(a => a.answer).map(a => [a.id, a.answer]));
@@ -17433,15 +17570,20 @@
       const behaviors = (p.behaviors || []).filter(b => b.origin !== 'suggestion'), suggestions = (p.behaviors || []).filter(b => b.origin === 'suggestion');
       const latest = (state.messages || []).filter(m => m.role !== 'user').at(-1);
       const conn = connectionOf(options), selected = new Set(state.selectedSuggestionIds || []);
-      const suggestionEditable = !options.readOnly && !options.sending && state.phase === 'proposal' && !state.proposalPending;
+      const suggestionEditable = !options.readOnly && !options.sending && !state.responseRecovery && state.phase === 'proposal';
       const suggestionRef = ` data-release-task="${esc(state.taskId)}" data-release-version="${esc(state.version)}"`;
-      return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? list(behaviors) : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
-        ${suggestions.length ? `<section data-release-panel="suggestions"><h3>あわせて検討できること</h3><p class="ktr-note">必要なものだけ選べます。チェックするだけでは、案の更新やAIの呼び出しは行いません。</p><div class="ktr-suggestion-choices">${suggestions.map(item => `<label class="ktr-suggestion-choice"><input type="checkbox" data-release-suggestion="${esc(item.id)}"${suggestionRef}${selected.has(item.id) ? ' checked' : ''}${!suggestionEditable ? ' disabled' : ''}><span>${esc(textOf(item))}</span></label>`).join('')}</div>${!options.readOnly ? `<div class="ktr-actions">${button('update-suggestions', '選んだ内容で案を更新', { primary: selected.size > 0, disabled: !suggestionEditable || !selected.size || conn.connected === false || conn.available === false, blockedByDraft: draftPending(options), extra: suggestionRef })}</div>${selected.size ? '<p class="ktr-note">選んだ追加提案は、案を更新してから内容を確認してください。</p>' : ''}` : ''}</section>` : ''}
+      return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? `<ul>${behaviors.map(b => `<li>${b.origin === 'ai' ? '<strong data-release-required-support>実現に必要な補足：</strong>' : ''}${esc(textOf(b))}</li>`).join('')}</ul>` : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
+        ${suggestions.length ? `<section data-release-panel="suggestions"><h3>任意の改善提案</h3><p class="ktr-note">選ばなくても基本案は進められます。チェックするだけでは、案の更新やAIの呼び出しは行いません。</p><div class="ktr-suggestion-choices">${suggestions.map(item => `<label class="ktr-suggestion-choice"><input type="checkbox" data-release-suggestion="${esc(item.id)}"${suggestionRef}${selected.has(item.id) ? ' checked' : ''}${!suggestionEditable ? ' disabled' : ''}><span>${esc(textOf(item))}</span></label>`).join('')}</div></section>` : ''}
         ${p.assumptions?.length ? `<h3>この案の前提</h3>${list(p.assumptions)}` : ''}${p.cannot?.length ? `<h3>この案の制約</h3>${list(p.cannot)}` : ''}
-        ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => `<div class="ktr-question"><h3>${esc(q.question || q.label || '確認したいこと')}</h3>${!options.readOnly && q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { extra: ` data-release-answer="${esc(textOf(o))}"` })).join('')}</div>` : ''}${!options.readOnly && q.blocking ? '<p class="ktr-note">回答を送ってから、仮案を確かめてください。</p>' : ''}</div>`).join('')}
+        ${(p.decisions || []).filter(q => !q.answer && !answered.has(q.id)).map(q => {
+          const question = q.question || q.label || q.text || '確認したいこと';
+          const saved = state.decisionDrafts?.[q.id], answer = saved?.question === question ? saved.answer : '';
+          return `<div class="ktr-question"><h3>${esc(question)}</h3>${!options.readOnly ? `${q.options?.length ? `<div class="ktr-actions">${q.options.map(o => button('answer', textOf(o), { disabled: !suggestionEditable, id:q.id, extra: suggestionRef + ` data-release-answer="${esc(textOf(o))}" aria-pressed="${answer === textOf(o)}"` })).join('')}</div>` : ''}<textarea data-release-decision="${esc(q.id)}"${suggestionRef} aria-label="${esc(question)}への回答" placeholder="選択するか、希望する内容を入力" rows="2"${!suggestionEditable ? ' disabled' : ''}>${esc(answer)}</textarea>` : ''}</div>`;
+        }).join('')}
+        ${!options.readOnly && (suggestions.length || (p.decisions || []).some(q => !q.answer && !answered.has(q.id))) ? '<p class="ktr-note">回答・選んだ改善提案・相談欄の文章は、最後に［送信］でまとめて送れます。選択や入力だけではAIを呼びません。</p>' : ''}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
         ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(state.error?.code) ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
-        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.proposalPending || selected.size > 0 || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">${conn.usage?.version === 4 ? (conn.canCreate === false ? quotaNotice(conn, 'final') : '最終案の作成は3クレジットです。JavaScriptの本数による追加消費はありません。') : conn.usage?.version === 3 ? '必要なクレジットは計画の内容で変わります。［接続］で数え方を確認できます。' : '計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。'}この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.responseRecovery || !!state.proposalPending || workspace.hasProposalFeedback(state) || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">${conn.usage?.version === 4 ? (conn.canCreate === false ? quotaNotice(conn, 'final') : '最終案の作成は3クレジットです。JavaScriptの本数による追加消費はありません。') : conn.usage?.version === 3 ? '必要なクレジットは計画の内容で変わります。［接続］で数え方を確認できます。' : '計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。'}この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
     }
     function codeHtml(state) {
       const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
@@ -17452,12 +17594,13 @@
       }).join('')}</details>`;
     }
     function verificationHtml(state) {
-      const artifacts = state.artifacts || [];
+      // Generation diagnostics remain in saved data, not a verification banner.
+      const artifacts = (state.artifacts || []).filter(a => !['ready', 'unverified'].includes(a.result?.artifactOutcome?.state));
       if (!artifacts.length) return '';
       const labels = { ready: '検証が完了しました。', incomplete: '作成が終わっていません', unverified: '必要な検証を完了できません', failed: '検証で不一致がありました' };
       return `<details data-release-panel="verification"><summary>確かめたこと</summary>${artifacts.map(a => {
         const outcome = a.result?.artifactOutcome;
-        return `<h3>${esc(a.title || 'JavaScript')}</h3><p>${esc(outcome ? outcome.state === 'ready' ? outcome.message || labels.ready : labels[outcome.state] || '結果を確認できません' : '作成が終わっていません')}</p>${outcome?.message && outcome.state !== 'ready' ? `<p>${esc(outcome.message)}</p>` : ''}${a.error?.message ? `<p>${esc(a.error.message)}</p>` : ''}`;
+        return `<h3>${esc(a.title || 'JavaScript')}</h3><p>${esc(outcome ? outcome.state === 'ready' ? labels.ready : labels[outcome.state] || '結果を確認できません' : '作成が終わっていません')}</p>${a.error && (state.phase !== 'incomplete' || !state.plan) ? `<p>${esc(publicErrorMessage(a.error))}</p>` : ''}`;
       }).join('')}<p>kintoneの実際の画面での動作は、反映後に確かめます。</p></details>`;
     }
     function changesHtml(changes) {
@@ -17484,7 +17627,7 @@
         ${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
         ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
         <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
-        ${(state.artifacts || []).length ? '<p class="ktr-note">作成したJavaScriptの検証は完了しています。実際の画面での動作は反映後に確かめます。</p>' : ''}
+        ${(state.artifacts || []).length ? '<p class="ktr-note">JavaScriptは作成済みです。コードと変更内容を確認して反映してください。</p>' : ''}
         <div class="ktr-actions">${button('apply', '動作テスト環境に反映', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
     }
     function provisionalsHtml(rows) {
@@ -17526,7 +17669,7 @@
       incomplete: { title: '作成途中です', label: '作成途中', help: '残りを作成してから、全体を確認します。', action: '残りを作成' },
       interrupted: { title: '作成を完了できませんでした', label: '作成未完了', help: '接続などの原因を確認してから、未完了の内容を作成し直せます。', action: '未完了の内容を作成し直す' },
       failed: { title: '検証で不一致がありました', label: '検証不一致', help: '作成したコードの検証に通りませんでした。理由を確認し、相談で内容を修正するか、未完了の内容を作成し直してください。', action: '未完了の内容を作成し直す' },
-      unverified: { title: '自動確認できていない内容があります', label: '一部未確認', action: '残りの内容を作成する', help: '自動確認できないことを、コードの誤りとは判定していません。生成したコードと説明、未確認の理由を確認できます。反映前にコードの内容と動作を確かめてください。' },
+      unverified: { title: '作成した内容', label: '作成結果', action: '残りの内容を作成する', help: '生成したコードと変更内容を確認できます。' },
       declined: { title: '作成できない内容があります', label: '作成できません', help: 'AIが作成しなかった理由を確認し、変更したい内容を相談欄から伝えてください。' },
       reserved: { title: '処理中の分を確保しています', label: '利用枠を確保中', help: '完了後に［接続を更新］で残数を確認してください。', action: '未完了の作成を再開' },
       limit: { title: 'AIの利用上限に達しました', label: '利用上限', help: '接続画面で利用状況を確認してください。利用可能になったら、未完了の内容だけ作成を再開できます。', action: '未完了の作成を再開' }
@@ -17538,14 +17681,14 @@
     }
     function incompleteHtml(state, options) {
       if (workspace.canReprepare(state)) return `<section class="ktr-section"><h2>反映内容の確認が必要です</h2><p>作成した変更案は残っています。現在の設定で反映できるか確認してください。</p>${reprepareHtml(options)}</section>`;
-      if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。${workspace.creationStateOf(state).kind === 'reserved' ? '処理が終わったら［接続を更新］で残数を確認してください。' : state.error?.code === 'MONTHLY_LIMIT_EXCEEDED' ? '利用枠の更新日を［接続］で確認してください。' : '相談で内容を修正するか、もう一度作成してください。'}</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !state.proposal || connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+      if (!state.plan) return `<section class="ktr-section"><h2>計画を作成できませんでした</h2><p>この案の作成は完了していません。${workspace.creationStateOf(state).kind === 'reserved' ? '処理が終わったら［接続を更新］で残数を確認してください。' : state.error?.code === 'MONTHLY_LIMIT_EXCEEDED' ? '利用枠の更新日を［接続］で確認してください。' : '相談で内容を修正するか、もう一度作成してください。'}</p><div class="ktr-actions">${button('adopt', 'もう一度作成', { primary: true, disabled: !!state.responseRecovery || !state.proposal || connectionOf(options).canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
       const artifacts = state.artifacts || [], all = state.plan?.customizations || [];
-      const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready');
+      const finished = artifacts.filter(a => a.result?.artifactOutcome?.state === 'ready' || (a.result?.artifactOutcome?.state === 'unverified' && bodyOf(a.result)?.trim()));
       const unfinished = all.filter(c => !finished.some(a => a.customizationId === c.customizationId));
       const recovery = workspace.creationStateOf(state), wording = creationMessages[recovery.kind];
       const generated = artifacts.filter(a => typeof bodyOf(a.result) === 'string' && bodyOf(a.result).trim());
-      const reasons = artifacts.filter(a => a.result?.artifactOutcome?.state !== 'ready').map(a => ({ message: a.result?.artifactOutcome?.message || a.error?.message || '作成が終わっていません。' }));
-      return `<section class="ktr-section"><h2>${wording.title}</h2><p>${generated.length ? 'JavaScriptは作成済みです。' : '現在の案は残っています。'}${wording.help}</p>${generated.length ? `<h3>生成したJavaScript</h3>${list(generated.map(a => ({ title: a.result?.generated?.summary || a.result?.summary || a.title || a.customizationId })))}<p class="ktr-note">コードは下の「JavaScriptを見る」で確認・コピー・保存できます。会話にも保存されます。</p>` : ''}${finished.length ? `<h3>自動確認が完了した内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>確認が必要な内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${noticesHtml(state)}${recovery.canResume ? `<div class="ktr-actions">${['limit', 'reserved'].includes(recovery.kind) ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, disabled: resumeBlocked(connectionOf(options)), blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : ['limit', 'reserved'].includes(recovery.kind) ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '内容について相談する', { primary: true })}</div>`}</section>`;
+      const reasons = artifacts.filter(a => !['ready', 'unverified'].includes(a.result?.artifactOutcome?.state) || !bodyOf(a.result)?.trim()).map(a => ({ message: a.error ? publicErrorMessage(a.error) : a.result && !bodyOf(a.result)?.trim() ? 'コードを受け取れていないため、反映できません。' : '作成が終わっていません。' }));
+      return `<section class="ktr-section"><h2>${wording.title}</h2><p>${generated.length ? 'JavaScriptは作成済みです。' : '現在の案は残っています。'}${wording.help}</p>${generated.length ? `<h3>生成したJavaScript</h3>${list(generated.map(a => ({ title: a.result?.generated?.summary || a.result?.summary || a.title || a.customizationId })))}<p class="ktr-note">コードは下の「JavaScriptを見る」で確認・コピー・保存できます。会話にも保存されます。</p>` : ''}${finished.length ? `<h3>作成済みの内容</h3>${list(finished)}` : ''}${unfinished.length ? `<h3>作成が残っている内容</h3>${list(unfinished.map(c => ({ title: c.requirement || c.customizationId })))}` : ''}${list(reasons, 'ktr-reasons')}${declineHtml(artifacts)}${noticesHtml(state)}${recovery.canResume ? `<div class="ktr-actions">${['limit', 'reserved'].includes(recovery.kind) ? button('connect', '利用状況を確認する') : ''}${button('resume', wording.action, { primary: true, disabled: !!state.responseRecovery || resumeBlocked(connectionOf(options)), blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}` : ['limit', 'reserved'].includes(recovery.kind) ? `<div class="ktr-actions">${button('connect', '利用状況を確認する', { primary: true })}</div>` : `<div class="ktr-actions">${button('focus-consultation', '内容について相談する', { primary: true })}</div>`}</section>`;
     }
     function runHtml(run, options = {}, historical = false) {
       if (!run) return '<p>反映の記録はありません。</p>';
@@ -17574,23 +17717,45 @@
       if (run?.archived) return runHtml(run, options);
       return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
     }
-    function diagnosticHtml(error) {
-      if (error?.code !== 'MODEL_OUTPUT_INVALID') return '';
-      const detail = error.detail?.error?.detail || error.detail;
-      const rows = [...(Array.isArray(detail?.errors) ? detail.errors : []), ...(Array.isArray(detail?.warnings) ? detail.warnings : [])]
-        .map(row => ['code', 'path', 'message'].map(key => typeof row?.[key] === 'string' ? row[key] : '').filter(Boolean).join('：')).filter(Boolean);
-      if (typeof detail?.reason === 'string') rows.unshift(detail.reason);
-      return rows.length ? '<details data-release-panel="response-diagnostics"><summary>問題の詳細（技術者向け）</summary>' + list(rows) + '</details>' : '';
+    // Error payloads are for control/recovery only. Never render provider details.
+    function publicErrorMessage(error) {
+      const messages = {
+        MONTHLY_LIMIT_EXCEEDED: '利用できる回数・クレジットが不足しています。［接続］で残数と更新日を確認してください。',
+        BUDGET_EXCEEDED: 'この操作を開始できませんでした。［接続］で利用状況を確認してください。案は更新していません。',
+        TIMEOUT: '回答を受け取るまでに時間がかかっています。時間をおいてお試しください。',
+        NETWORK_ERROR: '返答を受信できませんでした。接続状態を確認してください。',
+        TRANSPORT_ERROR: '返答を受信できませんでした。接続状態を確認してください。',
+        MODEL_OUTPUT_INVALID: '回答を完成できませんでした。送信した内容は会話に残っています。',
+        GENERATION_INCOMPLETE: 'コードの作成を完了できませんでした。作成済みの内容を確認し、残りの作成を再開してください。',
+        CONTEXT_TOO_LARGE: 'この内容で回答を作成できませんでした。相談する内容を確認してください。',
+        PAYLOAD_TOO_LARGE: 'この内容で回答を作成できませんでした。相談する内容を確認してください。',
+        BASE_UNAVAILABLE: 'アプリの設定を取得できませんでした。接続状態とアプリの権限を確認してください。',
+        BASE_CHANGED: 'アプリの設定が変わりました。最新の設定で変更案を確認し直してください。',
+        VERIFICATION_CONTEXT_CHANGED: 'アプリの設定が変わりました。最新の設定で変更案を確認し直してください。',
+        APPROVAL_CHANGED: '確認した内容と現在の設定が一致しません。変更案を確認し直してください。',
+        CONSULTATION_ENVIRONMENT: '相談の対象と開いているアプリが一致しません。対象アプリを確認してください。',
+        PLAN_QUESTION: '変更案の作成に必要な確認があります。相談欄で回答してください。',
+        CANCELLED: '処理を中断しました。送信した内容は会話に残っています。',
+        BUSINESS_CHANGE_REQUIRED: '相談する変更希望を選んでください。',
+        BUSINESS_SOURCE_CHANGED: '分析時点から設定が変わりました。現在の設定を確認してから相談してください。',
+        BUSINESS_REVIEW_REQUIRED: '運用の前提が変わりました。変更希望を整理して相談してください。',
+        RESULT_RECOVERY_REQUIRED: '前の回答を取り直すか、再取得を終了してから送信してください。',
+        RECOVERY_INPUT_CHANGED: '依頼時から内容が変わっています。元の会話で回答を取り直してください。'
+      };
+      return messages[error?.code] || '操作を完了できませんでした。時間をおいてお試しください。';
     }
     const errorInHeader = (state, historical, codePanel) => !!(state.error?.message && !historical && (codePanel.open || !(state.phase === 'incomplete' && (state.artifacts || []).some(a => a.error?.message === state.error.message || a.result?.artifactOutcome?.message === state.error.message))));
     function headerNoticeHtml(state, options, conn, historical, codePanel) {
       const rows = [];
-      if (errorInHeader(state, historical, codePanel)) rows.push({ kind: 'error', code: state.error.code, message: state.error.message });
-      if (conn.connected === false || conn.available === false) rows.push({ kind: 'connection', message: conn.message || 'AIサービスへ接続してください。' });
+      if (errorInHeader(state, historical, codePanel)) {
+        const message = publicErrorMessage(state.error);
+        rows.push({ kind: 'error', message: message + (state.proposalPending && !message.includes('案は更新していません') ? ' 案は更新していません。' : '') });
+      }
+      if (conn.connected === false || conn.available === false) rows.push({ kind: 'connection', message: 'AIサービスへの接続を確認してください。' });
       if (options.notice) rows.push({ kind: 'notice', message: options.notice });
       if (!rows.length) return '';
-      const first = rows[0], label = first.kind === 'error' ? first.code === 'MONTHLY_LIMIT_EXCEEDED' ? 'AIの利用状況を確認してください' : first.code === 'BUDGET_EXCEEDED' ? '今回のAI利用枠を確保できません' : ['CONTEXT_TOO_LARGE', 'PAYLOAD_TOO_LARGE'].includes(first.code) ? '送信する設定が入力上限を超えています' : first.code === 'MODEL_OUTPUT_INVALID' ? ((state.error?.detail?.error?.detail || state.error?.detail)?.reason === 'OUTPUT_TRUNCATED' ? 'AIの回答が出力上限で途中終了しました' : 'AIの応答形式を確認できませんでした') : first.code === 'TIMEOUT' ? 'AIの応答が制限時間を超えました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
-      return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'error' ? diagnosticHtml(state.error) : ''}${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
+      const first = rows[0], label = first.kind === 'error' ? state.error.code === 'MONTHLY_LIMIT_EXCEEDED' ? 'AIの利用状況を確認してください' : state.error.code === 'BUDGET_EXCEEDED' ? '今回のAI利用枠を確保できません' : ['CONTEXT_TOO_LARGE', 'PAYLOAD_TOO_LARGE'].includes(state.error.code) ? '送信する設定が入力上限を超えています' : state.error.code === 'MODEL_OUTPUT_INVALID' ? '回答を完了できませんでした' : state.error.code === 'TIMEOUT' ? 'AIの応答が制限時間を超えました' : '処理を完了できませんでした' : first.kind === 'connection' ? '接続を確認してください' : 'お知らせ';
+      return `<details class="ktr-header-notice" data-release-panel="header-notice" data-release-notice="${esc(JSON.stringify(rows))}"><summary><span role="${first.kind === 'error' ? 'alert' : 'status'}">${esc(label)}</span>${rows.length > 1 ? `<small>ほか${rows.length - 1}件</small>` : ''}</summary><div class="ktr-header-notice-body" tabindex="0" aria-label="通知の詳細">${rows.map(row => `<section><p${row.kind === 'error' ? ' class="ktr-error"' : ''}>${esc(row.message)}</p>${row.kind === 'connection' ? button('connect', '接続する') : ''}</section>`).join('')}${button('close-notice', '通知を閉じる')}</div></details>`;
     }
     function chatModeHtml(state, options, smalltalk) {
       if (!options.smalltalk) return '<h2 class="ktr-pane-title">相談</h2>';
@@ -17636,7 +17801,7 @@
       else if (state.businessContext) body = '';
       else body = '<section class="ktr-section"><h2>変更案</h2><p class="ktr-note">相談すると、ここに案を表示します。内容を確認してから動作テスト環境に反映します。</p></section>';
       if(state.businessContext&&!historical&&!explanation) {
-        const consultation=(typeof KTBusinessConsultationView!=='undefined'?KTBusinessConsultationView:require('./release-business-consultation-view.js').KTBusinessConsultationView).render(state,conn,busy.has(state.phase)||!!options.sending||!!options.switching);
+        const consultation=(typeof KTBusinessConsultationView!=='undefined'?KTBusinessConsultationView:require('./release-business-consultation-view.js').KTBusinessConsultationView).render(state,conn,busy.has(state.phase)||!!state.responseRecovery||!!options.sending||!!options.switching);
         body=busy.has(state.phase)||state.phase==='blocked'?body+consultation:consultation+body;
       }
       if(state.businessContext&&!historical&&explanation) {
@@ -17649,10 +17814,10 @@
       if(state.businessPlanContext&&!state.businessContext&&!historical)body='<aside class="ktr-section"><p>業務分析と確認した運用をもとにした仮案です。質問への回答や修正は相談欄へ入力できます。</p>'+button('business-start','業務の確認へ戻る',{id:state.businessPlanContext.analysisId,extra:state.businessPlanContext.selection.ruleId?' data-business-rule="'+esc(state.businessPlanContext.selection.ruleId)+'"':''})+'</aside>'+body;
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : state.businessContext && !historical && !busy.has(state.phase) && stageOf(state.phase, false) === 'empty' ? 'business' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       if(state.responseRecovery&&!historical&&!['consulting','building','preparing'].includes(state.phase))body='<section class="ktr-section" data-response-recovery><p>回答を受け取れていない可能性があります。保存済みの回答を取り直します。AIの再実行・追加クレジット消費はありません（30日以内）。</p><div class="ktr-actions">'+button('recover-response','回答を取り直す',{primary:true,disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+button('discard-response-recovery','再取得を終了',{disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+'</div></section>'+body;
-      const support = historical || explanation ? '' : `${errorInHeader(state, historical, codePanel) ? '' : diagnosticHtml(state.error)}${codeHtml(state)}${verificationHtml(state)}`;
+      const support = historical || explanation ? '' : `${codeHtml(state)}${verificationHtml(state)}`;
       const runHistory = !explanation && state.runs?.length ? `<details data-release-panel="runs"><summary>これまでの反映</summary><ul>${state.runs.map((run, index) => `<li>${button('history', run.goal || `反映 ${index + 1}`, { id: run.id })} <span>${esc(run.rollback?.status === 'complete' ? '元に戻し済み' : ({ complete: '反映済み', partial: '一部反映', failed: '未完了', unknown: '結果未確認' }[run.status] || '処理中'))}</span></li>`).join('')}</ul></details>` : '';
       return `<div class="ktr-workspace${codePanel.open ? ' ktr-code-open' : ''}" data-release-phase="${esc(state.phase)}"><style>${styles}</style><div class="ktr-content"><header class="ktr-header"><div class="ktr-heading"><div class="ktr-title-line"><strong>${esc(options.appName || 'アプリの相談')}</strong>${headerNoticeHtml(state, options, conn, historical, codePanel)}</div><div class="ktr-heading-meta"><span class="ktr-environment">動作テスト環境</span><div data-release-history-status>${historyStatusHtml(options)}</div></div></div><div class="ktr-header-tools"><nav class="ktr-tools" aria-label="接続とアプリ情報"><span class="ktr-connection-status">${esc(conn.connected === false ? '未接続' : conn.available === false ? 'AIを利用できません' : conn.connected === true ? 'AIに接続済み' : '接続を確認してください')}</span>${button('connect', '接続')}<details class="ktr-more" data-release-panel="header-more"><summary>その他</summary><div class="ktr-more-content">${button('details', 'アプリの情報を見る')}</div></details></nav></div></header>
-        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><div class="ktr-conversation-tools">${chatModeHtml(state, options, smalltalk)}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</div>${smalltalk?.open ? smalltalkHtml(smalltalk, conn) : `${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div><nav class="ktr-compose-tools" aria-label="相談を始める">${entryButton('diagnose', 'アプリを診断', '設定やJSの不整合・改善点を確認', '3クレジット', { disabled: !!smalltalk?.open || busy.has(state.phase) || conn.connected === false || conn.available === false || conn.canRunDiagnosis !== true || conn.canDiagnose !== true || !!options.sending || !!historical, title: conn.canDiagnose !== true ? '3クレジットの診断に対応したAIサービスへの接続・更新が必要です' : conn.canRunDiagnosis !== true ? 'アプリ診断には3クレジットが必要です。［接続］で残数を確認してください' : '設定や登録済みJavaScriptの不整合・改善点をAIで確認します（1回3クレジット）' })}${entryButton('understand-business', '業務工程を読み解く', '工程ごとの担当・入力・通知を整理', '10クレジット', { disabled: !!smalltalk?.open, note: '設定確認は無料', title: 'プロセスを軸に、誰が・いつ・何をするか、入力・通知・次へ進む条件を根拠付きで整理します。工程の整理は1回10クレジット、設定確認は無料です。' })}${entryButton('documents', '資料を作る', '設定や相談内容を説明・引き継ぎ資料に', '2クレジット', { disabled: !!smalltalk?.open, title: '設定や相談内容を、説明・引き継ぎ用の資料にまとめます。作成・修正は1回2クレジットです。' })}<details class="ktr-entry-help" data-release-panel="entry-help"><summary>使い分け</summary><dl><dt>アプリを診断 · 3クレジット／回</dt><dd>設定やJSの不整合・改善点を確認します。</dd><dt>業務工程を読み解く · 整理10クレジット／回</dt><dd>工程の順序と分岐、担当・入力内容・通知・次へ進む条件を整理します。設定確認は無料です。</dd><dt>資料を作る · 作成・修正2クレジット／回</dt><dd>設定や相談内容を、説明・引き継ぎ資料にまとめます。</dd></dl></details></nav>${composer(state, { ...options, historical: !!historical })}`}</section><section class="ktr-detail-pane" aria-label="案とコード"><nav class="ktr-pane-tools" aria-label="右ペインの表示">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}</nav><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></section></div></div></div>`;
+        <div class="ktr-layout"><section class="ktr-conversation" aria-label="相談"><div class="ktr-conversation-tools">${chatModeHtml(state, options, smalltalk)}${typeof options.onHistory === 'function' ? button('saved-history', '保存した会話', { disabled: busy.has(state.phase) || !!options.sending || !!options.switching }) : ''}</div>${smalltalk?.open ? smalltalkHtml(smalltalk, conn) : `${codeAttention ? `<aside class="ktr-code-attention" role="status"><p>${esc(codeAttention)}</p>${button('code', '変更案・結果を見る')}</aside>` : ''}${codePanel.open && busy.has(state.phase) ? `<div class="ktr-code-progress" role="status">${activity}<span>${esc(state.progress || (state.phase === 'consulting' ? '返答を作成しています。' : phaseText[state.phase]))}</span>${['consulting', 'building', 'preparing'].includes(state.phase) ? button('cancel', '中断する') : ''}</div>` : ''}<div class="ktr-chat-log" data-release-panel="conversation" tabindex="0" aria-label="相談の記録">${historyHtml(state.messages)}${state.phase === 'consulting' && !historical && !codePanel.open ? `<div class="ktr-chat-pending" role="status">${activity}<span>返答を待っています</span></div>` : ''}</div><nav class="ktr-compose-tools" aria-label="相談を始める">${entryButton('diagnose', 'アプリを診断', '設定やJSの不整合・改善点を確認', '3クレジット', { disabled: !!state.responseRecovery || !!smalltalk?.open || busy.has(state.phase) || conn.connected === false || conn.available === false || conn.canRunDiagnosis !== true || conn.canDiagnose !== true || !!options.sending || !!historical, title: conn.canDiagnose !== true ? '3クレジットの診断に対応したAIサービスへの接続・更新が必要です' : conn.canRunDiagnosis !== true ? 'アプリ診断には3クレジットが必要です。［接続］で残数を確認してください' : '設定や登録済みJavaScriptの不整合・改善点をAIで確認します（1回3クレジット）' })}${entryButton('understand-business', '業務工程を読み解く', '工程ごとの担当・入力・通知を整理', '10クレジット', { disabled: !!smalltalk?.open, note: '設定確認は無料', title: 'プロセスを軸に、誰が・いつ・何をするか、入力・通知・次へ進む条件を根拠付きで整理します。工程の整理は1回10クレジット、設定確認は無料です。' })}${entryButton('documents', '資料を作る', '設定や相談内容を説明・引き継ぎ資料に', '2クレジット', { disabled: !!smalltalk?.open, title: '設定や相談内容を、説明・引き継ぎ用の資料にまとめます。作成・修正は1回2クレジットです。' })}<details class="ktr-entry-help" data-release-panel="entry-help"><summary>使い分け</summary><dl><dt>アプリを診断 · 3クレジット／回</dt><dd>設定やJSの不整合・改善点を確認します。</dd><dt>業務工程を読み解く · 整理10クレジット／回</dt><dd>工程の順序と分岐、担当・入力内容・通知・次へ進む条件を整理します。設定確認は無料です。</dd><dt>資料を作る · 作成・修正2クレジット／回</dt><dd>設定や相談内容を、説明・引き継ぎ資料にまとめます。</dd></dl></details></nav>${composer(state, { ...options, historical: !!historical })}`}</section><section class="ktr-detail-pane" aria-label="案とコード"><nav class="ktr-pane-tools" aria-label="右ペインの表示">${codePanel.available ? button('code', codePanel.open ? '変更案・結果を見る' : 'コード・差分を見る', { extra: ' aria-expanded="' + !!codePanel.open + '" aria-controls="' + esc(codePanel.id) + '"' }) : ''}</nav><main class="ktr-current"${codePanel.open ? ' hidden' : ''} aria-label="説明・変更案・反映結果" data-release-stage="${stage}">${explanationNavigation(state, explanation, historical)}<header class="ktr-stage-header"><span class="ktr-stage-icon" aria-hidden="true">${stageIcon}</span><span>${esc(historical ? '過去の反映記録' : stageTitle)}</span></header>${body}${support || runHistory ? `<div class="ktr-support">${support}${runHistory}</div>` : ''}</main></section></div></div></div>`;
     }
     function create(host, options = {}) {
       if (!host || !options.controller) throw new Error('作業面を表示するための情報がありません。');
@@ -17668,7 +17833,7 @@
         const h=state.businessContext;
         return h?JSON.stringify(['business',h.analysisId,h.analysisHash]):null;
       }
-      let panelsRendered = false;
+      let panelsRendered = false, composerHeight = '', composerScrollTop = 0;
       let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null, previousSmalltalkSignature = null;
       function draw(state = controller.getState(), capturePanels = true) {
         if (disposed) return;
@@ -17683,7 +17848,7 @@
         const smallInput = host.querySelector?.('#kt-smalltalk-input'), smallFocused = smallInput && host.ownerDocument?.activeElement === smallInput;
         const smallSelection = smallFocused ? [smallInput.selectionStart, smallInput.selectionEnd] : null;
         const input = host.querySelector?.('#kt-release-input'), focused = !!input && host.ownerDocument?.activeElement === input;
-        if (input) draft = input.value;
+        if (input) { draft = input.value; composerHeight = input.style?.height || ''; composerScrollTop = input.scrollTop || 0; }
         const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
         const activeSuggestion = host.ownerDocument?.activeElement?.dataset;
         const suggestionFocus = activeSuggestion?.releaseSuggestion ? { id: activeSuggestion.releaseSuggestion, task: activeSuggestion.releaseTask, version: activeSuggestion.releaseVersion } : null;
@@ -17720,11 +17885,13 @@
         if (noticeFocus >= 0 && nextNotice) (sameNotice && nextNotice.open ? nextNotice.querySelectorAll('summary,[tabindex],button')[noticeFocus] : nextNotice.querySelector('summary'))?.focus?.({ preventScroll: true });
         if (sameNotice && nextNotice?.open) nextNotice.querySelector('.ktr-header-notice-body').scrollTop = noticeTop;
         const nextInput = host.querySelector?.('#kt-release-input');
-        if (nextInput) nextInput.value = draft;
+        if (nextInput) { nextInput.value = draft; if (nextInput.style) nextInput.style.height = composerHeight; }
         if (toolbarFocus) host.querySelector(toolbarFocus === 'header-more' ? '.ktr-more>summary' : '[data-release-action="' + toolbarFocus + '"]')?.focus({ preventScroll: true });
         const nextSmall=host.querySelector?.('#kt-smalltalk-input');
         if(smallFocused&&nextSmall&&!nextSmall.disabled){nextSmall.focus({preventScroll:true});nextSmall.setSelectionRange?.(...smallSelection);}
         if (focused && nextInput && !nextInput.disabled) { nextInput.focus({ preventScroll: true }); if (selection && typeof nextInput.setSelectionRange === 'function') nextInput.setSelectionRange(...selection); }
+        // Restore scrolling after focus/selection, which can scroll the textarea.
+        if (nextInput) nextInput.scrollTop = composerScrollTop;
         if (suggestionFocus) {
           const checkbox = Array.from(host.querySelectorAll?.('[data-release-suggestion]') || []).find(el => el.dataset.releaseSuggestion === suggestionFocus.id && el.dataset.releaseTask === suggestionFocus.task && el.dataset.releaseVersion === suggestionFocus.version);
           if (checkbox && !checkbox.disabled) checkbox.focus?.({ preventScroll: true });
@@ -17764,11 +17931,15 @@
         if (next?.open) { const message = next.querySelector('.ktr-history-status-message'); if (message) message.scrollTop = scrollTop; }
       }
       function updateDraftGuard() {
-        const pending = draftPending({ draft, smalltalk: options.smalltalk, sending: sending || switching });
-        host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { el.disabled = el.dataset.releaseBaseDisabled === 'true' || pending; });
-        host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
         const state = controller.getState();
-        host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || switching || !!selectedRunId || state.phase !== 'proposal' || state.proposalPending || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
+        const pending = draftPending({ draft, smalltalk: options.smalltalk, sending: sending || switching });
+        host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { const conn=connectionOf(options); const base=el.dataset.releaseAction==='adopt' && state.phase==='proposal' ? !!state.proposalPending || workspace.questions(state.proposal,state.answers).length>0 || conn.connected===false || conn.available===false || conn.canPlan===false || conn.canCreate===false : el.dataset.releaseBaseDisabled === 'true'; el.disabled = base || pending || !!state.responseRecovery || (el.dataset.releaseAction === 'adopt' && workspace.hasProposalFeedback(state)); });
+        host.querySelectorAll?.('[data-release-draft-note]').forEach(el => { el.hidden = !pending; });
+        const sendButton = host.querySelector?.('[data-release-action="send"]');
+        if (sendButton) { sendButton.disabled = !canSend(); sendButton.textContent = proposalFeedbackPending(state) ? 'まとめて送信' : '送信'; }
+        const purposeHint = host.querySelector?.('.ktr-request-purpose'); if(purposeHint)purposeHint.hidden=proposalFeedbackPending(state);
+        const priceHint = host.querySelector?.('.ktr-compose-actions>.ktr-note'); if(priceHint)priceHint.textContent=composerHint(state,{historical:!!selectedRunId},connectionOf(options));
+        host.querySelectorAll?.('[data-release-suggestion]').forEach(el => { el.disabled = sending || switching || !!selectedRunId || state.phase !== 'proposal' || !!state.responseRecovery || Number(el.dataset.releaseTask) !== state.taskId || Number(el.dataset.releaseVersion) !== state.version; });
       }
       function setDraft(value) {
         if (disposed) return false;
@@ -17780,40 +17951,53 @@
         if (changed) for (const listener of draftListeners) listener(draft);
         return changed;
       }
-      function inputChanged(event) { if(event.target?.dataset?.businessInput){controller.setBusinessDraft(event.target.dataset.businessInput,event.target.value);return;} if(event.target?.id==='kt-smalltalk-input'){options.smalltalk?.setDraft(event.target.value);return;} if (event.target?.id === 'kt-release-input') setDraft(event.target.value); }
-      function canSend(purpose = controller.getState().requestPurpose) {
+      function inputChanged(event) { if(event.target?.dataset?.releaseDecision){ const el=event.target; if(!disposed && !sending && !switching && !selectedRunId && !el.disabled)controller.setDecisionDraft(el.dataset.releaseDecision,el.value,{taskId:Number(el.dataset.releaseTask),version:Number(el.dataset.releaseVersion)}); return; } if(event.target?.dataset?.businessInput){controller.setBusinessDraft(event.target.dataset.businessInput,event.target.value);return;} if(event.target?.id==='kt-smalltalk-input'){options.smalltalk?.setDraft(event.target.value);return;} if (event.target?.id === 'kt-release-input') setDraft(event.target.value); }
+      function canSend(purpose = composerPurpose(controller.getState())) {
         const state = controller.getState(), conn = connectionOf(options);
-        return !disposed && !options.smalltalk?.getState().open && !options.smalltalk?.getState().pending && !sending && !switching && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'diagnosis' ? conn.canDiagnose === true && conn.canRunDiagnosis === true : purpose === 'business' ? conn.canUnderstandBusiness === true && conn.canCreateBusiness === true : purpose === 'document' ? !documentBlocked(conn) : conn.canConsult !== false);
+        return !disposed && !state.responseRecovery && !options.smalltalk?.getState().open && !options.smalltalk?.getState().pending && !sending && !switching && !busy.has(state.phase) && !state.runs?.some(run => run.id === selectedRunId) && conn.connected !== false && conn.available !== false && (purpose === 'diagnosis' ? conn.canDiagnose === true && conn.canRunDiagnosis === true : purpose === 'business' ? conn.canUnderstandBusiness === true && conn.canCreateBusiness === true : purpose === 'document' ? !documentBlocked(conn) : conn.canConsult !== false);
       }
       async function send(request, onStart, suggestionReference = null, requestOptions = null) {
+        const businessChange = requestOptions?.businessChange;
         const fromDocument = typeof request === 'string' && !suggestionReference;
         const explicitPurpose = requestOptions?.diagnosis ? 'ideation' : 'document';
-        if (!canSend(requestOptions?.diagnosis ? 'diagnosis' : requestOptions?.businessSnapshot ? 'business' : fromDocument ? explicitPurpose : controller.getState().requestPurpose)) return false;
+        if (!canSend(businessChange ? 'consultation' : requestOptions?.diagnosis ? 'diagnosis' : requestOptions?.businessSnapshot ? 'business' : fromDocument ? explicitPurpose : composerPurpose(controller.getState()))) return false;
         const input = host.querySelector?.('#kt-release-input'), fromTemplate = typeof request === 'string' && !suggestionReference;
-        const value = String(suggestionReference ? workspace.suggestionRequest(controller.getState()) : fromTemplate ? request : input?.value ?? draft).trim();
+        const freeText = String(input?.value ?? draft);
+        const current = controller.getState();
+        if (!businessChange && !fromTemplate && !suggestionReference && proposalFeedbackPending(current)) suggestionReference = { taskId:current.taskId, version:current.version };
+        if (suggestionReference) suggestionReference = { ...suggestionReference, text:freeText };
+        const value = String(businessChange ? '選択した変更希望で仮案を相談してください。' : suggestionReference ? workspace.proposalFeedbackRequest(current, freeText) : fromTemplate ? request : freeText).trim();
         if (!value) return false;
         sending = true; updateDraftGuard();
-        let cleared = false, sentTaskId = null;
-        const restoreInput = () => {
+        let cleared = false, businessCleared = false, sentTaskId = null, previousMessages = null;
+        const restoreUnsentInput = () => {
+          // Once accepted into the conversation, a sent message is not a draft.
+          if (previousMessages && controller.getState().messages?.some(message => message.role === 'user' && !previousMessages.has(message.id))) return;
           const activeInput = host.querySelector?.('#kt-release-input');
+          if (businessCleared && !disposed && controller.getState().taskId === sentTaskId && !controller.getBusinessDraft(businessChange.inputId)) controller.setBusinessDraft(businessChange.inputId,businessChange.text);
           if (!cleared || disposed || controller.getState().taskId !== sentTaskId || String(activeInput?.value ?? draft).trim()) return;
-          setDraft(value);
+          setDraft(freeText);
         };
         try {
           if (requestOptions?.signal?.aborted) return false;
           if (typeof options.beforeSend === 'function' && await options.beforeSend() === false) return false;
           if (requestOptions?.signal?.aborted) return false;
           const conn = connectionOf(options);
-          if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (requestOptions?.diagnosis ? conn.canDiagnose !== true || conn.canRunDiagnosis !== true : requestOptions?.businessSnapshot ? conn.canUnderstandBusiness !== true || conn.canCreateBusiness !== true : (fromTemplate ? explicitPurpose : controller.getState().requestPurpose) === 'document' ? documentBlocked(conn) : conn.canConsult === false)) return false;
+          if (disposed || busy.has(controller.getState().phase) || conn.connected === false || conn.available === false || (requestOptions?.diagnosis ? conn.canDiagnose !== true || conn.canRunDiagnosis !== true : requestOptions?.businessSnapshot ? conn.canUnderstandBusiness !== true || conn.canCreateBusiness !== true : (fromTemplate ? explicitPurpose : composerPurpose(controller.getState())) === 'document' ? documentBlocked(conn) : conn.canConsult === false)) return false;
+          if (!fromTemplate && String(host.querySelector?.('#kt-release-input')?.value ?? draft) !== freeText) return false;
+          if (businessChange?.inputId && controller.getBusinessDraft(businessChange.inputId) !== businessChange.text) return false;
+          if (businessChange && (connectionOf(options).canConsultBusiness !== true || !controller.prepareBusinessChange(businessChange.id, businessChange.text, businessChange.relationToHypothesis))) return false;
           if (suggestionReference && (controller.getState().taskId !== suggestionReference.taskId || controller.getState().version !== suggestionReference.version)) return false;
-          if (suggestionReference && String(host.querySelector?.('#kt-release-input')?.value ?? draft).trim()) return false;
-          if (!fromTemplate) { cleared = true; sentTaskId = controller.getState().taskId; setDraft(''); }
+          sentTaskId = controller.getState().taskId;
+          previousMessages = new Set((controller.getState().messages || []).map(message => message.id));
+          if (businessChange?.inputId) { businessCleared = true; controller.setBusinessDraft(businessChange.inputId,''); }
+          if (!fromTemplate && (!businessChange || businessChange.fromComposer)) { cleared = true; setDraft(''); }
           selectedRunId = null; notice = '';
           onStart?.();
-          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, fromTemplate ? { ...requestOptions, requestPurpose: explicitPurpose } : undefined);
-          if (sent === false) restoreInput();
+          const sent = suggestionReference ? await controller.updateSuggestions(suggestionReference) : await controller.send(value, businessChange ? {requestPurpose:'consultation',composerDraft:businessChange.fromComposer?freeText:null} : fromTemplate ? { ...requestOptions, requestPurpose: explicitPurpose } : undefined);
+          if (sent === false) restoreUnsentInput();
           return sent !== false;
-        } catch (error) { restoreInput(); throw error; } finally { sending = false; draw(); }
+        } catch (error) { restoreUnsentInput(); throw error; } finally { sending = false; draw(); }
       }
       async function act(action, id, target = {}) {
         if (disposed || switching) return;
@@ -17848,10 +18032,11 @@
           if(action==='business-select')return controller.selectBusinessChange(id,!state.businessSelectedIds.includes(id));
           if(action==='business-record'){const kind=target.dataset.businessKind, status=target.dataset.businessState||'recorded';const raw=controller.getBusinessDraft(id);const q=(typeof KTBusinessConsultationView!=='undefined'?KTBusinessConsultationView:require('./release-business-consultation-view.js').KTBusinessConsultationView).questions(state).find(x=>x.questionId===id);const value=raw.trim()||(['unknown','deferred'].includes(status)?q?.text:'');if(!value){notice='保存する回答を入力してください。';draw();return;}if(controller.recordBusiness({kind,state:status,text:value,relationToHypothesis:controller.getBusinessDraft('relation:'+id)||'supplements',sourceQuestionRef:q?{analysisId:state.businessContext.analysisId,questionId:id}:null, supersedes:target.dataset.businessSupersedes||null})){controller.setBusinessDraft(id,'');}return;}
           if(action==='business-draft'){const d=state.businessResult?.statementDrafts[Number(id)];if(d)return controller.recordBusiness({...d,state:'recorded',origin:'user_message_confirmed'});return;}
-          if(action==='business-send'){if(connectionOf(options).canConsultBusiness!==true){notice='対応するAIサービスへの更新が必要です。';draw();return;}if(state.businessMode==='improve'){if(draft.trim()){notice='相談欄の入力は変更希望に自動追加されません。先に回答・変更希望として保存するか、業務の確認に戻って送信してください。';draw();return;}setDraft('選択した変更希望で仮案を相談してください。');}return send();}
+          if(action==='business-consult-change'){if(connectionOf(options).canConsultBusiness!==true||!canSend('consultation'))return; const inputId=target.dataset.businessInputId; const text=inputId?controller.getBusinessDraft(inputId):''; if(inputId&&!text.trim())return; return send(undefined,undefined,null,{businessChange:{id,inputId,text,relationToHypothesis:inputId?controller.getBusinessDraft('relation:'+inputId)||'supplements':undefined}});}
+          if(action==='business-send'){if(connectionOf(options).canConsultBusiness!==true)return; return state.businessMode==='improve'?send(undefined,undefined,null,{businessChange:{text:String(host.querySelector?.('#kt-release-input')?.value??draft),fromComposer:true}}):send();}
           return;
         }
-        if (action === 'send') {if(state.businessContext&&connectionOf(options).canConsultBusiness!==true){notice='対応するAIサービスへの更新が必要です。';draw();return;}if(state.businessContext&&state.businessMode==='improve'){notice='変更希望を保存・選択して［選択した希望で仮案を相談］を押してください。';draw();return;}return send();}
+        if (action === 'send') {if(state.businessContext&&connectionOf(options).canConsultBusiness!==true){notice='対応するAIサービスへの更新が必要です。';draw();return;}if(state.businessContext&&state.businessMode==='improve')return send(undefined,undefined,null,{businessChange:{text:String(host.querySelector?.('#kt-release-input')?.value??draft),fromComposer:true}});return send();}
         if (action === 'diagnose') {
           if (connectionOf(options).canDiagnose !== true) return;
           return send('このアプリの設定と登録済みJavaScriptを診断してください。確認が必要な点と、任意の改善案を分けてください。', null, null, { diagnosis: true, consultationTarget: null });
@@ -17900,7 +18085,7 @@
           }
           draw(); return;
         }
-        if (action === 'answer') { controller.setRequestPurpose('consultation'); setDraft(target.dataset?.releaseAnswer || ''); host.querySelector?.('#kt-release-input')?.focus?.(); return; }
+        if (action === 'answer') { if(sending || selectedRunId)return; return controller.setDecisionDraft(id,target.dataset?.releaseAnswer || '',{taskId:Number(target.dataset?.releaseTask),version:Number(target.dataset?.releaseVersion)}); }
         if (action === 'new-task') {
           if (sending || busy.has(state.phase)) return;
           try {
@@ -17922,7 +18107,7 @@
         if (action === 'reprepare') return controller.reprepare();
         if (action === 'recheck-apply') return controller.recheckApply(id);
         if (action === 'recheck-rollback') return controller.recheckRollback(id);
-        if(action==='recover-response'){const original=state.responseRecovery?.action==='send'?state.responseRecovery.args?.[0]:null,before=draft;const ok=await controller.recoverResponse();if(ok&&typeof original==='string'&&draft===before&&draft.trim()===original.trim())setDraft('');return ok;}
+        if(action==='recover-response')return controller.recoverResponse();
         if(action==='discard-response-recovery')return controller.discardResponseRecovery();
         if (['adopt', 'resume', 'apply', 'cancel'].includes(action)) { notice = ''; return controller[action](); }
         if (action === 'copy-code' || action === 'download-code') {
@@ -17978,7 +18163,7 @@
         if (!target || target.disabled) return;
         event.preventDefault?.();
         if (target.dataset.releaseAction === 'close-notice') { closeNotice(); return; }
-        try { await act(target.dataset.releaseAction, target.dataset.releaseId, target); } catch (error) { notice = error?.message || '操作を完了できませんでした。'; draw(); }
+        try { await act(target.dataset.releaseAction, target.dataset.releaseId, target); } catch (error) { notice = publicErrorMessage(error); draw(); }
       }
       function suggestionChanged(event) {
         const target = event.target;
@@ -17993,36 +18178,53 @@
         if (!target?.dataset?.releaseSuggestion || target.disabled || disposed || sending || switching || selectedRunId) return;
         controller.selectSuggestion(target.dataset.releaseSuggestion, target.checked === true, { taskId: Number(target.dataset.releaseTask), version: Number(target.dataset.releaseVersion) });
       }
-      function keydown(event) { if(event.target?.id==='kt-smalltalk-input'&&event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault?.();sendSmalltalk();return;} if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); act('send').catch(error => { notice = error.message; draw(); }); } }
+      function keydown(event) { if(event.target?.id==='kt-smalltalk-input'&&event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault?.();sendSmalltalk();return;} if (event.key === 'Escape' && event.target?.closest?.('.ktr-header-notice')) { event.preventDefault?.(); closeNotice(); return; } if (event.target?.id === 'kt-release-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault?.(); act('send').catch(error => { notice = publicErrorMessage(error); draw(); }); } }
       function toggled(event) { const key = event.target?.dataset?.releasePanel; if (key) { if (event.target.open) expanded.add(key); else expanded.delete(key); } }
       host.addEventListener('click', clicked);
       host.addEventListener('input', inputChanged);
       host.addEventListener('change', suggestionChanged);
       host.addEventListener('keydown', keydown);
       host.addEventListener('toggle', toggled, true);
-      const unsubscribe = controller.subscribe(draw);
+      const unsubscribe = controller.subscribe((state, change) => {
+        if (typeof change?.decisionDraftId === 'string') {
+          const id = change.decisionDraftId, value = state.decisionDrafts?.[id]?.answer || '';
+          const field = Array.from(host.querySelectorAll?.('[data-release-decision]') || []).find(el => el.dataset.releaseDecision === id);
+          if (field && field.value !== value) field.value = value;
+          host.querySelectorAll?.('[data-release-action="answer"]').forEach(el => { if (el.dataset.releaseId === id) el.setAttribute('aria-pressed', String(value === el.dataset.releaseAnswer)); });
+          updateDraftGuard(); return;
+        }
+        if (typeof change?.businessDraftId === 'string') {
+          // Draft edits still notify autosave, without rebuilding the workflow and inputs.
+          const field = Array.from(host.querySelectorAll?.('[data-business-input]') || []).find(el => el.dataset.businessInput === change.businessDraftId);
+          const value = controller.getBusinessDraft(change.businessDraftId);
+          if (field && field.value !== value) field.value = value;
+          return;
+        }
+        draw(state);
+      });
       draw();
       return { updateHistoryStatus, newTask: () => act('new-task'), canSwitchSession() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !busy.has(controller.getState().phase); }, resetDisplay() { if (disposed) return; selectedRunId = null; notice = ''; expanded.clear(); clearWorkflowPositions(); draw(undefined,false); }, getDraft: () => String(host.querySelector?.('#kt-release-input')?.value ?? draft), setDraft, subscribeDraft(fn) { draftListeners.add(fn); return () => draftListeners.delete(fn); }, canRequestDocument: (operation = 'document') => canSend(operation), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { if(options.smalltalk?.getState().open)options.smalltalk.close(); const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { setDraft(text); } input?.focus?.(); }, dispose() { disposed = true; overviewControls?.dispose(); displayListeners.clear(); draftListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
     }
     const styles = `
       .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}
       .ktr-consult-target{padding:8px;border:1px solid var(--ktr-line);border-radius:6px;margin:8px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.ktr-consult-target small{flex-basis:100%;color:var(--ktr-muted)}
-      .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:clamp(14px,1.5%,20px);overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-detail-pane{min-width:0;min-height:0;border-top:1px solid var(--ktr-line);padding-top:20px;margin-top:24px;display:flex;flex-direction:column}.ktr-current{min-height:0;scrollbar-gutter:stable}.ktr-pane-tools{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:6px;flex:none;margin-bottom:12px}.ktr-pane-tools:empty{display:none}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.ktr-connection-status{font-size:12px;color:var(--ktr-muted);margin-right:4px}.ktr-workspace .ktr-more{margin:0;position:relative}.ktr-workspace .ktr-more>summary{font-size:12px;padding:6px 10px;border:1px solid var(--ktr-line);border-radius:6px}.ktr-more-content{position:absolute;right:0;top:calc(100% + 6px);z-index:6;min-width:190px;max-width:calc(100vw - 48px);padding:8px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);box-shadow:0 6px 20px #0002}.ktr-more-content button{width:100%;text-align:left}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
+      .ktr-workspace{flex:0 0 auto;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0;padding:10px;overflow:hidden;container:ktr-workspace / inline-size}.ktr-content{display:flex;flex-direction:column;width:100%;height:100%;max-width:none;min-width:0;min-height:0;margin:0 auto}.ktr-header{flex:none}.ktr-layout{flex:1;min-height:0;min-width:0;overflow:auto}.ktr-conversation,.ktr-current{min-width:0;min-height:0}.ktr-conversation{display:flex;flex-direction:column}.ktr-workspace .ktr-pane-title{font-size:16px;margin:0 0 12px;flex:none}.ktr-chat-log{flex:1 1 auto;min-height:180px;max-height:42dvh;overflow:auto;scrollbar-gutter:stable}.ktr-detail-pane{min-width:0;min-height:0;border-top:1px solid var(--ktr-line);padding-top:20px;margin-top:24px;display:flex;flex-direction:column}.ktr-current{min-height:0;scrollbar-gutter:stable}.ktr-pane-tools{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:6px;flex:none;margin-bottom:12px}.ktr-pane-tools:empty{display:none}.ktr-empty-chat{color:var(--ktr-muted)}.ktr-header-tools{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.ktr-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.ktr-connection-status{font-size:12px;color:var(--ktr-muted);margin-right:4px}.ktr-workspace .ktr-more{margin:0;position:relative}.ktr-workspace .ktr-more>summary{font-size:12px;padding:6px 10px;border:1px solid var(--ktr-line);border-radius:6px}.ktr-more-content{position:absolute;right:0;top:calc(100% + 6px);z-index:6;min-width:190px;max-width:calc(100vw - 48px);padding:8px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);box-shadow:0 6px 20px #0002}.ktr-more-content button{width:100%;text-align:left}.ktr-workspace .ktr-tools button{font-size:12px;padding:6px 10px}
       .ktr-workspace *,.kt-release-dialog *{box-sizing:border-box}.ktr-workspace h2,.kt-release-dialog h2{font-size:20px;line-height:1.4;margin:0 0 14px}.ktr-workspace h3,.kt-release-dialog h3{font-size:15px;margin:20px 0 8px}.ktr-workspace p,.kt-release-dialog p{margin:8px 0 14px;white-space:pre-wrap}.ktr-workspace ul,.ktr-workspace ol{margin:8px 0 18px;padding-left:24px}.ktr-workspace li{margin:7px 0}
       .ktr-heading-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-history-status{font-size:11px;color:var(--ktr-muted)}.ktr-history-status[data-release-history-state="error"],.ktr-history-status[data-release-history-state="unavailable"]{color:var(--ktr-danger)}.ktr-workspace .ktr-history-status-detail{margin:0;font-size:11px}.ktr-workspace .ktr-history-status-detail>summary{padding:0}.ktr-history-status-message{position:absolute;z-index:5;left:0;top:calc(100% - 8px);width:min(420px,100%);max-height:30dvh;overflow:auto;padding:12px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);box-shadow:0 6px 20px #0002}.ktr-history-status-message>p{margin:0;font-size:12px}
-      .ktr-heading{min-width:0}.ktr-title-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-workspace .ktr-header-notice{margin:0;min-width:0;max-width:100%;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-header-notice>summary{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;list-style:none}.ktr-header-notice>summary::-webkit-details-marker{display:none}.ktr-header-notice>summary:after{content:'▾';color:var(--ktr-muted)}.ktr-header-notice[open]>summary:after{content:'▴'}.ktr-header-notice>summary [role="alert"]{color:var(--ktr-danger)}.ktr-header-notice>summary small{font-size:inherit;white-space:nowrap}
+      .ktr-heading{min-width:0;display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap}.ktr-title-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.ktr-workspace .ktr-header-notice{margin:0;min-width:0;max-width:100%;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-header-notice>summary{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;list-style:none}.ktr-header-notice>summary::-webkit-details-marker{display:none}.ktr-header-notice>summary:after{content:'▾';color:var(--ktr-muted)}.ktr-header-notice[open]>summary:after{content:'▴'}.ktr-header-notice>summary [role="alert"]{color:var(--ktr-danger)}.ktr-header-notice>summary small{font-size:inherit;white-space:nowrap}
       .ktr-header-notice-body{position:absolute;z-index:5;top:calc(100% - 8px);left:0;width:min(520px,100%);max-height:35dvh;overflow:auto;padding:14px;border:1px solid var(--ktr-line);border-radius:8px;background:var(--ktr-paper);color:var(--ktr-text);box-shadow:0 6px 20px #0002;font-size:13px;overflow-wrap:anywhere}.ktr-header-notice-body section+section{border-top:1px solid var(--ktr-line);padding-top:8px}.ktr-header-notice-body .ktr-error{max-height:none;padding:0;border:0;background:transparent;margin:0 0 12px}.ktr-header-notice-body button{font-size:12px}
-      .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:10px;margin-bottom:14px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
+      .ktr-header{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--ktr-line);padding-bottom:6px;margin-bottom:8px}.ktr-header strong{font-size:16px}.ktr-environment{display:block;font-size:12px;color:var(--ktr-muted)}.ktr-section{padding-bottom:12px}.ktr-lead{font-size:15px}.ktr-note{font-size:12px;color:var(--ktr-muted)}
       .ktr-actions,.ktr-compose-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0 8px}.ktr-compose-actions{justify-content:space-between}.ktr-workspace button,.kt-release-dialog button{font:inherit;line-height:1.4;padding:7px 12px;border:1px solid var(--ktr-line);border-radius:6px;cursor:pointer;background:var(--ktr-paper);color:var(--ktr-text);max-width:100%;overflow-wrap:anywhere}.ktr-workspace button.ktr-primary,.kt-release-dialog button.ktr-primary{color:#fff;background:var(--ktr-primary);border-color:var(--ktr-primary);font-weight:600}.ktr-workspace button:disabled,.kt-release-dialog button:disabled{opacity:.5;cursor:default}.ktr-workspace button:focus-visible,.ktr-workspace textarea:focus-visible,.ktr-workspace summary:focus-visible,.kt-release-dialog :is(button,textarea,select,summary):focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-workspace button:hover:not(:disabled),.kt-release-dialog button:hover:not(:disabled){background:var(--ktr-soft)}.ktr-workspace button.ktr-primary:hover:not(:disabled),.kt-release-dialog button.ktr-primary:hover:not(:disabled),.kt-release-dialog [data-document-create]:hover:not(:disabled){background:#204e9c}.ktr-composer:focus-within{border-color:var(--ktr-accent)}
       .ktr-request-purpose{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px}
-      .ktr-conversation-tools{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;flex:none;margin-bottom:8px}.ktr-conversation-tools>.ktr-chat-mode{margin:0;flex:1}.ktr-conversation-tools>button{font-size:12px;padding:6px 10px}.ktr-compose-tools{display:flex;align-items:center;flex-wrap:wrap;gap:6px;flex:none;margin:6px 0 2px}.ktr-workspace button.ktr-entry{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;padding:6px 8px;border-radius:6px;font-size:12px;line-height:1.5;text-align:left}.ktr-entry-title{font-weight:550}.ktr-entry-price{color:var(--ktr-muted);font-size:11px;white-space:nowrap}.ktr-entry-accessible{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-workspace details.ktr-entry-help{margin:0;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-entry-help>summary{padding:5px 2px;white-space:nowrap}.ktr-entry-help[open]{flex-basis:100%}.ktr-entry-help dl{margin:4px 0 6px;padding:10px 12px;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;max-height:210px;overflow:auto}.ktr-entry-help dt{font-weight:600;color:var(--ktr-text)}.ktr-entry-help dd{margin:2px 0 10px}.ktr-entry-help dd:last-child{margin-bottom:0}
-      .ktr-chat-mode{display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex:none;margin:0 0 12px}.ktr-workspace .ktr-chat-mode button{padding:6px 12px;border-color:transparent;border-radius:7px}.ktr-workspace .ktr-chat-mode button[aria-pressed="true"]{background:var(--ktr-soft);border-color:var(--ktr-line);color:var(--ktr-accent);font-weight:600}.ktr-chat-mode .ktr-note{margin:0 0 0 8px;font-size:12px}
+      .ktr-conversation-tools{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;flex:none;margin-bottom:4px}.ktr-conversation-tools>.ktr-chat-mode{margin:0;flex:1}.ktr-conversation-tools>button{font-size:12px;padding:6px 10px}.ktr-compose-tools{display:flex;align-items:center;flex-wrap:wrap;gap:6px;flex:none;margin:2px 0}.ktr-workspace button.ktr-entry{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;padding:5px 8px;border-radius:6px;font-size:12px;line-height:1.5;text-align:left}.ktr-entry-title{font-weight:550}.ktr-entry-price{color:var(--ktr-muted);font-size:11px;white-space:nowrap}.ktr-entry-accessible{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-workspace details.ktr-entry-help{margin:0;font-size:12px;color:var(--ktr-muted)}.ktr-workspace .ktr-entry-help>summary{padding:5px 2px;white-space:nowrap}.ktr-entry-help[open]{flex-basis:100%}.ktr-entry-help dl{margin:4px 0 6px;padding:10px 12px;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;max-height:210px;overflow:auto}.ktr-entry-help dt{font-weight:600;color:var(--ktr-text)}.ktr-entry-help dd{margin:2px 0 10px}.ktr-entry-help dd:last-child{margin-bottom:0}
+      .ktr-chat-mode{display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex:none;margin:0 0 12px}.ktr-workspace .ktr-chat-mode button{padding:5px 12px;border-color:transparent;border-radius:7px}.ktr-workspace .ktr-chat-mode button[aria-pressed="true"]{background:var(--ktr-soft);border-color:var(--ktr-line);color:var(--ktr-accent);font-weight:600}.ktr-chat-mode .ktr-note{margin:0 0 0 8px;font-size:12px}
       .ktr-business-consultation{overflow-wrap:anywhere}.ktr-business-consultation textarea{display:block;width:100%;box-sizing:border-box;min-height:70px;resize:vertical;color:var(--ktr-text);background:var(--ktr-paper);border:1px solid var(--ktr-line);border-radius:6px;padding:8px;font:inherit}.ktr-business-consultation fieldset{min-width:0;margin:14px 0;padding:10px;border:1px solid var(--ktr-line);border-radius:6px}.ktr-business-consultation legend{max-width:100%;font-weight:600}.ktr-business-consultation button{margin:4px 4px 4px 0}.ktr-business-consultation pre{white-space:pre-wrap;max-height:260px;overflow:auto}
-      .ktr-composer{flex:none;margin:6px 0 0;padding:8px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:64px;max-height:120px;resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:6px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:7px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid var(--ktr-danger);background:color-mix(in srgb,var(--ktr-danger) 9%,var(--ktr-paper));color:var(--ktr-danger)}.ktr-reasons{color:var(--ktr-danger)}.ktr-progress{padding:0 0 24px}
+      .ktr-composer{flex:none;margin:4px 0 0;padding:6px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:12px;background:var(--ktr-paper)}.ktr-composer label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ktr-composer textarea{display:block;width:100%;min-height:112px;max-height:max(112px,42dvh);resize:vertical;padding:6px;font:inherit;border:0;border-radius:5px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-composer .ktr-compose-actions{margin:2px 0 0;gap:6px}.ktr-composer .ktr-compose-actions button{padding:5px 14px}.ktr-confirmations,.ktr-question,.ktr-notice{padding:14px 16px;border:1px solid var(--ktr-line);border-radius:7px;background:var(--ktr-soft);margin:16px 0}.ktr-confirmations h3,.ktr-question h3{margin-top:0}.ktr-error{max-height:24dvh;overflow:auto;padding:12px 16px;border-left:3px solid var(--ktr-danger);background:color-mix(in srgb,var(--ktr-danger) 9%,var(--ktr-paper));color:var(--ktr-danger)}.ktr-reasons{color:var(--ktr-danger)}.ktr-progress{padding:0 0 24px}
       .ktr-support{border-top:1px solid var(--ktr-line);margin-top:22px;padding-top:10px}.ktr-workspace .ktr-support-heading{display:none;font-size:15px;margin:0 0 12px;color:var(--ktr-muted)}.ktr-workspace details,.kt-release-dialog details{margin:8px 0}.ktr-workspace summary,.kt-release-dialog summary{cursor:pointer;padding:9px 0;color:var(--ktr-muted)}.ktr-workspace details[open]>summary,.kt-release-dialog details[open]>summary{font-weight:600;color:var(--ktr-text)}.ktr-workspace .ktr-messages{list-style:none;padding:0 8px 0 0;margin:0;display:flex;flex-direction:column;gap:20px}.ktr-workspace .ktr-message{max-width:94%;margin:0;padding:10px 12px;align-self:flex-start}.ktr-workspace .ktr-message.ktr-user{align-self:flex-end;padding:12px 16px;background:color-mix(in srgb,var(--ktr-accent) 9%,var(--ktr-paper));border-radius:14px 14px 4px 14px}.ktr-message p{margin:6px 0 0;line-height:1.75}.ktr-speaker{font-size:12px;font-weight:600;color:var(--ktr-muted)}.ktr-code{padding:12px 0 20px}.ktr-code pre,.ktr-setting-values,.ktr-fact-value{white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,monospace;background:var(--ktr-soft);border:1px solid var(--ktr-line);border-radius:6px;padding:14px}
       .kt-release-dialog{width:min(640px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:24px;margin:auto;border:1px solid var(--ktr-line);border-radius:10px;overflow:auto;overscroll-behavior:contain}.kt-release-dialog.ktr-dialog-wide{width:min(960px,calc(100vw - 32px))}.kt-release-dialog::backdrop{background:rgba(15,23,42,.38)}.ktr-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.kt-release-dialog .ktr-dialog-header h2{font-size:20px;margin:0}.kt-release-dialog [data-close]{flex:none;white-space:nowrap}.kt-release-dialog :is(textarea,select){font:inherit;max-width:100%;min-width:0;padding:9px 10px;border:1px solid var(--kt-input-line,#c2cddd);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.kt-release-dialog textarea{width:100%}.kt-release-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
       .ktr-template-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px;border:0;padding:0;margin:20px 0}.ktr-template-grid legend{font-weight:650;margin-bottom:10px}.kt-release-dialog .ktr-template-choice{display:flex;align-items:flex-start;gap:10px;padding:14px;margin:0;border:1px solid var(--ktr-line);border-radius:8px;cursor:pointer;background:var(--ktr-paper)}.ktr-template-choice:has(input:checked){border-color:var(--ktr-accent);background:var(--ktr-soft)}.ktr-template-choice input{flex:none;margin:4px 0;width:auto}.ktr-template-choice strong{display:block;margin-bottom:5px}.ktr-template-choice small{display:block;line-height:1.6;color:var(--ktr-muted)}.kt-release-dialog [data-document-create]{margin:12px 0;padding:10px 20px;color:#fff;background:var(--ktr-primary);border:1px solid var(--ktr-primary);border-radius:6px}.kt-release-dialog [data-document-create]:disabled{opacity:.5;cursor:not-allowed}.kt-release-dialog [data-offline-materials]{border-top:1px solid var(--ktr-line);padding-top:16px;margin-top:16px}.kt-release-dialog [data-document-status]{font-size:13px;color:var(--ktr-muted)}
+      .ktr-question textarea{display:block;width:100%;min-height:64px;resize:vertical;padding:8px;font:inherit;border:1px solid var(--ktr-line);border-radius:6px;color:var(--ktr-text);background:var(--ktr-paper)}.ktr-question button[aria-pressed="true"]{border-color:var(--ktr-accent);background:var(--ktr-paper);color:var(--ktr-accent);font-weight:600}
       .ktr-suggestion-choices{display:grid;gap:8px;margin:12px 0}.ktr-suggestion-choice{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border:1px solid var(--ktr-line);border-radius:8px;cursor:pointer;background:var(--ktr-paper)}.ktr-suggestion-choice:has(input:checked){border-color:var(--ktr-accent);background:var(--ktr-soft)}.ktr-suggestion-choice:has(input:disabled){cursor:default}.ktr-suggestion-choice input{flex:none;width:18px;height:18px;margin:3px 0;accent-color:var(--ktr-accent)}.ktr-suggestion-choice span{min-width:0;overflow-wrap:anywhere}.ktr-suggestion-choice input:focus-visible{outline:3px solid #83b6fb;outline-offset:3px}
       .ktr-document-navigation{margin:0 0 18px}.ktr-document-tabs{display:flex;gap:8px;flex-wrap:wrap}.ktr-workspace .ktr-document-tabs button[aria-pressed="true"]{border-color:var(--ktr-accent);background:color-mix(in srgb,var(--ktr-accent) 9%,var(--ktr-paper));color:var(--ktr-accent);font-weight:650}.ktr-document-navigation>details>ul{list-style:none;padding:0}.ktr-explanation-section{margin:24px 0;padding-bottom:8px}.ktr-explanation-section>h3{font-size:18px}.ktr-explanation-unknowns{border-left:3px solid var(--ktr-warning);padding:4px 16px;background:color-mix(in srgb,var(--ktr-warning) 9%,var(--ktr-paper))}.ktr-table-scroll{max-width:100%;overflow:auto;margin:16px 0}.ktr-table-scroll:focus-visible{outline:3px solid #83b6fb;outline-offset:2px}.ktr-explanation table,#kt-toolkit .ktr-explanation table{width:100%;min-width:360px;border-collapse:collapse;font-size:13px}.ktr-explanation th,.ktr-explanation td,#kt-toolkit .ktr-explanation th,#kt-toolkit .ktr-explanation td{text-align:left;vertical-align:top;border:1px solid var(--ktr-line);padding:9px 10px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--ktr-paper);color:var(--ktr-text);position:static;top:auto}.ktr-explanation th,#kt-toolkit .ktr-explanation th{background:var(--ktr-soft);font-weight:650}[data-release-stage="explanation"] .ktr-stage-header{background:color-mix(in srgb,var(--ktr-success) 9%,var(--ktr-paper));color:var(--ktr-success)}
       /* Workflow diagrams use acquired transitions, independently of AI stage order. */
@@ -18547,7 +18749,7 @@
       try { const result = await request(); updateUsage(result?.usage); return result; }
       catch (error) { const usage = error?.details?.error?.detail?.usage; if (usage) updateUsage(usage); throw error; }
     }
-    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation', 'discussionMetadata'].every(mark => cap.conversation?.includes(mark)));
+    const supportsRelease = (feature, cap) => !!cap?.available && (feature === KTAiClient.FEATURE_GENERATOR ? cap.verification?.includes('artifactOutcome') : feature === KTAiClient.FEATURE_PLANNER ? ['releaseWorkspace', 'formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance'].every(mark => cap.requirementOps?.includes(mark)) : ['releaseWorkspace', 'appExplanation', 'discussionMetadata', 'subtableFieldPlacement'].every(mark => cap.conversation?.includes(mark)));
     host.style.overflow = 'auto';
     host.style.height = '100%';
     let codePanel = null, codeOpen = false, codeSlot = null;
@@ -19144,6 +19346,10 @@
           --kt-warning:${C.warning};--kt-danger:${C.danger};--kt-success:${C.success};
           color-scheme:${isDarkMode ? 'dark' : 'light'};
         }
+        /* Health process arrows must contrast with the Toolkit surface in both themes.
+           Keep this scoped: other Mermaid diagrams retain their own styling. */
+        #kt-toolkit #kt-process-diagram .flowchart-link { stroke:var(--kt-accent); }
+        #kt-toolkit #kt-process-diagram marker path { fill:var(--kt-accent);stroke:var(--kt-accent); }
         /* ★レイアウト：Toolkit本体を「bar（固定）＋body（残り高さ・スクロール）」の縦flexにする。
            通常時は 85vh の確定高さを持たせ、子View が height:100% で追従できるようにする。
            （全画面時は inset:0 で高さが確定するので、子側に vh 指定は不要） */
@@ -22872,6 +23078,43 @@
     }
   }
 
+  // AND/ORバッジ + 条件は「AND/ORを除去して改行」
+  const splitConditionByLogicalOperators = (s) => {
+    const out = [];
+    let buf = '';
+    let inQuote = false;
+    const flush = () => { const t = buf.trim(); if (t) out.push({ type: 'cond', text: t }); buf = ''; };
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '"') { inQuote = !inQuote; buf += ch; continue; }
+      if (!inQuote) {
+        const rest = s.slice(i).toLowerCase();
+        if (rest.startsWith(' and ')) { flush(); out.push({ type: 'op', op: 'AND' }); i += 4; continue; }
+        if (rest.startsWith(' or ')) { flush(); out.push({ type: 'op', op: 'OR' }); i += 3; continue; }
+      }
+      buf += ch;
+    }
+    flush();
+    return out.length ? out : [{ type: 'cond', text: s }];
+  };
+  const formatConditionForDisplay = (cond, esc) => {
+    const raw = String(cond || '').trim();
+    if (!raw) return { badge: '', linesHtml: '—', linesText: '' };
+    const tokens = splitConditionByLogicalOperators(raw);
+    const ops = tokens.filter(t => t.type === 'op').map(t => t.op);
+    const hasAnd = ops.includes('AND');
+    const hasOr = ops.includes('OR');
+    let badge = '';
+    if (hasAnd && hasOr) badge = 'AND/OR';
+    else if (hasAnd) badge = 'AND';
+    else if (hasOr) badge = 'OR';
+
+    const lines = tokens.filter(t => t.type === 'cond').map(t => t.text.trim()).filter(Boolean);
+    const linesHtml = lines.length ? lines.map(esc).join('<br>') : '—';
+    const linesText = lines.join('\n');
+    return { badge, linesHtml, linesText };
+  };
+
   function renderNotificationsByType(container, data, appId) {
     if (!container) return;
 
@@ -22907,42 +23150,6 @@
       return parts.join(' / ') || '—';
     };
 
-    // AND/ORバッジ + 条件は「AND/ORを除去して改行」
-    const splitByAndOrPreserveQuotes = (s) => {
-      const out = [];
-      let buf = '';
-      let inQuote = false;
-      const flush = () => { const t = buf.trim(); if (t) out.push({ type: 'cond', text: t }); buf = ''; };
-      for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
-        if (ch === '"') { inQuote = !inQuote; buf += ch; continue; }
-        if (!inQuote) {
-          const rest = s.slice(i).toLowerCase();
-          if (rest.startsWith(' and ')) { flush(); out.push({ type: 'op', op: 'AND' }); i += 4; continue; }
-          if (rest.startsWith(' or ')) { flush(); out.push({ type: 'op', op: 'OR' }); i += 3; continue; }
-        }
-        buf += ch;
-      }
-      flush();
-      return out.length ? out : [{ type: 'cond', text: s }];
-    };
-    const parseCondForBadgeAndLines = (cond) => {
-      const raw = String(cond || '').trim();
-      if (!raw) return { badge: '', linesHtml: '—', linesText: '' };
-      const tokens = splitByAndOrPreserveQuotes(raw);
-      const ops = tokens.filter(t => t.type === 'op').map(t => t.op);
-      const hasAnd = ops.includes('AND');
-      const hasOr = ops.includes('OR');
-      let badge = '';
-      if (hasAnd && hasOr) badge = 'AND/OR';
-      else if (hasAnd) badge = 'AND';
-      else if (hasOr) badge = 'OR';
-
-      const lines = tokens.filter(t => t.type === 'cond').map(t => t.text.trim()).filter(Boolean);
-      const linesHtml = lines.length ? lines.map(esc).join('<br>') : '—';
-      const linesText = lines.join('\n');
-      return { badge, linesHtml, linesText };
-    };
     const badgeHtml = (txt) => txt ? `<span class="pill">${esc(txt)}</span>` : '—';
 
     // Relationsと同じ table()
@@ -23004,7 +23211,7 @@
     recNotifs.forEach(n => {
       const title = n?.title || '—';
       const cond = n?.filterCond || '';
-      const parsed = parseCondForBadgeAndLines(cond);
+      const parsed = formatConditionForDisplay(cond, esc);
       const to = formatTargets(n?.targets);
 
       recRowsHtml.push([esc(title), badgeHtml(parsed.badge), parsed.linesHtml, esc(to)]);
@@ -23030,7 +23237,7 @@
       const timingCode = n?.timing?.code || '—';
       const timingText = formatTiming(n?.timing);
       const cond = n?.filterCond || '';
-      const parsed = parseCondForBadgeAndLines(cond);
+      const parsed = formatConditionForDisplay(cond, esc);
       const to = formatTargets(n?.targets);
 
       remRowsHtml.push([
@@ -23116,41 +23323,6 @@
       return `${t}: ${codeText}${includeSubs ? ' (+subs)' : ''}`;
     };
 
-    // AND/ORバッジ + 条件は「AND/ORを除去して改行」(Notifications と同じ)
-    const splitByAndOrPreserveQuotes = (s) => {
-      const out = [];
-      let buf = '';
-      let inQuote = false;
-      const flush = () => { const t = buf.trim(); if (t) out.push({ type: 'cond', text: t }); buf = ''; };
-      for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
-        if (ch === '"') { inQuote = !inQuote; buf += ch; continue; }
-        if (!inQuote) {
-          const rest = s.slice(i).toLowerCase();
-          if (rest.startsWith(' and ')) { flush(); out.push({ type: 'op', op: 'AND' }); i += 4; continue; }
-          if (rest.startsWith(' or ')) { flush(); out.push({ type: 'op', op: 'OR' }); i += 3; continue; }
-        }
-        buf += ch;
-      }
-      flush();
-      return out.length ? out : [{ type: 'cond', text: s }];
-    };
-    const parseCondForBadgeAndLines = (cond) => {
-      const raw = String(cond || '').trim();
-      if (!raw) return { badge: '', linesHtml: '—', linesText: '' };
-      const tokens = splitByAndOrPreserveQuotes(raw);
-      const ops = tokens.filter(t => t.type === 'op').map(t => t.op);
-      const hasAnd = ops.includes('AND');
-      const hasOr = ops.includes('OR');
-      let badge = '';
-      if (hasAnd && hasOr) badge = 'AND/OR';
-      else if (hasAnd) badge = 'AND';
-      else if (hasOr) badge = 'OR';
-      const lines = tokens.filter(t => t.type === 'cond').map(t => t.text.trim()).filter(Boolean);
-      const linesHtml = lines.length ? lines.map(esc).join('<br>') : '—';
-      const linesText = lines.join('\n');
-      return { badge, linesHtml, linesText };
-    };
     const badgeHtml = (txt) => txt ? `<span class="pill">${esc(txt)}</span>` : '—';
 
     const table = (headers, rows, colWidths = null) => `
@@ -23231,7 +23403,7 @@
 
     recRights.forEach((rule, ridx) => {
       const condRaw = String(rule?.filterCond || '').trim();
-      const parsed = parseCondForBadgeAndLines(condRaw);
+      const parsed = formatConditionForDisplay(condRaw, esc);
       const ents = Array.isArray(rule?.entities) ? rule.entities : [];
 
       // entities が空でも “ルール自体” は見えるように1行出す

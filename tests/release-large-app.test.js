@@ -52,7 +52,7 @@ test('purpose別の出力上限を費用事前見積もりに使用、旧health�
  }
  delete lf.maxOutputTokensByPurpose;assert.equal(T.KTAiBudget.estimate({kind:'propose',ctx:{businessSnapshot:{}},limits,ctxBytes:1000}).maxOutputTokens,4000);
 });
-for(const [name,code,details,label]of [['入力','CONTEXT_TOO_LARGE',{reason:'INPUT_BYTES',bytes:270000,limit:262144},'送信する設定が入力上限'],['出力','MODEL_OUTPUT_INVALID',{error:{detail:{reason:'OUTPUT_TRUNCATED'}}},'AIの回答が出力上限で途中終了'],['形式','MODEL_OUTPUT_INVALID',{error:{detail:{reason:'INVALID_JSON'}}},'AIの応答形式を確認できません']])test(name+'の失敗理由を保存しヘッダーにも表示、自動再試行・反映なし',async()=>{
+for(const [name,code,details,label]of [['入力','CONTEXT_TOO_LARGE',{reason:'INPUT_BYTES',bytes:270000,limit:262144},'送信する設定が入力上限'],['出力','MODEL_OUTPUT_INVALID',{error:{detail:{reason:'OUTPUT_TRUNCATED'}}},'回答を完了できませんでした'],['形式','MODEL_OUTPUT_INVALID',{error:{detail:{reason:'INVALID_JSON'}}},'回答を完了できませんでした']])test(name+'の内部理由は保持し公開案内を表示、自動再試行・反映なし',async()=>{
  let calls=0;const f=WF.fixture(W,{propose:async()=>{calls++;throw Object.assign(new Error('offline failure'),{code,details});}});
  await f.controller.send('診断',{requestPurpose:'ideation',diagnosis:true});const s=f.controller.getState();
  assert.equal(calls,1);assert.equal(f.writes.length,0);assert.equal(s.error.code,code);assert.deepEqual(s.error.detail,details);assert.match(V.render(s),new RegExp(label));

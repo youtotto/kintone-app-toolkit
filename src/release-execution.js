@@ -12,25 +12,57 @@ const KTReleaseExecution = (() => {
   const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
   function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
     const toCurrent = b => b.current || currentOf(b);
-    function fileOperations(artifacts, plan) {
+    async function fileOperations(artifacts, plan, current) {
       const dependencies = {
         fields: (plan.proposedFields || []).map(f => ({ code: f.suggestedCode, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && [s.targetRef, s.spec?.fieldCode, s.spec?.temporaryId].includes(f.temporaryId))?.id })),
         statuses: (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.statusName || s.spec?.status?.name, stepId: s.id })).filter(s => s.name)
       };
-      return artifacts.flatMap(a => {
+      return (await Promise.all(artifacts.map(async a => {
         const outcome = a.result?.artifactOutcome, g = a.result?.generated || a.result;
-        if (outcome?.state !== 'ready') throw new Error('検証が終わっていないJavaScriptがあります。');
+        if (!['ready', 'unverified'].includes(outcome?.state)) throw new Error('作成が完了していないJavaScriptがあります。');
         const code = g.strategy === 'EXTEND_EXISTING_JS' ? g.body : g.code;
-        return (outcome.operations || []).map((op, i) => {
+        let registration = outcome.operations || [];
+        if (outcome.state === 'unverified') {
+          const c = (plan.customizations || []).find(c => c.customizationId === a.customizationId);
+          if (!c || !['NEW_JS_FILE', 'EXTEND_EXISTING_JS'].includes(g.strategy) || g.strategy !== c.strategy ||
+              !Array.isArray(c.platform) || !c.platform.length || new Set(c.platform).size !== c.platform.length ||
+              c.platform.some(p => !['desktop', 'mobile'].includes(p)) ||
+              (outcome.scope?.customizationId && outcome.scope.customizationId !== c.customizationId) ||
+              typeof g.targetFile !== 'string' || !g.targetFile.trim() || typeof code !== 'string' || !code.trim())
+            throw new Error('JavaScriptの本文・登録先と変更計画の対応を確認できません。');
+          const basicFailures = (a.result.verification || g.verification)?.machine?.filter(check =>
+            ['syntax', 'fields', 'events', 'security', 'patch'].includes(check.name) && check.ok === false && check.severity === 'error') || [];
+          if (basicFailures.length) throw new Error(basicFailures.map(check => check.message || check.name).join(' / '));
+          const contentHash = await hash(code);
+          if (outcome.contentHash && outcome.contentHash !== contentHash)
+            throw new Error('受け取ったJavaScriptの本文が保存時の内容と一致しません。');
+          // Old saved responses deliberately have no operations when unverified.
+          // Build registration from explicit plan targets and the saved source only;
+          // do not reinterpret behavior or claim that automatic verification passed.
+          registration = c.platform.map(targetPlatform => {
+            if (outcome.scope?.platforms && !outcome.scope.platforms.includes(targetPlatform))
+              throw new Error('JavaScriptの登録先と生成時の対象が一致しません。');
+            if (g.strategy === 'NEW_JS_FILE') return { action: 'create', targetPlatform, targetFile: g.targetFile, contentHash };
+            const candidates = (current.customize?.[targetPlatform]?.js || []).filter(f => f.type === 'FILE' && (f.file?.name || f.name) === g.targetFile);
+            const sourceId = candidates[0]?.file?.fileKey || candidates[0]?.fileKey;
+            if (!(c.existingFiles || []).some(f => f.name === g.targetFile && f.target === targetPlatform) ||
+                candidates.length !== 1 || !sourceId || !g.patch?.baseHash)
+              throw new Error('置き換える既存JavaScriptを一意に確認できません。');
+            return { action: 'replace', targetPlatform, targetFile: g.targetFile, contentHash,
+              baseHash: g.patch.baseHash, targetExistingFileId: sourceId };
+          });
+        }
+        return registration.map((op, i) => {
           if (!['create', 'replace', 'unchanged'].includes(op.action)) throw new Error('JavaScriptの登録方法を確認できません。');
           return ({
           id: a.customizationId + '-' + i, customizationId: a.customizationId, kind: op.action === 'create' ? 'ADD_FILE' : 'REPLACE_FILE',
           target: op.targetPlatform, name: op.targetFile, code, contentHash: op.contentHash, baseHash: op.baseHash || null,
           sourceId: op.targetExistingFileId || null, expectedUnchanged: op.action === 'unchanged', summary: a.title,
-          verification: { accepted: true, contentHash: op.contentHash },
+          // accepted authorizes preparation of this exact body, not a passed behavior test.
+          verification: { accepted: true, state: outcome.state, contentHash: op.contentHash },
           dependsOn: dependencies
         }); });
-      });
+      }))).flat();
     }
     function fileIdentityReasons(operations, current) {
       return operations.filter(op => op.kind === 'REPLACE_FILE').flatMap(op => {
@@ -75,7 +107,7 @@ const KTReleaseExecution = (() => {
       return { steps: ordered, ids: js.map(s => s.id) };
     }
     async function prepare({ plan, artifacts, base, previousBase = null }) {
-      const current = toCurrent(base), operations = fileOperations(artifacts, plan);
+      const current = toCurrent(base), operations = await fileOperations(artifacts, plan, current);
       if (previousBase && artifacts.length) {
         const verificationBasis = value => ({ fields: value.fields?.properties || {},
           status: { enable: value.status?.enable ?? false, states: value.status?.states ?? null, actions: value.status?.actions ?? null },

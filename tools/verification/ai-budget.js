@@ -14,7 +14,7 @@
     const FEATURE_OF = Object.freeze({ ask: 'assistant-qa', propose: 'assistant-qa', plan: 'change-planner', generate: 'customization-generator' });
     /** feature ごとのモデル（health の limits が無い古い Gateway のとき。staging の値） */
     const DEFAULT_MODEL = Object.freeze({ 'assistant-qa': 'gpt-6.1-sol', 'change-planner': 'gpt-6.1-sol', 'customization-generator': 'gpt-6.1-sol' });
-    /** 出力の上限（staging の値: 会話 4,000・計画 48,000・生成 32,000）。health の limits.features[].maxOutputTokens があればその値（Gateway が実際に使う上限） */
+    /** 旧healthだけで使う検証設定の互換値。本番の実効値とは異なる。新healthのAPI上限と費用計算用boundを区別する。 */
     const OUTPUT_LIMITS = Object.freeze({ 'assistant-qa': 4000, 'change-planner': 48000, 'customization-generator': 32000 });
     /** 1 回の要求の中の AI の呼び出しの最大（会話・仮案 1・計画の全体 1・差分 2（差分 → 全体）・生成 1 ＋ 修復 2）。health の maxAiCalls があれば大きい方（計画の全体は 1 のまま） */
     const MAX_CALLS = Object.freeze({ ask: 1, propose: 1, 'plan-full': 1, 'plan-patch': 2, generate: 3 });
@@ -88,10 +88,18 @@
       if (!priceOf(model)) return { ok: false, reason: 'unknown-model', kind, feature, model: String(model || '').slice(0, 60) };
       const serviceTier = requestServiceTierOf(feature, lf, ctx), price = tierPriceOf(model, serviceTier);
       if (!price) return { ok: false, reason: 'unknown-service-tier', kind, feature, model, serviceTier };
-      //   レビューの指摘（2026-10-09・費用の見積もり）: 出力の上限は health の limits.features[feature].maxOutputTokens（Gateway が実際に使う上限）があればその値、
-      //   無ければ表の値（以前は大きい方）。応答の設定の上限がこの値を超えたら以後を止める（settle が見積もりに使った値と比べる）
-      const purpose = feature !== 'assistant-qa' ? null : ctx?.businessSnapshot || ctx?.focus?.target?.type === 'business-understanding' ? 'business' : ctx?.focus?.target?.type === 'app-diagnosis' ? 'diagnosis' : ctx?.requestPurpose;
-      const hOut = lf ? num(lf.maxOutputTokensByPurpose?.[purpose] ?? lf.maxOutputTokens) : null;
+      // maxOutputTokens:null means the API field is omitted, not the legacy 4,000.
+      // A model capacity bound reserves verification cost without imposing an API cap.
+      const purpose = feature !== 'assistant-qa' ? null : ctx?.businessSnapshot || ctx?.focus?.target?.type === 'business-understanding' ? 'business' : ctx?.focus?.target?.type === 'app-diagnosis' ? 'diagnosis' : ctx?.requestPurpose || 'consultation';
+      const purposeCap = !!lf?.maxOutputTokensByPurpose && own(lf.maxOutputTokensByPurpose, purpose);
+      const hasCap = purposeCap || !!lf && own(lf, 'maxOutputTokens');
+      const rawCap = purposeCap ? lf.maxOutputTokensByPurpose[purpose] : lf?.maxOutputTokens;
+      const apiMaxOutputTokens = rawCap === null && hasCap ? null : num(rawCap);
+      const purposeBound = !!lf?.outputTokenBudgetBoundByPurpose && own(lf.outputTokenBudgetBoundByPurpose, purpose);
+      const hasBound = purposeBound || !!lf && own(lf, 'outputTokenBudgetBound');
+      const rawBound = purposeBound ? lf.outputTokenBudgetBoundByPurpose[purpose] : lf?.outputTokenBudgetBound;
+      const hOut = hasBound ? num(rawBound) : num(rawCap);
+      if ((hasBound || hasCap && rawCap === null) && !(Number.isSafeInteger(hOut) && hOut > 0)) return { ok: false, reason: 'unknown-bound', kind, feature, model };
       const maxOut = hOut && hOut > 0 ? Math.ceil(hOut) : OUTPUT_LIMITS[feature];
       const hCallsRaw = lf ? num(lf.maxAiCalls) : null;
       const hCalls = hCallsRaw && hCallsRaw > 0 ? Math.floor(hCallsRaw) : 0;
@@ -113,7 +121,7 @@
         for (let i = 0; i < n; i++) calls.push({ kind: mode, input: inTok(mode), output: maxOut });
       }
       calls = calls.map(c => ({ ...c, usd: boundUsdOf(price, c.input, c.output) }));
-      return { ok: true, kind, feature, mode, model, serviceTier, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
+      return { ok: true, kind, feature, mode, model, serviceTier, price: { input: price.input, output: price.output, ...(price.cachedInput != null ? { cachedInput: price.cachedInput } : {}) }, maxOutputTokens: maxOut, apiMaxOutputTokens: hasCap ? apiMaxOutputTokens : maxOut, outputTokenBudgetBound: maxOut, ctxBytes: bytes, calls, maxCalls: calls.length, maxUsd: round6(calls.reduce((s, c) => s + c.usd, 0)), maxCallUsd: Math.max(...calls.map(c => c.usd)) };
     }
     /** Gateway の上界の式のメッセージ 1 つあたりのバイト数（worker の budget.mjs の MESSAGE_OVERHEAD_BYTES と同じ）と、1 回の呼び出しのメッセージの数（指示と本文） */
     const MESSAGE_OVERHEAD_BYTES = 64, MESSAGES_PER_CALL = 2;
@@ -155,7 +163,7 @@
         for (let i = 0; i < e.maxCalls; i++) calls.push({ kind: e.mode, inputBytes: first });
       }
       const out = calls.map(c => ({ ...c, output: maxOut, usd: boundUsdOf(price, c.inputBytes, maxOut) }));
-      return { ok: true, kind, mode: e.mode, model: e.model, serviceTier: e.serviceTier, maxOutputTokens: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
+      return { ok: true, kind, mode: e.mode, model: e.model, serviceTier: e.serviceTier, maxOutputTokens: maxOut, apiMaxOutputTokens: e.apiMaxOutputTokens, outputTokenBudgetBound: maxOut, bodyBytes: body, calls: out, maxCalls: out.length, maxUsd: round6(out.reduce((s, c) => s + c.usd, 0)) };
     }
     /** 検証の上限で送らない例外（BUDGET_EXCEEDED。details.budget = { reason, needUsd, remainingUsd, needCalls, remainingCalls, limitUsd, maxCalls, ... }） */
     function budgetError(reason, info = {}) {
@@ -526,7 +534,7 @@
         let stop = null;
         if (gw) stop = { reason: 'no-budget-meta' };
         if (!stop && model && (!got || (est && (got.input > est.input || got.output > est.output)))) stop = { reason: 'model', model };
-        const mo = ai && ai.settings ? num(ai.settings.maxOutputTokens) : null;
+        const mo = ai && ai.settings ? num(ai.settings.outputTokenBudgetBound ?? ai.settings.maxOutputTokens) : null;
         if (!stop && !gw && mo != null && mo > e.maxOutputTokens) stop = { reason: 'output-limit', maxOutputTokens: mo };
         if (!stop && calls.length > e.reservedCalls) stop = { reason: 'calls', calls: calls.length };
         const tierMetadata = callTierMetadataOf(kind, response, calls.length);

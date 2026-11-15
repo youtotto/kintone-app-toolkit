@@ -8,7 +8,7 @@ const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const F = require('./helpers/release-workspace-fixture.js');
 const root = path.resolve(__dirname, '..');
 function browserBundle() {
-  const source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+  const source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
   return source.slice(0, end) + '\nglobalThis.BudgetTest={mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
 }

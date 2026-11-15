@@ -26,7 +26,7 @@ test('工程相談で概要・詳細を先に示し、確認を必要時だけ�
   const fixture=await workflowFixture();
   await page.exposeFunction('fixedWorkflow',async input=>{calls.push(input);assert.ok(input.businessSnapshot,'This test must not send a consultation');return fixture.answer;});
   await page.goto('https://workflow-focus.test.invalid/');
-  let source=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
+  let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
   const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.WorkflowFocusUI={KTReleaseWorkspace,KTReleaseView,KTBusinessConsultation};\n'+source.slice(end);await page.addScriptTag({content:source});
   await page.evaluate(async snapshot=>{
    window.cap={connected:true,available:true,canConsult:true,canConsultBusiness:true};

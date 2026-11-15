@@ -34,23 +34,20 @@ async function mounted(t) {
   return page;
 }
 const check = (page, id) => page.locator(`[data-release-suggestion="${id}"]`);
-const update = page => page.locator('[data-release-action="update-suggestions"]');
+const update = page => page.locator('[data-release-action="send"]');
 
 test('実ブラウザーで複数の追加提案をキーボードで選び、一度だけ更新し、必須質問と制約を保持する', async t => {
-  const page = await mounted(t); assert.equal(await update(page).isDisabled(), true);
+  const page = await mounted(t); assert.equal(await page.locator('[data-release-action="update-suggestions"]').count(), 0);
   await check(page, 'B2').focus(); await page.keyboard.press('Space');
   assert.equal(await check(page, 'B2').isChecked(), true);
   assert.equal(await check(page, 'B2').evaluate(el => document.activeElement === el), true);
   await check(page, 'B3').check();
   assert.deepEqual(await page.evaluate(() => calls.map(c => c.method)), ['read', 'propose']);
   assert.equal(await page.locator('[data-release-action="adopt"]').isDisabled(), true);
-  const out = path.join(__dirname, '.build/release-suggestions-20261026'); fs.mkdirSync(out, { recursive: true });
-  await page.screenshot({ path: path.join(out, 'selected.png'), fullPage: true });
   const suggestions = page.locator('[data-release-panel="suggestions"]');
   assert.equal(await suggestions.getByText('誰が確認しますか？').count(), 0);
   assert.equal(await suggestions.getByText('モバイルの実際の画面では未確認です').count(), 0);
-  await page.locator('#kt-release-input').fill('送信していない訂正'); assert.equal(await update(page).isDisabled(), true);
-  await page.locator('#kt-release-input').fill(''); assert.equal(await update(page).isDisabled(), false);
+  await page.locator('#kt-release-input').fill('モバイルでも同じ内容にしてください'); assert.equal(await update(page).isDisabled(), false);
   await page.evaluate(() => { mode = 'wait'; }); await update(page).click();
   await page.waitForFunction(() => typeof window.releaseReply === 'function');
   assert.equal(await check(page, 'B4').isDisabled(), true);
@@ -59,16 +56,14 @@ test('実ブラウザーで複数の追加提案をキーボードで選び、�
   const result = await page.evaluate(() => ({ calls, state: controller.getState(), gates }));
   assert.equal(result.gates, 1); assert.equal(result.calls.filter(c => c.method === 'propose').length, 2);
   const text = result.calls.filter(c => c.method === 'propose')[1].text;
-  assert.match(text, /備考を一覧に表示する/); assert.match(text, /確認担当者へ通知する/); assert.doesNotMatch(text, /担当者ごとの一覧を追加/);
+  assert.match(text, /モバイルでも同じ内容にしてください/); assert.match(text, /備考を一覧に表示する/); assert.match(text, /確認担当者へ通知する/); assert.doesNotMatch(text, /担当者ごとの一覧を追加/);
   assert.equal(result.calls.filter(c => ['plan', 'write'].includes(c.method)).length, 0);
   assert.deepEqual(result.state.proposal.decisions, initial.proposal.decisions); assert.deepEqual(result.state.proposal.cannot, initial.proposal.cannot);
   assert.equal(await check(page, 'B2').count(), 0); assert.equal(await check(page, 'B3').count(), 0); assert.equal(await check(page, 'B4').isChecked(), false);
-  assert.equal(await update(page).isDisabled(), true); assert.equal(await page.locator('[data-release-action="adopt"]').isDisabled(), true);
-  await page.screenshot({ path: path.join(out, 'updated.png') });
+  assert.equal(await update(page).textContent(), '送信'); assert.equal(await page.locator('[data-release-action="adopt"]').isDisabled(), true);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await check(page, 'B4').check(); assert.equal(await check(page, 'B4').isChecked(), true);
-  await page.screenshot({ path: path.join(out, 'narrow.png'), fullPage: true });
 });
 
 test('接続前の確認を通し、取消・二重押下・古い版の操作では追加送信しない', async t => {
@@ -77,7 +72,7 @@ test('接続前の確認を通し、取消・二重押下・古い版の操作�
   assert.equal(await page.evaluate(() => calls.filter(c => c.method === 'propose').length), 1);
   assert.equal(await check(page, 'B2').isChecked(), true);
   await page.evaluate(() => { gateMode = 'wait'; });
-  await page.evaluate(() => { const b = document.querySelector('[data-release-action="update-suggestions"]'); b.click(); b.click(); });
+  await page.evaluate(() => { const b = document.querySelector('[data-release-action="send"]'); b.click(); b.click(); });
   await page.waitForFunction(() => typeof window.releaseGate === 'function');
   assert.equal(await page.evaluate(() => gates), 2); assert.equal(await check(page, 'B2').isDisabled(), true);
   await page.evaluate(() => { controller.newTask(); gateMode = 'allow'; releaseGate(); });
@@ -86,13 +81,14 @@ test('接続前の確認を通し、取消・二重押下・古い版の操作�
   assert.equal(await page.locator('#kt-release-input').inputValue(), '');
 });
 
-test('追加提案の更新が失敗したら送信文を入力へ戻し、古い案の作成を止める', async t => {
+test('一括送信の失敗は選択と会話本文を保持し、入力欄へ戻さず古い案の作成を止める', async t => {
   const page = await mounted(t); await check(page, 'B2').check();
+  await page.locator('#kt-release-input').fill('モバイルにも対応してください');
   await page.evaluate(() => { mode = 'fail'; }); await update(page).click();
   await page.waitForFunction(() => controller.getState().error?.message.includes('固定の通信失敗'));
-  const value = await page.locator('#kt-release-input').inputValue(); assert.match(value, /備考を一覧に表示する/);
+  const value = await page.locator('#kt-release-input').inputValue(); assert.equal(value, ''); assert.ok((await page.evaluate(()=>controller.getState().messages.filter(m=>m.role==='user').at(-1).text)).includes('モバイルにも対応してください'));
   assert.doesNotMatch(value, /確認担当者へ通知する/); assert.equal(await page.locator('[data-release-action="adopt"]').isDisabled(), true);
-  assert.equal(await update(page).isDisabled(), true); assert.equal(await check(page, 'B2').isChecked(), false);
+  assert.equal(await update(page).isDisabled(), false); assert.equal(await check(page, 'B2').isChecked(), true);
   assert.equal(await page.evaluate(() => controller.getState().proposalPending), true);
   assert.equal(await page.evaluate(() => calls.filter(c => c.method === 'propose').length), 2);
 });
@@ -106,6 +102,6 @@ test('接続前の確認中に入力された修正は捨てず、追加提案�
   await page.evaluate(() => { gateMode = 'allow'; releaseGate(); });
   await page.waitForFunction(() => document.querySelector('[data-release-suggestion="B2"]').disabled === false);
   assert.equal(await page.locator('#kt-release-input').inputValue(), '通知先はもう一度相談します');
-  assert.equal(await check(page, 'B2').isChecked(), true); assert.equal(await update(page).isDisabled(), true);
+  assert.equal(await check(page, 'B2').isChecked(), true); assert.equal(await update(page).isDisabled(), false);
   assert.equal(await page.evaluate(() => calls.filter(c => c.method === 'propose').length), 1);
 });

@@ -174,7 +174,7 @@ const KTReleaseContext = (() => {
     const focus = consultationTarget ? { resolution: 'resolved', target: consultationTarget.type === 'FILE'
       ? { ...selectedTarget(consultationTarget), type: 'file', id: consultationTarget.target + ':js:' + consultationTarget.name }
       : selectedTarget(consultationTarget), candidates: [] } : { resolution: 'none', target: null, candidates: [] };
-    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance', 'appExplanation', ...(diagnosis ? ['appDiagnosisCredits3'] : []), ...(businessContext ? ['businessConsultationV1'] : [])], question: text, ...(businessContext ? {businessMode,businessContext:clone(businessContext)} : {}), app: appOf(base),
+    return sizeCheck({ contextVersion: '1', releaseContract: 'release-workspace-1', requestPurpose, clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance', 'appExplanation', ...(diagnosis ? ['appDiagnosisCredits3'] : []), ...(businessContext ? ['businessConsultationV1'] : [])], question: text, ...(businessContext ? {businessMode,businessContext:clone(businessContext)} : {}), app: appOf(base),
       focus: diagnosis ? { resolution: 'resolved', target: { type: 'app-diagnosis', id: String(base.appId) }, candidates: [] } : comparison ? { resolution: 'resolved', target: { type: 'environment-diff', id: 'production->preview' }, candidates: [] } : focus, facts: comparison ? comparison.facts : factsOf(base, dependencies, requestTargets, consultationTarget, diagnosis), coverage: comparison ? comparison.coverage : coverageOf(base, dependencies), truncation: { applied: false, sections: [] },
       conversation: { mode: 'proposal', originalRequestHistory: clone(originalRequestHistory), discussion: clone(discussion), acceptedProposal: clone(acceptedProposal), currentPlanSummary, currentResultSummary, proposal: clone(previous), pendingPlanQuestions: clone(pendingPlanQuestions), decisions: clone(answers), requirements: [], working: null, userRequests: clone(requests),
         itemIdFloor: { Q: Math.max(0, questionIdFloor, ...answers.filter(a => /^Q[1-9][0-9]{0,2}$/.test(a.id)).map(a => Number(a.id.slice(1)))) } } }, 256 * 1024);
@@ -190,7 +190,7 @@ const KTReleaseContext = (() => {
   }
   function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], businessPremises = [], version, base }, dependencyTools = null) {
     const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
       coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
       ...(businessPremises.length ? { businessPremises: clone(businessPremises) } : {}),
@@ -209,12 +209,28 @@ const KTReleaseContext = (() => {
     // Planned names come from typed plan fields; no replacement inside natural-language strings.
     const proposed = (plan.proposedFields || []).map(p => ({ code: p.suggestedCode, label: p.label, type: p.type, temporaryId: p.temporaryId, proposed: true, ...(p.options ? { options: clone(p.options) } : {}) }));
     const map = new Map(proposed.map(p => [p.temporaryId, p.code]));
+    // Resolve table membership from typed placement anchors, including new-column chains.
+    // This is plan structure, never interpretation of the request or generated code.
+    const existingByCode = new Map(allFields.map(f => [f.code, f]));
+    const proposedByCode = new Map(proposed.map(f => [f.code, f]));
+    const parentOf = (code, seen = new Set()) => {
+      code = map.get(code) || code;
+      if (existingByCode.has(code)) return existingByCode.get(code).subtable || null;
+      const field = proposedByCode.get(code);
+      if (!field || seen.has(code)) return null;
+      const step = (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && [s.targetRef, s.spec?.fieldCode].some(ref => ref === field.temporaryId || ref === code));
+      const placement = step?.spec?.placement;
+      if (!['BEFORE_FIELD', 'AFTER_FIELD'].includes(placement?.position)) return null;
+      return parentOf(placement.anchor, new Set([...seen, code]));
+    };
+    for (const f of proposed) { const parent = parentOf(f.code); if (parent) f.subtable = parent; }
     c.fields = (c.fields || []).map(f => ({ ...f, code: map.get(f.code) || f.code }));
-    const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
+    const plannedFields = proposed.map(f => ({ code: f.code, label: f.label, type: f.type, ...(f.subtable ? { subtable: f.subtable } : {}), stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && (s.targetRef === f.temporaryId || s.spec?.fieldCode === f.temporaryId || s.spec?.fieldCode === f.code))?.id || '' }));
     const plannedStatuses = (plan.steps || []).filter(s => s.actionType === 'ADD_PROCESS_STATUS').map(s => ({ name: s.spec?.name || s.spec?.status?.name, stepId: s.id })).filter(x => x.name);
     const removed = new Set((plan.steps || []).filter(s => s.actionType === 'DELETE_FIELD').map(s => s.targetRef));
     const fields = allFields.filter(f => !removed.has(f.code)).map(f => {
       const update = (plan.steps || []).find(s => s.actionType === 'UPDATE_FIELD' && s.targetRef === f.code)?.spec;
+      if (f.type === 'SUBTABLE') return { ...f, columns: [...new Set([...(f.columns || []), ...proposed.filter(p => p.subtable === f.code).map(p => p.code)])] };
       return update?.optionEdits ? { ...f, options: update.optionEdits.items.map(i => i.label) } : f;
     }).concat(proposed), dictionary = dictionaryOf(base);
     dictionary.fieldCodes = fields.map(f => f.code); dictionary.fieldTypes = Object.fromEntries(fields.map(f => [f.code, f.type]));

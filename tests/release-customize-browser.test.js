@@ -67,8 +67,8 @@ async function mount(page) {
     window.dependencyBase=base;window.baseReads=0;window.pendingDependency=null;window.holdDependency=false;window.dependencyFailure=false;window.dependencyContinue=null;
     T.KTDevBase.loadForRelease=async(options={})=>{window.dependencyContinue=options.shouldContinue;baseReads++;const result=clone(dependencyBase);if(dependencyFailure)throw Error('Dependency fixture failure');if(holdDependency){holdDependency=false;return new Promise(resolve=>{pendingDependency=()=>resolve(result);});}return result;};
     const health={ok:true,supportedContractVersions:[C.CONTRACT_VERSION],entitlements:[{product:C.PRODUCT,features:[C.FEATURE,C.FEATURE_PLANNER]}],registry:{[C.PRODUCT]:{
-      [C.FEATURE]:{implemented:true,promptVersions:[C.PROMPT_VERSION],conversation:[...C.CONVERSATION_MARKS,'releaseWorkspace', 'appExplanation', 'discussionMetadata']},
-      [C.FEATURE_PLANNER]:{implemented:true,promptVersions:[C.PLANNER_PROMPT_VERSION],...C.PLANNER_MARKS,requirementOps:[...C.PLANNER_MARKS.requirementOps,'releaseWorkspace','formLayoutPlacement','fieldMaintenance']}
+      [C.FEATURE]:{implemented:true,promptVersions:[C.PROMPT_VERSION],conversation:[...C.CONVERSATION_MARKS,'releaseWorkspace', 'appExplanation', 'discussionMetadata','subtableFieldPlacement']},
+      [C.FEATURE_PLANNER]:{implemented:true,promptVersions:[C.PLANNER_PROMPT_VERSION],...C.PLANNER_MARKS,requirementOps:[...C.PLANNER_MARKS.requirementOps,'releaseWorkspace','formLayoutPlacement','subtableFieldPlacement','fieldMaintenance']}
     }}};
     window.proposalCalls=[];
     const client={getHealth:async()=>health,propose:async({ctx})=>{proposalCalls.push(clone(ctx));return {reply:'備考の編集条件を変更する案です。',intent:'propose',proposal:{behaviors:[{id:'B1',text:'備考の編集条件を変更する',origin:'user'}],assumptions:[],decisions:[],approach:{standard:[],js:['備考の編集条件']},cannot:[]},turn:{ops:[],answers:[],requirementOps:[]}};},plan:denied('AI.plan'),generate:denied('AI.generate')};
@@ -443,7 +443,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.equal(await page.locator('.ktr-current').isVisible(),false);
         assert.equal(await page.locator('.ktr-header-notice > summary').isVisible(),true,'コード表示中も停止の通知が見える');
         await page.locator('.ktr-header-notice > summary').click();
-        assert.equal(await page.locator('.ktr-header-notice-body .ktr-error').innerText(),'モバイルの編集制御を完成できませんでした。');
+        assert.match(await page.locator('.ktr-header-notice-body .ktr-error').innerText(),/コードの作成を完了できませんでした/);
+        assert.doesNotMatch(await page.locator('.ktr-header-notice-body .ktr-error').innerText(),/モバイルの編集制御を完成できませんでした/,'内部のerror.messageを表示しない');
         assert.equal(await page.locator('.ktr-code-progress').count(),0,'失敗後は処理中の表示を残さない');
         assert.equal(await editor(page).inputValue(),'// PC unsaved edit\nconst memo = 10;\n');
         assert.equal(await page.locator('#kt-release-input').inputValue(),'送信していない修正の相談');
@@ -457,7 +458,8 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         assert.match(await page.locator('.ktr-code-attention').innerText(),/検証で不一致がありました/);
         await page.locator('.ktr-code-attention [data-release-action="code"]').click();
         assert.equal(await page.locator('.ktr-current').isVisible(),true);
-        assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/モバイルの備考の編集制御を確認できませんでした/,'案に戻って生成物の不合格理由を読める');
+        assert.match(await page.locator('.ktr-current .ktr-reasons').innerText(),/コードを受け取れていないため、反映できません/,'案に戻って空コードの停止理由を読める');
+        assert.doesNotMatch(await page.locator('.ktr-current .ktr-reasons').innerText(),/モバイルの備考の編集制御を確認できませんでした/,'内部のoutcome.messageを表示しない');
         await page.locator('.ktr-pane-tools [data-release-action="code"]').click();
         await page.evaluate(()=>{
           temporaryDisplay={...temporaryDisplay,phase:'blocked',artifacts:[],prepared:{ok:false,reasons:[{message:'動作テスト環境の設定が変更されています。'}]}};

@@ -260,7 +260,7 @@ test('設定確認を待つ間に外側の編集が変わった場合は、開�
 });
 
 
-test('応答検証の理由は診断を残した画面と保存復旧で読めるが、生の応答や認証情報は保存しない', async () => {
+test('応答検証の内部理由は保存復旧できても画面へ出さず、生の応答や認証情報は保存しない', async () => {
   const View = require('../src/release-view.js').KTReleaseView;
   const f=fixture(Workspace,{propose:async()=>document()});
   await f.controller.send('診断してください',{requestPurpose:'ideation',diagnosis:true});
@@ -275,12 +275,10 @@ test('応答検証の理由は診断を残した画面と保存復旧で読め�
   assert.doesNotMatch(JSON.stringify(saved),/PRIVATE_|not an identifier|contains private/);
   const restored=fixture(Workspace);assert.equal(await restored.controller.restoreSession(saved),true);
   assert.deepEqual(state(restored).explanations,old);
-  const html=View.render(state(restored));assert.equal(html.split('data-release-panel="response-diagnostics"').length-1,1);
-  assert.match(html,/EXPLANATION_MUTATION_CONFLICT/);assert.match(html,/SCHEMA_INVALID/);
+  const html=View.render(state(restored));assert.doesNotMatch(html,/response-diagnostics|EXPLANATION_MUTATION_CONFLICT|SCHEMA_INVALID/);assert.match(html,/回答を完了できませんでした/);
   const incomplete={...state(restored),phase:'incomplete',explanationId:null,artifacts:[{customizationId:'C1',title:'備考',error:state(restored).error}]};
   const incompleteHtml=View.render(incomplete);
-  assert.equal(incompleteHtml.split('data-release-panel="response-diagnostics"').length-1,1);
-  assert.match(incompleteHtml,/EXPLANATION_MUTATION_CONFLICT/);
+  assert.doesNotMatch(incompleteHtml,/response-diagnostics|EXPLANATION_MUTATION_CONFLICT|SCHEMA_INVALID/);assert.match(incompleteHtml,/回答を完成できませんでした/);
 
   assert.equal(await restored.controller.adopt(),false);zeroActivity(restored);
   assert.equal(f.count('propose'),1);assert.equal(f.count('plan'),0);assert.equal(f.writes.length,0);

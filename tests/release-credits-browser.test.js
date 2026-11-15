@@ -50,7 +50,7 @@ test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再�
       return { ...body, usage: current };
     });
     await page.goto('https://credits.test.invalid/');
-    let source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+    let source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
     const end = source.lastIndexOf('})();'); source = source.slice(0, end) + '\nglobalThis.CreditsTest={mountReleaseWorkspace,KTAiClient};\n' + source.slice(end);
     await page.addScriptTag({ content: source });
     await page.evaluate(({ prod, names }) => {
@@ -96,7 +96,8 @@ test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再�
     assert.deepEqual(await page.evaluate(() => work.controller.getState().artifacts), artifacts);
     current = usage(2); await page.evaluate(() => work.refreshCapability(true)); failNext = true;
     await page.locator('#kt-release-input').fill('残す資料の修正文'); await action('send').click(); await page.waitForFunction(() => work.controller.getState().error?.code === 'MONTHLY_LIMIT_EXCEEDED');
-    assert.equal(await page.locator('#kt-release-input').inputValue(), '残す資料の修正文');
+    assert.equal(await page.locator('#kt-release-input').inputValue(), '');
+    assert.equal(await page.evaluate(() => work.controller.getState().messages.filter(m => m.role === 'user' && m.text === '残す資料の修正文').length), 1, '送信済み本文は入力欄へ戻さず履歴に一度だけ保持');
     assert.equal(await action('send').isDisabled(), true); assert.match(await page.locator('.ktr-compose-actions').innerText(), /処理中の分を確保/);
     assert.equal(await page.evaluate(() => work.controller.getState().explanations.length), 2);
     assert.deepEqual(await page.evaluate(() => work.controller.getState().artifacts), artifacts);
@@ -106,7 +107,8 @@ test('相談1・資料2・最終案一式3を表示し、残0で複数JSと再�
     await action('documents').click(); assert.equal(await page.locator('[data-document-create]').isDisabled(), true);
     current = usage(5); await page.clock.runFor(600); await page.clock.resume(); await page.waitForFunction(() => work.capability().usage.credits.remaining === 5);
     assert.equal(await page.locator('[data-document-create]').isEnabled(), true, '月替わりで開いた資料ダイアログも更新'); await page.locator('dialog [data-close]').click();
-    assert.equal(await action('send').isEnabled(), true); assert.equal(await page.locator('#kt-release-input').inputValue(), '残す資料の修正文');
+    assert.equal(await action('send').isEnabled(), true); assert.equal(await page.locator('#kt-release-input').inputValue(), '');
+    assert.equal(await page.evaluate(() => work.controller.getState().messages.filter(m => m.role === 'user' && m.text === '残す資料の修正文').length), 1, '送信済み本文は入力欄へ戻さず履歴に一度だけ保持');
     await page.locator('#kt-release-input').fill(''); await page.evaluate(() => work.controller.newTask());
     current = usage(3); await page.evaluate(() => work.refreshCapability(true)); const partialStart = requests().length;
     await page.locator('#kt-release-input').fill(F.REQUEST); await action('send').click(); await phase('proposal');

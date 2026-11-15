@@ -2,7 +2,7 @@
 // Test the shipped artifact, with all network requests intercepted and fixed responses only.
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const root=path.resolve(__dirname,'..'),P='https://appinsight-ai-api.black-waterfall-157a.workers.dev';
-function bundle(){let source=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');const end=source.lastIndexOf('})();');return source.slice(0,end)+'\nglobalThis.ConnectionTest={mountReleaseWorkspace,KTAiClient};\n'+source.slice(end);}
+function bundle(){let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');const end=source.lastIndexOf('})();');return source.slice(0,end)+'\nglobalThis.ConnectionTest={mountReleaseWorkspace,KTAiClient};\n'+source.slice(end);}
 test('公開版は旧検証設定があっても本番会員承認のみ使用する',{timeout:60000},async t=>{
  let pw;try{pw=require('playwright');}catch{pw=require(path.join(process.env.USERPROFILE,'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'));}
  const browser=await pw.chromium.launch({channel:'msedge',headless:true});

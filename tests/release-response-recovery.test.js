@@ -75,3 +75,48 @@ test('旧版の会話は再取得情報なしでも復元でき、開いてい�
   assert.equal(target.count('propose'),1);assert.equal(target.writes.length,0);
  }
 });
+
+for(const mode of ['old-abort','old-finally','old-prepared']){
+ test('取消した旧依頼が新相談の回収情報に干渉しない: '+mode,async()=>{
+  const oldHold=F.deferred(),oldReady=F.deferred(),newHold=F.deferred(),newReady=F.deferred(),baseHold=F.deferred(),baseReady=F.deferred();
+  let calls=0,baseCalls=0;
+  const options={propose:async input=>{
+   const n=++calls,r={...record('propose'),body:JSON.stringify({id:n})};
+   if(n===1){if(mode!=='old-prepared')await input.onRecoveryPrepared(r);oldReady.resolve();await oldHold.promise;if(mode==='old-prepared')await input.onRecoveryPrepared(r);if(mode==='old-abort')throw Object.assign(new Error('aborted'),{name:'AbortError'});return F.proposal();}
+   await input.onRecoveryPrepared(r);newReady.resolve();await newHold.promise;throw lost(r);
+  }};
+  if(mode==='old-finally')options.loadBase=async()=>{if(++baseCalls===2){baseReady.resolve();await baseHold.promise;}return {ok:true,stamp:'fixed',current:{fields:{properties:{}}},files:[],inputs:{data:{appId:'test-only',fields:{}},deps:{},scan:{files:[]}}};};
+  const f=F.fixture(W,options);f.services.validateRecovery=async()=>true;f.services.recover=async()=>F.proposal();
+  const old=f.controller.send('旧依頼');await oldReady.promise;f.controller.cancel();f.controller.newTask();
+  const next=f.controller.send('新依頼');
+  if(mode==='old-finally'){await baseReady.promise;oldHold.resolve();await old;baseHold.resolve();}
+  await newReady.promise;
+  if(mode!=='old-finally'){oldHold.resolve();await old;}
+  assert.equal(JSON.parse(f.controller.getState().responseRecovery?.record.body||'null')?.id,2,'新依頼の回収情報を保持');
+  newHold.resolve();await next;assert.ok(f.controller.getState().responseRecovery);
+  assert.equal(await f.controller.recoverResponse(),true);assert.equal(calls,2,'回収でAIへ再送しない');assert.equal(f.writes.length,0);
+ });
+}
+
+test('取消した依頼自身の回収不要な失敗は、その回収情報だけを解除する',async()=>{
+ const hold=F.deferred(),ready=F.deferred();
+ const f=F.fixture(W,{propose:async input=>{await input.onRecoveryPrepared(record('propose'));ready.resolve();await hold.promise;throw Object.assign(new Error('aborted'),{name:'AbortError'});}});
+ const pending=f.controller.send('取消する相談');await ready.promise;assert.ok(f.controller.getState().responseRecovery);
+ f.controller.cancel();hold.resolve();await pending;
+ assert.equal(f.controller.getState().responseRecovery,null);assert.equal(f.count('propose'),1);assert.equal(f.writes.length,0);
+});
+
+
+test('回答回収待ちでは新規AI操作を無効にし、無料の回収だけを進められる',async()=>{
+ const conn={connected:true,available:true,canConsult:true,canPlan:true,canCreate:true,canResume:true,canDiagnose:true,canRunDiagnosis:true};
+ for(const kind of ['propose','plan','generate']){
+  const f=fixture(kind);await f.controller.send(F.REQUEST);if(kind!=='propose')await f.controller.adopt();
+  const s=f.controller.getState();assert.ok(s.responseRecovery);const html=V.render(s,{connection:conn}).replace(/<style>[\s\S]*?<\/style>/g,'');
+  const tag=action=>(html.match(/<button\b[^>]*>/g)||[]).find(x=>x.includes('data-release-action="'+action+'"'));
+  assert.match(tag('send'),/ disabled/);assert.match(tag('diagnose'),/ disabled/);
+  for(const action of ['adopt','resume'])if(tag(action))assert.match(tag(action),/ disabled/);
+  assert.doesNotMatch(tag('recover-response'),/ disabled/);assert.equal(W.canReprepare(s),false);
+  const calls=f.calls.length;assert.equal(await f.controller.send('別の依頼'),false);assert.equal(f.calls.length,calls);
+  assert.equal(f.writes.length,0);
+ }
+});

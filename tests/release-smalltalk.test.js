@@ -14,10 +14,10 @@ test('古い表示履歴は残して最新3往復のみ送る',async()=>{
  s.restore({version:1,open:true,draft:'訂正です',turns:Array.from({length:5},(_,i)=>({id:String(i),user:'質問'+i,reply:'回答'+i,handoff:false}))});await s.submit();
  assert.deepEqual(request.history.map(x=>x.user),['質問2','質問3','質問4']);assert.equal(s.snapshot().turns.length,6);
 });
-test('保留中の二重送信・復元・開閉を止め、失敗しても入力を保つ',async()=>{
+test('保留中の二重送信・復元・開閉を止め、中断後も送信文を入力欄へ戻さない',async()=>{
  let resolve,n=0;const s=make({send:()=>{n++;return new Promise(r=>resolve=r);}});s.toggle();s.setDraft('こんにちは');const pending=s.submit();await new Promise(r=>setImmediate(r));
  assert.equal(await s.submit(),false);assert.equal(s.toggle(),false);assert.equal(s.restore({version:1,open:false,draft:'',turns:[]}),false);
- s.cancel();resolve({ok:true,version:1,reply:'遅い結果',handoff:false});await pending;assert.equal(n,1);assert.equal(s.getState().turns[0].reply,null);assert.match(s.getState().error,/中断/);assert.equal(s.getState().draft,'こんにちは');
+ s.cancel();resolve({ok:true,version:1,reply:'遅い結果',handoff:false});await pending;assert.equal(n,1);assert.equal(s.getState().turns[0].reply,null);assert.match(s.getState().error,/中断/);assert.equal(s.getState().draft,'');assert.equal(s.getState().turns[0].user,'こんにちは');
 });
 test('無料非対応・作業中・長文では呼ばない',async()=>{
  let n=0;const s=make({available:()=>false,send:async()=>n++});s.toggle();s.setDraft('こんにちは');await s.submit();assert.equal(n,0);assert.equal(s.getState().draft,'こんにちは');
@@ -25,7 +25,7 @@ test('無料非対応・作業中・長文では呼ばない',async()=>{
  const long=make({send:async()=>n++});long.toggle();long.setDraft('あ'.repeat(101));await long.submit();assert.equal(n,0);assert.equal(long.getState().draft.length,101);
 });
 test('失敗から自動再試行せず、生成物を受け渡さない',async()=>{
- let calls=0;const s=make({send:async()=>{calls++;throw Error('通信できません');}});s.toggle();s.setDraft('入力');await s.submit();assert.equal(calls,1);assert.equal(s.getState().draft,'入力');assert.equal(s.handoff('r1'),null);
+ let calls=0;const s=make({send:async()=>{calls++;throw Error('通信できません');}});s.toggle();s.setDraft('入力');await s.submit();assert.equal(calls,1);assert.equal(s.getState().draft,'');assert.equal(s.getState().turns[0].user,'入力');assert.equal(s.handoff('r1'),null);
  const restored=make();restored.restore(s.snapshot());assert.match(restored.getState().error,/自動では再送/);assert.equal(calls,1);
 });
 
@@ -54,3 +54,10 @@ test('本物の認証クライアントから雑談だけを送り、通信失�
   s.setDraft('😀'.repeat(101));assert.equal(await s.submit(),false);assert.equal(calls.length,0);assert.match(s.getState().error,/100文字/);
   s.setDraft('😀'.repeat(100));assert.equal(await s.submit(),true);assert.equal(calls.length,1);assert.equal(calls[0].text,'😀'.repeat(100));assert.equal(calls[0].history[0].user,old.user);
  });
+
+
+test('雑談の失敗で新しい下書きを消さず、内部例外を表示しない',async()=>{
+ let reject;const s=make({send:()=>new Promise((_,r)=>reject=r)});s.toggle();s.setDraft('送信する文');const pending=s.submit();await new Promise(r=>setImmediate(r));
+ s.setDraft('次に入力した文');reject(Error('PRIVATE_PROVIDER sk-private at /server/private.mjs:1'));await pending;
+ assert.equal(s.getState().draft,'次に入力した文');assert.equal(s.getState().turns[0].user,'送信する文');assert.doesNotMatch(s.getState().error,/PRIVATE_PROVIDER|sk-private|private.mjs/);assert.match(s.getState().error,/接続状態を確認/);
+});

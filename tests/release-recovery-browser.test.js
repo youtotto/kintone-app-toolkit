@@ -45,7 +45,9 @@ test('長い案・修正失敗・計画失敗・一部反映を画面で区別�
   assert.ok(await page.locator('.ktr-layout').evaluate(el=>el.clientHeight)>300,'狭い画面でも長い失敗理由が操作領域を押し出さない');
   await reachable(page.locator('[data-release-action="adopt"]'));
   await notification.locator('summary').click();
-  assert.equal(await notification.locator('.ktr-header-notice-body .ktr-error').innerText(),await page.evaluate(()=>controller.getState().error.message));
+  assert.equal(await notification.locator('.ktr-header-notice-body .ktr-error').innerText(),'操作を完了できませんでした。時間をおいてお試しください。');
+  assert.notEqual(await notification.locator('.ktr-header-notice-body .ktr-error').innerText(),await page.evaluate(()=>controller.getState().error.message),'内部のエラー全文を表示しない');
+  await page.addStyleTag({content:'.ktr-header-notice-body{max-height:48px!important}'});
   const body=notification.locator('.ktr-header-notice-body'),bodyBox=await body.boundingBox();
   assert.ok(bodyBox&&bodyBox.x>=0&&bodyBox.x+bodyBox.width<=391&&bodyBox.height<=320,'長い通知の全文は狭い画面内のスクロール領域に収まる');
   assert.ok(await body.evaluate(el=>el.scrollHeight>el.clientHeight),'長い理由を内部でスクロールできる');
@@ -114,7 +116,10 @@ test('ヘッダー通知の開閉と再表示は相談・変更案・手元の�
   const initial=await page.evaluate(()=>JSON.stringify(state)),proposalText=await page.locator('.ktr-current').innerText();
   await open();
   const body=notification.locator('.ktr-header-notice-body');
-  assert.ok(await body.evaluate(el=>el.scrollHeight>el.clientHeight),'保持の確認に使う通知にはスクロールできる全文がある');
+  assert.match(await body.innerText(),/利用状況を確認してください/); assert.doesNotMatch(await body.innerText(),/確認用の長い説明/);
+  // Keep scroll/focus coverage without displaying an internal provider message.
+  await page.addStyleTag({content:'.ktr-header-notice-body{max-height:48px!important}'});
+  assert.ok(await body.evaluate(el=>el.scrollHeight>el.clientHeight),'小さい通知領域でもスクロール位置を保持する');
   for(const selector of ['summary','.ktr-header-notice-body','[data-release-action="close-notice"]']){
    const focused=notification.locator(selector);
    await focused.focus();await body.evaluate(el=>{el.scrollTop=80;});
@@ -144,11 +149,11 @@ test('ヘッダー通知の開閉と再表示は相談・変更案・手元の�
   await page.evaluate(()=>{state.error={code:'NETWORK_ERROR',message:'別の通信エラーが発生しました。'};view.render();});await closed();
   assert.equal(await summary.evaluate(el=>el===document.activeElement),true,'別の通知へ替わったら閉じた見出しへ焦点を移す');
   assert.equal(await summary.locator('[role="alert"]').innerText(),'処理を完了できませんでした');
-  await open();assert.match(await notification.locator('.ktr-header-notice-body').innerText(),/別の通信エラー/);
+  await open();assert.match(await notification.locator('.ktr-header-notice-body').innerText(),/返答を受信できませんでした/);assert.doesNotMatch(await notification.locator('.ktr-header-notice-body').innerText(),/別の通信エラー/);
   assert.doesNotMatch(await notification.locator('.ktr-header-notice-body').innerText(),/利用上限/);
   await page.locator('#kt-release-input').focus();
   await page.locator('#kt-release-input').evaluate(el=>el.setSelectionRange(2,5));
-  await page.evaluate(()=>{state.error={code:'NETWORK_ERROR',message:'接続をもう一度確認してください。'};view.render();});await closed();
+  await page.evaluate(()=>{state.error={code:'TIMEOUT',message:'内部の接続タイムアウトです。'};view.render();});await closed();
   assert.equal(await page.locator('#kt-release-input').evaluate(el=>el===document.activeElement),true,'通知の外で入力中なら新しい通知へ焦点を奪わない');
   assert.deepEqual(await page.locator('#kt-release-input').evaluate(el=>[el.selectionStart,el.selectionEnd]),[2,5]);
   await page.evaluate(()=>{state.error=null;view.render();});

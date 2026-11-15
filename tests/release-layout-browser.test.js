@@ -36,7 +36,7 @@ function html({ full, zoom, realShell }) {
   </style><body><section id="kt-toolkit" class="${full ? 'is-full' : ''}"><header class="bar">開発支援</header><div class="body"><div id="view-ai" class="kt-fill-view"><div id="kt-ai-host" class="kt-flex-column" style="height:100%;min-height:0"></div></div></div></section></body></html>`;
 }
 function bundle() {
-  const sourcePath = process.env.KT_LAYOUT_TOOLKIT_SOURCE || path.join(root, 'kintoneAppToolkit.user.js');
+  const sourcePath = process.env.KT_LAYOUT_TOOLKIT_SOURCE || process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js');
   const source = fs.readFileSync(sourcePath, 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
   return source.slice(0, end) + '\nglobalThis.LayoutTest={mountReleaseWorkspace,mountRoot,KTAiClient};\n' + source.slice(end);
@@ -248,15 +248,24 @@ test('実ホストの幅・高さ・文字拡大とダイアログを固定応�
             await fullyVisible(page, button, scene.name + ': 上部のタブと操作ボタンを切らない');
             await button.click({ trial: true });
           }
+          if (await page.locator('.ktr-more').evaluate(el => el.open)) await page.locator('.ktr-more > summary').click();
           await page.evaluate(() => { window.noticeState = { ...work.controller.getState(), error: { code: 'NETWORK_ERROR', message: '通信を確認できませんでした。' + '通知を最後まで読めることを確認します。'.repeat(50) } }; work.view.render(noticeState); });
           const notification = page.locator('[data-release-panel="header-notice"]');
           await fullyVisible(page, notification.locator('summary'), scene.name + ': 通知の見出しへ戻れる');
           await notification.locator('summary').click();
           const body = notification.locator('.ktr-header-notice-body');
-          assert.ok(await body.evaluate(el => el.scrollHeight > el.clientHeight), '長文通知をスクロールできる');
+          assert.match(await body.innerText(), /返答を受信できませんでした/);
+          assert.doesNotMatch(await body.innerText(), /通知を最後まで読めることを確認します/, '内部の長文エラーは出さない');
+          // Public errors are now short. Constrain this fixture's notice viewport to retain the overflow/scroll regression.
+          await page.addStyleTag({ content: '.ktr-header-notice-body{max-height:48px!important}' });
+          assert.ok(await body.evaluate(el => el.scrollHeight > el.clientHeight), '小さい通知領域でも末尾までスクロールできる');
           await fullyVisible(page, notification.locator('[data-release-action="close-notice"]'), scene.name + ': 通知の末尾と閉じる操作へ到達できる');
           await notification.locator('[data-release-action="close-notice"]').focus();
-          const positions = await page.evaluate(() => [document.querySelector('.ktr-content').scrollTop, document.querySelector('.ktr-header-notice-body').scrollTop]);
+          const positions = await page.evaluate(() => {
+            const outer = document.querySelector('.ktr-content'), inner = document.querySelector('.ktr-header-notice-body');
+            outer.scrollTop = 16; inner.scrollTop = 16;
+            return [outer.scrollTop, inner.scrollTop];
+          });
           assert.ok(positions.every(value => value > 0), '外側と通知の本文を両方スクロールした状態を確かめる');
           await page.evaluate(() => work.view.render(noticeState));
           assert.equal(await notification.evaluate(el => el.open), true);

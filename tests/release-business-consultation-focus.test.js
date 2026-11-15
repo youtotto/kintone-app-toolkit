@@ -170,3 +170,27 @@ test('参照元が不正な場合は工程を再表示せず、未確認表示�
   assert.equal(detailsDepthAt(html, 'class="ktr-business-unverified"'), 0);
   assert.match(html, /data-release-action="business-close"/);
 });
+
+
+test('運用の本文を先に入力でき、推測との関係とモード切替は任意の詳細に畳む',async()=>{
+ const {h,state}=await fixture(),prefix=h.analysisId+':'+h.analysisHash+':';state.businessAnswerDrafts[prefix+'new']='保存前の変更希望';state.businessAnswerDrafts[prefix+'relation:new']='corrects';
+ const before=F.clone(state),html=render(state),relations=[...html.matchAll(/<details class="ktr-business-relation"[^>]*>/g)];
+ assert.ok(relations.length>=3);for(const [opening]of relations)assert.doesNotMatch(opening,/\sopen(?:\s|>)/);
+ assert.equal(detailsDepthAt(html,'data-business-input="new"'),0);assert.ok(html.indexOf('data-business-input="new"')<html.indexOf('data-business-input="relation:new"'));assert.match(html,/value="corrects" selected/);
+ const modes=detailsWithClass(html,'ktr-business-modes');assert.doesNotMatch(modes.opening,/\sopen(?:\s|>)/);assert.match(modes.html,/business-mode/);assert.deepEqual(state,before);
+});
+
+test('新規希望は記録・選択・モード切替を要求せず1操作で変更相談へ進める',async()=>{
+ const {state}=await fixture(),before=F.clone(state),html=render(state);
+ const primary=/<button[^>]*data-release-action="business-consult-change"[^>]*data-business-input-id="new"[^>]*>[^<]*<\/button>/.exec(html);
+ assert.ok(primary);assert.match(primary[0],/この内容で変更を相談/);assert.doesNotMatch(primary[0],/ disabled/);assert.match(html,/入力を変更希望として保存し、1クレジットで相談/);
+ assert.match(html,/data-business-kind="current_operation"/);assert.match(html,/data-business-kind="desired_change"/);assert.deepEqual(state,before,'rendering does not record or send anything');
+ for(const unavailable of [render(state,true),V.render(state,{canConsultBusiness:false},false)])assert.match(unavailable,/<button[^>]*data-release-action="business-consult-change"[^>]*data-business-input-id="new"[^>]* disabled/);
+});
+
+test('確定した変更希望だけに直接相談を表示し、運用の説明・未確定案を変更希望にしない',async()=>{
+ const {h,state}=await fixture();let records=B.record(h,{kind:'current_operation',text:'部門長が承認しています'});records=B.record(records,{kind:'desired_change',text:'承認結果を一覧に表示したい'});records=B.record(records,{kind:'open_question',state:'unknown',text:'代理承認者は未確認'});records=B.record(records,{kind:'desired_change',state:'draft',text:'AIが考えた未採用の変更',origin:'ai_draft'});state.businessContext=records;
+ const before=F.clone(state),html=render(state);assert.match(html,/data-release-action="business-consult-change" data-release-id="BS2"/);
+ for(const id of ['BS1','BS3','BS4'])assert.ok(!html.includes('data-release-action="business-consult-change" data-release-id="'+id+'"'));
+ assert.match(html,/まとめて相談する希望に選ぶ/);assert.doesNotMatch(html,/添付は30件まで/);assert.deepEqual(state,before);
+});

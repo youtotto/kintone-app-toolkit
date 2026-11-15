@@ -82,7 +82,7 @@ test('計画の仮決定・結果の読取確認・検証不能から相談す�
     await send('備考の編集制御を作ってください');
     await page.locator('[data-release-action="adopt"]').click();
     await page.waitForFunction(() => controller.getState().phase === 'incomplete');
-    assert.equal(await page.getByRole('heading', { name: '自動確認できていない内容があります', exact: true }).isVisible(), true);
+    assert.equal(await page.getByRole('heading', { name: '作成した内容', exact: true }).isVisible(), true);
     assert.equal(await page.locator('[data-release-action="resume"]').count(), 0);
     assert.equal(await page.locator('[data-release-action="apply"]').count(), 0);
     await page.locator('[data-release-action="documents"]').click();

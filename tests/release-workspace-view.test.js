@@ -251,10 +251,11 @@ test('変更と検証済みの同一本文が混ざるときは、変更しな�
 test('静的な検証だけで完了した成果物を、模擬テストにも通ったとは表示しない', () => {
   const state = { phase: 'review', prepared: { ok: true, changes: ['JavaScriptを追加'] }, messages: [], runs: [], artifacts: [{ customizationId: 'C1', title: '画面の変更', result: { code: '/* verified */', verification: { passed: true, behavior: { status: 'not-run' } }, artifactOutcome: { state: 'ready', message: '検証が完了しました。', operations: [] } } }] };
   const html = KTReleaseView.render(state);
-  assert.match(html, /検証が完了しました/);
-  assert.match(normal(html), /作成したJavaScriptの検証は完了しています/);
+  assert.doesNotMatch(html, /検証が完了しました/);
+  assert.match(normal(html), /JavaScriptは作成済みです/);
+  assert.doesNotMatch(normal(html), /検証は完了/);
   assert.doesNotMatch(html, /コードの検査と模擬テスト|模擬テスト.{0,8}通過/);
-  assert.equal(html.split('検証が完了しました。').length - 1, 1);
+  assert.equal(html.split('検証が完了しました。').length - 1, 0);
 });
 
 test('右の変更内容を見ながら入力でき、送信時にだけ承認対象を無効化する', async () => {
@@ -405,7 +406,7 @@ test('古い反映記録を開いても現在の作業は変わらず、その�
 test('未完了の同じ理由を通常表示へ重複させない', () => {
   const message = '接続が切れたため、モバイル用の作成が完了していません。';
   const state = { phase: 'incomplete', error: { message }, plan: { customizations: [{ customizationId: 'C1', requirement: 'モバイルの編集制御' }] }, artifacts: [{ customizationId: 'C1', title: 'モバイルの編集制御', error: { message } }], runs: [], messages: [] };
-  assert.equal(normal(KTReleaseView.render(state)).split(message).length - 1, 1);
+  const html=normal(KTReleaseView.render(state));assert.doesNotMatch(html,new RegExp(message));assert.equal(html.split('操作を完了できませんでした。時間をおいてお試しください。').length-1,1);
 });
 
 test('資料の入口とアプリ情報へ、AIを呼ばず作業面から移れる', async () => {
@@ -463,10 +464,10 @@ test('上限停止はタイトル横の短い通知にし、全文と必要な�
   const header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
   assert.match(header, /class="ktr-title-line"><strong>アプリの相談<\/strong><details class="ktr-header-notice"/);
   assert.match(header, /<summary><span role="alert">今回のAI利用枠を確保できません<\/span><\/summary>/);
-  assert.match(header, /class="ktr-header-notice-body"[\s\S]*案は更新していません。&lt;詳細&gt;/);
+  assert.match(header, /class="ktr-header-notice-body"[\s\S]*案は更新していません。/);
   assert.match(header, /data-release-action="close-notice"/);
   assert.doesNotMatch(header, /<details[^>]*\sopen(?:\s|>)/);
-  assert.doesNotMatch(header, /<詳細>/);
+  assert.doesNotMatch(header, /<詳細>|&lt;詳細&gt;|BUDGET_EXCEEDED/);
   const host = hostOf(); host.innerHTML = html;
   assert.equal(buttonOf(host, 'adopt').disabled, true, '通知を小さくしても未更新の案を採用できない');
   assert.equal(JSON.stringify(state), before);
@@ -478,7 +479,7 @@ test('接続と通常のお知らせは失敗と区別し、複数の通知の�
   let html = KTReleaseView.render(state, options), header = html.match(/<header class="ktr-header">([\s\S]*?)<\/header>/)[1];
   assert.match(header, /role="status">接続を確認してください/);
   assert.match(header, /ほか1件/);
-  assert.match(header, /接続の期限が切れました。/);
+  assert.match(header, /AIサービスへの接続を確認してください。/);
   assert.match(header, /説明を保存しました。/);
   assert.match(header, /data-release-action="connect"[^>]*>接続する/);
   assert.doesNotMatch(header, /role="alert"/);
@@ -487,7 +488,7 @@ test('接続と通常のお知らせは失敗と区別し、複数の通知の�
   assert.equal((header.match(/data-release-panel="header-notice"/g) || []).length, 1);
   assert.match(header, /role="alert">処理を完了できませんでした/);
   assert.match(header, /ほか2件/);
-  for (const message of [state.error.message, options.connection.message, options.notice]) assert.ok(header.includes(message));
+  for (const message of ['返答を受信できませんでした。接続状態を確認してください。','AIサービスへの接続を確認してください。',options.notice]) assert.ok(header.includes(message));assert.doesNotMatch(header,/NETWORK_ERROR/);
   delete state.error;
   html = KTReleaseView.render(state, { notice: options.notice });
   assert.match(html, /<summary><span role="status">お知らせ<\/span><\/summary>/);

@@ -48,7 +48,7 @@ test('運用環境を左に固定し、同じ画面で動作テストと保存�
     await page.exposeFunction('loadBase', load);
     await page.exposeFunction('download', (filename, text) => downloads.push({ filename, document: JSON.parse(text) }));
     await page.goto('https://settings.test.invalid/');
-    let source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+    let source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
     const end = source.lastIndexOf('})();');
     source = source.slice(0, end) + '\nglobalThis.mountLensTest=mountReleaseConfigLens;\n' + source.slice(end);
     await page.addScriptTag({ content: source });

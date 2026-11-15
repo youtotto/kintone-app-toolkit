@@ -1,0 +1,1962 @@
+{
+  "description": "2026-11-15 app427 saved AI replies; no live AI or network. Original plan includes manual subtable field prerequisite.",
+  "plan": {
+    "goal": "この経費申請アプリを改善したいです。 既存のJSでは、精算金額が5万円以上のときに「高額申請の理由」が必要ですが、3万円以上に変更してください。既存ファイルを編集し、元のJSを重複登録しないようにしたいです。 あわせて「旅費」テーブルの「手段」の後に、出発地と到着地の項目を追加したいです。フィールドコードは「旅費出発地」「旅費到着地」にしてください。手段が電車・バス・タクシーで、旅費金額が0より大きい行は、保存時に両方の入力をチェックする新しいJSを別ファイルで作ってください。空欄や空白だけの場合は、その行の項目に分かりやすいエラーを出してください。宿泊などの行や0円の初期行は対象外です。 PCの追加・編集画面を対象とし、他の既存機能は維持してください。現在の設定と既存JSを確認して、標準設定の変更・既存JSの編集・新規JSの作成に分けて提案してください。",
+    "assessment": {
+      "summary": "既存の「旅費」と「高額申請の理由」を利用できます。金額やテーブル内の行ごとに必須入力を切り替えるチェックは、標準設定だけでは表せません。",
+      "usableExistingFields": [
+        {
+          "fieldCode": "旅費",
+          "note": "",
+          "evidenceIds": [
+            "E13",
+            "E39"
+          ]
+        },
+        {
+          "fieldCode": "手段",
+          "note": "",
+          "evidenceIds": [
+            "E16"
+          ]
+        },
+        {
+          "fieldCode": "旅費金額",
+          "note": "",
+          "evidenceIds": [
+            "E17"
+          ]
+        },
+        {
+          "fieldCode": "精算金額",
+          "note": "",
+          "evidenceIds": [
+            "E33"
+          ]
+        },
+        {
+          "fieldCode": "高額申請の理由",
+          "note": "",
+          "evidenceIds": [
+            "E21"
+          ]
+        }
+      ],
+      "usableExistingSettings": [
+        {
+          "kind": "JS",
+          "name": "expense-reason.js",
+          "note": "",
+          "evidenceIds": [
+            "E46",
+            "E53"
+          ]
+        }
+      ],
+      "missingCapabilities": [
+        "このツールではテーブル内の項目追加を反映できないため、標準のフォーム設定画面で追加する必要があります。"
+      ],
+      "uncertainties": []
+    },
+    "solution": "CUSTOMIZATION",
+    "relevantFields": [],
+    "proposedFields": [
+      {
+        "temporaryId": "NEW_FIELD_1",
+        "label": "出発地",
+        "suggestedCode": "旅費出発地",
+        "type": "SINGLE_LINE_TEXT",
+        "typeValid": true,
+        "required": false,
+        "options": [],
+        "reason": "現在の「旅費」に出発地を入力する項目がないため。",
+        "evidenceIds": [
+          "E13",
+          "E39"
+        ],
+        "alternativeExistingFieldCode": null,
+        "codeConflict": false,
+        "labelDuplicate": false
+      },
+      {
+        "temporaryId": "NEW_FIELD_2",
+        "label": "到着地",
+        "suggestedCode": "旅費到着地",
+        "type": "SINGLE_LINE_TEXT",
+        "typeValid": true,
+        "required": false,
+        "options": [],
+        "reason": "現在の「旅費」に到着地を入力する項目がないため。",
+        "evidenceIds": [
+          "E13",
+          "E39"
+        ],
+        "alternativeExistingFieldCode": null,
+        "codeConflict": false,
+        "labelDuplicate": false
+      }
+    ],
+    "steps": [
+      {
+        "id": "P1",
+        "actionType": "REQUIRE_CONFIRMATION",
+        "targetKind": "FIELD",
+        "targetRef": "旅費",
+        "targetExists": true,
+        "title": "動作テスト環境の「旅費」に、「手段」の後ろへ任意入力の「出発地」「到着地」をこの順で手作業で追加する",
+        "proposal": {
+          "summary": "",
+          "details": [
+            {
+              "key": "追加方法",
+              "value": "標準のフォーム設定画面で、既存の「旅費」テーブルに文字列（1行）を2項目追加します。テーブル内の追加は、このツールからは反映できません。"
+            },
+            {
+              "key": "出発地",
+              "value": "名前は「出発地」、フィールドコードは「旅費出発地」。必須入力にせず、初期値は空欄にします。"
+            },
+            {
+              "key": "到着地",
+              "value": "名前は「到着地」、フィールドコードは「旅費到着地」。必須入力にせず、初期値は空欄にします。"
+            },
+            {
+              "key": "配置",
+              "value": "「日付」「手段」「出発地」「到着地」「摘要」「金額（円）」「領収書」の順にし、既存の項目やテーブルは保持します。"
+            },
+            {
+              "key": "後続の変更",
+              "value": "項目追加後の動作テスト環境の設定を再取得し、追加した2項目を確認してからJavaScriptを生成・検証・登録します。"
+            }
+          ]
+        },
+        "spec": {
+          "fields": [
+            "NEW_FIELD_1",
+            "NEW_FIELD_2"
+          ],
+          "fieldType": "SINGLE_LINE_TEXT",
+          "required": false
+        },
+        "dependsOn": [],
+        "reason": "指定された2項目はまだなく、行ごとの条件付きチェックにするため、標準の必須入力は設定しません。",
+        "evidenceIds": [
+          "E13",
+          "E16",
+          "E17",
+          "E39"
+        ],
+        "confidence": "CONFIRMED",
+        "alternativeId": null,
+        "solution": "STANDARD",
+        "validation": {
+          "status": "ok",
+          "issues": []
+        },
+        "execution": {
+          "mode": "PLAN_ONLY",
+          "supported": false,
+          "reason": "Planner MVP では自動変更未実装（計画の提示のみ）"
+        }
+      },
+      {
+        "id": "C1",
+        "actionType": "CUSTOMIZATION_REQUIRED",
+        "targetKind": "JS",
+        "targetRef": "expense-reason.js",
+        "targetExists": true,
+        "title": "既存の「expense-reason.js」を編集し、PCの追加・編集保存時に精算金額が3万円以上で「高額申請の理由」が空欄・空白だけなら保存を止める。案内文も3万円に変え、元のファイルは重複登録しない",
+        "proposal": {
+          "summary": "",
+          "details": []
+        },
+        "spec": {
+          "customizationId": "C1"
+        },
+        "dependsOn": [
+          "P1"
+        ],
+        "reason": "",
+        "evidenceIds": [
+          "E21",
+          "E33",
+          "E46",
+          "E53"
+        ],
+        "confidence": "CONFIRMED",
+        "alternativeId": null,
+        "solution": "CUSTOMIZATION",
+        "validation": {
+          "status": "ok",
+          "issues": []
+        },
+        "execution": {
+          "mode": "PLAN_ONLY",
+          "supported": false,
+          "reason": "Planner MVP では自動変更未実装（計画の提示のみ）"
+        }
+      },
+      {
+        "id": "C2",
+        "actionType": "CUSTOMIZATION_REQUIRED",
+        "targetKind": "JS",
+        "targetRef": null,
+        "targetExists": null,
+        "title": "別のJavaScriptファイルを新規作成し、PCの追加・編集保存時に「旅費」の手段が電車・バス・タクシーで金額（円）が0円より大きい行だけ、出発地・到着地が空欄・空白だけなら該当項目にエラーを出して保存を止める",
+        "proposal": {
+          "summary": "",
+          "details": []
+        },
+        "spec": {
+          "customizationId": "C2"
+        },
+        "dependsOn": [
+          "P1",
+          "C1"
+        ],
+        "reason": "",
+        "evidenceIds": [
+          "E13",
+          "E16",
+          "E17",
+          "E53"
+        ],
+        "confidence": "CONFIRMED",
+        "alternativeId": null,
+        "solution": "CUSTOMIZATION",
+        "validation": {
+          "status": "ok",
+          "issues": []
+        },
+        "execution": {
+          "mode": "PLAN_ONLY",
+          "supported": false,
+          "reason": "Planner MVP では自動変更未実装（計画の提示のみ）"
+        }
+      }
+    ],
+    "customizations": [
+      {
+        "customizationId": "C1",
+        "requirement": "既存の「expense-reason.js」を編集する。PCの追加・編集保存時に、精算金額が3万円以上で「高額申請の理由」が空欄または空白だけなら、「3万円以上の申請には、高額申請の理由を入力してください。」と表示して保存を止める。3万円未満または理由が入力済みの場合は、このチェックによるエラーを解除する。既存のほかのチェック結果と対象アプリの判定を維持し、元のファイルは重複登録しない。",
+        "whyStandardInsufficient": "標準の必須入力では、精算金額に応じた必須入力の切り替えと、空白だけの入力の判定を組み合わせられません。",
+        "strategy": "EXTEND_EXISTING_JS",
+        "implementation": "JAVASCRIPT",
+        "platform": [
+          "desktop"
+        ],
+        "events": [
+          "app.record.create.submit",
+          "app.record.edit.submit"
+        ],
+        "fields": [
+          {
+            "code": "精算金額",
+            "access": "READ",
+            "proposed": false,
+            "effects": []
+          },
+          {
+            "code": "高額申請の理由",
+            "access": "CONTROL",
+            "proposed": false,
+            "condition": "精算金額 >= \"30000\"",
+            "effects": [
+              {
+                "effect": "block-save",
+                "condition": ""
+              }
+            ]
+          }
+        ],
+        "apis": [
+          "kintone.events.on"
+        ],
+        "existingFiles": [
+          {
+            "name": "expense-reason.js",
+            "target": "desktop",
+            "reason": "既存の同じ入力チェックを変更するため"
+          }
+        ],
+        "risks": [],
+        "questions": [],
+        "dependsOn": [
+          "P1"
+        ],
+        "evidenceIds": [
+          "E21",
+          "E33",
+          "E46",
+          "E53"
+        ],
+        "confidence": "CONFIRMED",
+        "validation": {
+          "status": "ok",
+          "issues": []
+        }
+      },
+      {
+        "customizationId": "C2",
+        "requirement": "別のJavaScriptファイルを新規作成する。PCの追加・編集保存時に「旅費」の各行を確認し、同じ行の手段が電車・バス・タクシーで金額（円）が0円より大きい場合だけ、出発地と到着地の入力を確認する。空欄または空白だけの項目には、それぞれ「出発地を入力してください。」「到着地を入力してください。」と表示して保存を止める。宿泊など対象外の手段と0円以下の行は対象外にし、入力が直った場合や対象外になった場合は、このチェックが付けたエラーだけを解除する。既存のチェック結果は維持する。",
+        "whyStandardInsufficient": "テーブル内の同じ行の手段と金額を条件にして、出発地・到着地だけを必須入力にする標準設定はありません。",
+        "strategy": "NEW_JS_FILE",
+        "implementation": "JAVASCRIPT",
+        "platform": [
+          "desktop"
+        ],
+        "events": [
+          "app.record.create.submit",
+          "app.record.edit.submit"
+        ],
+        "fields": [
+          {
+            "code": "旅費",
+            "access": "READ",
+            "proposed": false,
+            "effects": []
+          },
+          {
+            "code": "手段",
+            "access": "READ",
+            "proposed": false,
+            "effects": []
+          },
+          {
+            "code": "旅費金額",
+            "access": "READ",
+            "proposed": false,
+            "effects": []
+          },
+          {
+            "code": "NEW_FIELD_1",
+            "access": "CONTROL",
+            "proposed": true,
+            "condition": "手段 in (\"電車\", \"バス\", \"タクシー\") and 旅費金額 >= \"0\" and 旅費金額 != \"0\"",
+            "effects": [
+              {
+                "effect": "block-save",
+                "condition": ""
+              }
+            ]
+          },
+          {
+            "code": "NEW_FIELD_2",
+            "access": "CONTROL",
+            "proposed": true,
+            "condition": "手段 in (\"電車\", \"バス\", \"タクシー\") and 旅費金額 >= \"0\" and 旅費金額 != \"0\"",
+            "effects": [
+              {
+                "effect": "block-save",
+                "condition": ""
+              }
+            ]
+          }
+        ],
+        "apis": [
+          "kintone.events.on"
+        ],
+        "existingFiles": [],
+        "risks": [],
+        "questions": [],
+        "dependsOn": [
+          "P1",
+          "C1"
+        ],
+        "evidenceIds": [
+          "E13",
+          "E16",
+          "E17",
+          "E53"
+        ],
+        "confidence": "CONFIRMED",
+        "validation": {
+          "status": "ok",
+          "issues": []
+        }
+      }
+    ],
+    "alternatives": [],
+    "questions": [],
+    "unknowns": [],
+    "impact": [
+      {
+        "targetKind": "FIELD",
+        "targetRef": "旅費",
+        "description": "入力項目が2つ増えます。既存の項目と、金額（円）を集計する旅費合計の計算式は保持します。",
+        "evidenceIds": [
+          "E13",
+          "E39",
+          "E7",
+          "E116"
+        ],
+        "confidence": "CONFIRMED",
+        "validation": {
+          "status": "ok"
+        }
+      },
+      {
+        "targetKind": "JS",
+        "targetRef": "expense-reason.js",
+        "description": "expense-reason.jsの必須条件を3万円以上へ変更",
+        "evidenceIds": [
+          "E53",
+          "E120",
+          "E121",
+          "E122"
+        ],
+        "confidence": "CONFIRMED",
+        "validation": {
+          "status": "ok"
+        }
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "customizationId": "C1",
+      "title": "既存の「expense-reason.js」を編集する。PCの追加・編集保存時に、精算金額が3万円以上で「高額申請の理由」が空欄または空白だけなら、「3万円以上の申請には、高額申請の理由を入力してください。」と表示して保存を止める。3万円未満または理由が入力済みの場合は、このチェックによるエラーを解除する。既存のほかのチェック結果と対象アプリの判定を維持し、元のファイルは重複登録しない。",
+      "result": {
+        "verification": {
+          "version": "1",
+          "candidateHash": "5e162735e97d7e91",
+          "bodyHash": "2dc3b896a93b3d6c",
+          "sameAsPrevious": false,
+          "passed": true,
+          "machine": [
+            {
+              "name": "syntax",
+              "ok": true,
+              "severity": "info",
+              "message": "既存ファイルに patch を合成した全文が構文解析を通りました"
+            },
+            {
+              "name": "modern-js",
+              "ok": true,
+              "severity": "info",
+              "message": "新規・変更したコードに var と再代入しない let はありません"
+            },
+            {
+              "name": "events",
+              "ok": true,
+              "severity": "info",
+              "message": "使うイベントはすべて kintone のイベントです（2 件）"
+            },
+            {
+              "name": "fields",
+              "ok": true,
+              "severity": "info",
+              "message": "コードで参照しているフィールドはすべてアプリ（計画で新設するものを含む）にあります"
+            },
+            {
+              "name": "apis",
+              "ok": true,
+              "severity": "info",
+              "message": "使う kintone の機能はすべて扱える機能の一覧にあり、計画に無い通信はありません"
+            },
+            {
+              "name": "plan-consistency",
+              "ok": true,
+              "severity": "info",
+              "message": "計画のイベントとフィールドの範囲内です"
+            },
+            {
+              "name": "planned-usage",
+              "ok": true,
+              "severity": "info",
+              "message": "比べているステータス名はすべて今の設定か計画の新設にあります"
+            },
+            {
+              "name": "security",
+              "ok": true,
+              "severity": "info",
+              "message": "秘密情報の直書き・外部への通信・eval は見つかりませんでした"
+            },
+            {
+              "name": "patch",
+              "ok": true,
+              "severity": "info",
+              "message": "patch の 2 件の操作は anchor が既存ファイルの本文に 1 回だけ現れ、baseHash は既存ファイルと一致します"
+            },
+            {
+              "name": "return-event",
+              "ok": true,
+              "severity": "info",
+              "message": "1 件の handler はすべて event を返しています"
+            },
+            {
+              "name": "required-effects",
+              "ok": true,
+              "severity": "info",
+              "message": "必須の動作 1 件の処理の形が、効果のイベントのすべてにあります（コードの検査で足りるもの 0 件・模擬テストで確かめるもの 1 件）"
+            },
+            {
+              "name": "coverage",
+              "ok": true,
+              "severity": "info",
+              "message": "要件ごとの達成を申告しています（満たす 1 / 範囲外 0）"
+            }
+          ],
+          "requiredEffects": [
+            {
+              "requirementIds": [
+                "C1"
+              ],
+              "requirementId": "C1",
+              "field": "高額申請の理由",
+              "effect": "block-save",
+              "index": 0,
+              "status": "present",
+              "message": "「高額申請の理由」の処理（保存を止める）があります",
+              "events": [
+                {
+                  "event": "app.record.create.submit",
+                  "status": "present"
+                },
+                {
+                  "event": "app.record.edit.submit",
+                  "status": "present"
+                }
+              ],
+              "check": "behavior",
+              "checkReason": "effect-kind",
+              "checkReasons": [
+                "effect-kind",
+                "conditional"
+              ]
+            }
+          ],
+          "behavior": {
+            "version": "1",
+            "status": "not-run",
+            "reason": "unavailable",
+            "reasonText": "模擬テストの環境が使えないため実行していません",
+            "reasonCategory": "environment",
+            "cases": [
+              {
+                "id": "K1",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "block-save",
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "条件に合うレコード（精算金額 が 30000 以上）で編集画面で保存する: 保存が止まる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K2",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "save-allowed",
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "nomatch",
+                "side": "nomatch",
+                "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で編集画面で保存する: 保存できる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K3",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "block-save",
+                "event": "app.record.create.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "条件に合うレコード（精算金額 が 30000 以上）で作成画面で保存する: 保存が止まる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K4",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "save-allowed",
+                "event": "app.record.create.submit",
+                "platform": "desktop",
+                "kind": "nomatch",
+                "side": "nomatch",
+                "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で作成画面で保存する: 保存できる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K5",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "save-allowed",
+                "event": "app.record.create.submit",
+                "platform": "desktop",
+                "kind": "create-empty",
+                "side": "nomatch",
+                "note": "作成画面の空のレコードで作成画面で保存する: 保存できる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K6",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "save-allowed",
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "nomatch",
+                "side": "nomatch",
+                "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で編集画面で保存する: 保存できる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              },
+              {
+                "id": "K7",
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": "block-save",
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "match-empty",
+                "side": "match",
+                "note": "条件に合い、条件に使わないフィールドが空のレコード（精算金額 が 30000 以上）で編集画面で保存する: 保存が止まる",
+                "condition": "精算金額 が 30000 以上",
+                "verdict": "not-run",
+                "reason": "unavailable",
+                "reasonCategory": "environment",
+                "observed": null,
+                "message": "模擬テストの環境が使えないため実行していません"
+              }
+            ],
+            "calls": 0,
+            "conditions": null,
+            "uncheckedScope": [
+              {
+                "key": "environment-values",
+                "text": "利用者・日時・画面の URL・ブラウザの保存領域・画面の要素による、処理の中の動きの違い（模擬テストは固定の条件で 1 通りだけ動かします）"
+              },
+              {
+                "key": "known-libraries",
+                "text": "読み込み時に既知のライブラリ（luxon・dayjs・SweetAlert2・kintone UI Component など）を使う既存の JavaScript の動き（ライブラリの本文は模擬テストに送りません）"
+              },
+              {
+                "key": "url-scripts",
+                "text": "URL で読み込む JavaScript の中身（本文を取得しません。npm で配布された JavaScript も含みます）"
+              },
+              {
+                "key": "swallowed-errors",
+                "text": "既存の JavaScript が try / catch で模擬テストの環境の欠けを握りつぶした場合の動き"
+              },
+              {
+                "key": "kintone-rules",
+                "text": "kintone の規則のうち実際の画面で確かめていないもの（作成画面のシステムのフィールドと空の値・詳細から編集への切り替えでの処理の残り方）"
+              },
+              {
+                "key": "machine-only",
+                "text": "変更のイベントをまたぐ編集不可の残り方と、処理の中の kintone.app.record.get / set は、模擬テストではなくコードの検査で確かめます（編集不可を戻す条件が要件の条件と同じかは確かめていません）"
+              },
+              {
+                "key": "boundary-finer",
+                "text": "数値の境界の書き方の違いのうち、半分の幅より細かい違い（例: 1 以上を 0.9 より大きいと書く）"
+              },
+              {
+                "key": "date-cancel",
+                "text": "UTC の日付で今日を作る誤りと境界の含み方の誤りが打ち消し合う日付の条件（時計 1 点（日本時間の朝 8 時）では正しく見えます）"
+              },
+              {
+                "key": "omitted-files",
+                "text": "模擬テストで動かさなかった既存の JavaScript（本文の無いもの・件数や大きさの上限を超えたもの・必須の動作のイベントを登録せず対象のフィールドも参照しないもの）の中身"
+              },
+              {
+                "key": "ai-error-rate",
+                "text": "生成 AI がどの誤り方をどれくらいするか"
+              }
+            ]
+          },
+          "repairs": {
+            "count": 0,
+            "reasons": [],
+            "stoppedBy": null
+          },
+          "unverified": [
+            "kintone の実際の画面での動作は未確認です",
+            "既存ファイルの中のほかの処理との実行順と相互作用",
+            "模擬テストを実行できなかった確かめる条件があります（模擬テストの環境が使えないため実行していません）。実行できなかった分は合格にも不合格にも数えていません"
+          ],
+          "relatedOmitted": []
+        },
+        "artifactOutcome": {
+          "version": "artifact-outcome-1",
+          "state": "unverified",
+          "reasonCodes": [
+            "BEHAVIOR_unavailable"
+          ],
+          "message": "模擬テストの環境が使えないため実行していません",
+          "reasons": [
+            {
+              "code": "BEHAVIOR_unavailable",
+              "message": "模擬テストの環境が使えないため実行していません"
+            }
+          ],
+          "candidateHash": "5e162735e97d7e91",
+          "verifiedBodyHash": "2dc3b896a93b3d6c",
+          "contentHash": "7547cabbc128f5cfe944213d46a810d548ae67f00e5e7172c918764584b8ac06",
+          "scope": {
+            "customizationId": "C1",
+            "planId": "release-plan",
+            "planVersion": 1,
+            "platforms": [
+              "desktop"
+            ],
+            "events": [
+              "app.record.create.submit",
+              "app.record.edit.submit"
+            ],
+            "fields": [
+              {
+                "code": "精算金額",
+                "access": "READ"
+              },
+              {
+                "code": "高額申請の理由",
+                "access": "CONTROL"
+              }
+            ],
+            "requirementIds": [
+              "C1"
+            ]
+          },
+          "operations": [],
+          "runtime": {
+            "state": "unverified",
+            "message": "実際の画面での動作は、反映後に動作テスト環境で確かめます。"
+          }
+        },
+        "generated": {
+          "strategy": "EXTEND_EXISTING_JS",
+          "targetFile": "expense-reason.js",
+          "summary": "PCの作成・編集画面で保存するとき、精算金額が3万円以上で「高額申請の理由」が空欄または空白だけなら、3万円の案内文を表示して保存を止めるように変更します。対象外の場合にこのチェックのエラーだけを解除する処理と、対象アプリの判定は維持します。",
+          "code": "  const THRESHOLD_YEN = 30000;\n  const REASON_CODE = '高額申請の理由';\n  const MESSAGE = '3万円以上の申請には、高額申請の理由を入力してください。';\n    const record = event.record;\n    const reason = record[REASON_CODE];\n    if (!reason || !record['精算金額']) return event;\n    const amount = Number(record['精算金額'].value);\n    const reasonIsEmpty = reason.value === undefined || reason.value === null || String(reason.value).trim() === '';\n    if (Number.isFinite(amount) && amount >= THRESHOLD_YEN && reasonIsEmpty) {",
+          "body": "(function () {\n  'use strict';\n\n  // 撮影用アプリ427の初期カスタマイズ。PCの追加・編集保存時に確認する。\n  const THRESHOLD_YEN = 30000;\n  const REASON_CODE = '高額申請の理由';\n  const MESSAGE = '3万円以上の申請には、高額申請の理由を入力してください。';\n\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    if (String(event.appId) !== '427') return event;\n    const record = event.record;\n    const reason = record[REASON_CODE];\n    if (!reason || !record['精算金額']) return event;\n    const amount = Number(record['精算金額'].value);\n    const reasonIsEmpty = reason.value === undefined || reason.value === null || String(reason.value).trim() === '';\n    if (Number.isFinite(amount) && amount >= THRESHOLD_YEN && reasonIsEmpty) {\n      reason.error = MESSAGE;\n    } else if (reason.error === MESSAGE) {\n      // このJSが設定したエラーだけを解除し、ほかのチェック結果は維持する。\n      reason.error = null;\n    }\n    return event;\n  });\n})();\n",
+          "patch": {
+            "baseHash": "c670dc1e",
+            "operations": [
+              {
+                "type": "REPLACE",
+                "anchor": "  var THRESHOLD_YEN = 50000;\n  var REASON_CODE = '高額申請の理由';\n  var MESSAGE = '5万円以上の申請には、高額申請の理由を入力してください。';",
+                "content": "  const THRESHOLD_YEN = 30000;\n  const REASON_CODE = '高額申請の理由';\n  const MESSAGE = '3万円以上の申請には、高額申請の理由を入力してください。';"
+              },
+              {
+                "type": "REPLACE",
+                "anchor": "    var record = event.record;\n    var reason = record[REASON_CODE];\n    if (!reason || !record['精算金額']) return event;\n    var amount = Number(record['精算金額'].value);\n    if (Number.isFinite(amount) && amount >= THRESHOLD_YEN && !String(reason.value || '').trim()) {",
+                "content": "    const record = event.record;\n    const reason = record[REASON_CODE];\n    if (!reason || !record['精算金額']) return event;\n    const amount = Number(record['精算金額'].value);\n    const reasonIsEmpty = reason.value === undefined || reason.value === null || String(reason.value).trim() === '';\n    if (Number.isFinite(amount) && amount >= THRESHOLD_YEN && reasonIsEmpty) {"
+              }
+            ]
+          },
+          "events": [
+            "app.record.create.submit",
+            "app.record.edit.submit"
+          ],
+          "fields": [
+            {
+              "code": "精算金額",
+              "access": "READ"
+            },
+            {
+              "code": "高額申請の理由",
+              "access": "CONTROL"
+            }
+          ],
+          "apis": [
+            "kintone.events.on"
+          ],
+          "assumptions": [],
+          "warnings": [],
+          "coverage": [
+            {
+              "requirementId": "C1",
+              "status": "MET",
+              "note": "",
+              "text": "既存の「expense-reason.js」を編集する。PCの追加・編集保存時に、精算金額が3万円以上で「高額申請の理由」が空欄または空白だけなら、「3万円以上の申請には、高額申請の理由を入力してください。」と表示して保存を止める。3万円未満または理由が入力済みの場合は、このチェックによるエラーを解除する。既存のほかのチェック結果と対象アプリの判定を維持し、元のファイルは重複登録しない。"
+            }
+          ],
+          "verification": {
+            "version": "1",
+            "candidateHash": "5e162735e97d7e91",
+            "bodyHash": "2dc3b896a93b3d6c",
+            "sameAsPrevious": false,
+            "passed": true,
+            "machine": [
+              {
+                "name": "syntax",
+                "ok": true,
+                "severity": "info",
+                "message": "既存ファイルに patch を合成した全文が構文解析を通りました"
+              },
+              {
+                "name": "modern-js",
+                "ok": true,
+                "severity": "info",
+                "message": "新規・変更したコードに var と再代入しない let はありません"
+              },
+              {
+                "name": "events",
+                "ok": true,
+                "severity": "info",
+                "message": "使うイベントはすべて kintone のイベントです（2 件）"
+              },
+              {
+                "name": "fields",
+                "ok": true,
+                "severity": "info",
+                "message": "コードで参照しているフィールドはすべてアプリ（計画で新設するものを含む）にあります"
+              },
+              {
+                "name": "apis",
+                "ok": true,
+                "severity": "info",
+                "message": "使う kintone の機能はすべて扱える機能の一覧にあり、計画に無い通信はありません"
+              },
+              {
+                "name": "plan-consistency",
+                "ok": true,
+                "severity": "info",
+                "message": "計画のイベントとフィールドの範囲内です"
+              },
+              {
+                "name": "planned-usage",
+                "ok": true,
+                "severity": "info",
+                "message": "比べているステータス名はすべて今の設定か計画の新設にあります"
+              },
+              {
+                "name": "security",
+                "ok": true,
+                "severity": "info",
+                "message": "秘密情報の直書き・外部への通信・eval は見つかりませんでした"
+              },
+              {
+                "name": "patch",
+                "ok": true,
+                "severity": "info",
+                "message": "patch の 2 件の操作は anchor が既存ファイルの本文に 1 回だけ現れ、baseHash は既存ファイルと一致します"
+              },
+              {
+                "name": "return-event",
+                "ok": true,
+                "severity": "info",
+                "message": "1 件の handler はすべて event を返しています"
+              },
+              {
+                "name": "required-effects",
+                "ok": true,
+                "severity": "info",
+                "message": "必須の動作 1 件の処理の形が、効果のイベントのすべてにあります（コードの検査で足りるもの 0 件・模擬テストで確かめるもの 1 件）"
+              },
+              {
+                "name": "coverage",
+                "ok": true,
+                "severity": "info",
+                "message": "要件ごとの達成を申告しています（満たす 1 / 範囲外 0）"
+              }
+            ],
+            "requiredEffects": [
+              {
+                "requirementIds": [
+                  "C1"
+                ],
+                "requirementId": "C1",
+                "field": "高額申請の理由",
+                "effect": "block-save",
+                "index": 0,
+                "status": "present",
+                "message": "「高額申請の理由」の処理（保存を止める）があります",
+                "events": [
+                  {
+                    "event": "app.record.create.submit",
+                    "status": "present"
+                  },
+                  {
+                    "event": "app.record.edit.submit",
+                    "status": "present"
+                  }
+                ],
+                "check": "behavior",
+                "checkReason": "effect-kind",
+                "checkReasons": [
+                  "effect-kind",
+                  "conditional"
+                ]
+              }
+            ],
+            "behavior": {
+              "version": "1",
+              "status": "not-run",
+              "reason": "unavailable",
+              "reasonText": "模擬テストの環境が使えないため実行していません",
+              "reasonCategory": "environment",
+              "cases": [
+                {
+                  "id": "K1",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "block-save",
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "条件に合うレコード（精算金額 が 30000 以上）で編集画面で保存する: 保存が止まる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K2",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "save-allowed",
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "nomatch",
+                  "side": "nomatch",
+                  "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で編集画面で保存する: 保存できる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K3",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "block-save",
+                  "event": "app.record.create.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "条件に合うレコード（精算金額 が 30000 以上）で作成画面で保存する: 保存が止まる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K4",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "save-allowed",
+                  "event": "app.record.create.submit",
+                  "platform": "desktop",
+                  "kind": "nomatch",
+                  "side": "nomatch",
+                  "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で作成画面で保存する: 保存できる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K5",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "save-allowed",
+                  "event": "app.record.create.submit",
+                  "platform": "desktop",
+                  "kind": "create-empty",
+                  "side": "nomatch",
+                  "note": "作成画面の空のレコードで作成画面で保存する: 保存できる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K6",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "save-allowed",
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "nomatch",
+                  "side": "nomatch",
+                  "note": "条件に合わないレコード（精算金額 が 30000 より小さい）で編集画面で保存する: 保存できる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                },
+                {
+                  "id": "K7",
+                  "requirementIds": [
+                    "C1"
+                  ],
+                  "requirementId": "C1",
+                  "field": "高額申請の理由",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": "block-save",
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "match-empty",
+                  "side": "match",
+                  "note": "条件に合い、条件に使わないフィールドが空のレコード（精算金額 が 30000 以上）で編集画面で保存する: 保存が止まる",
+                  "condition": "精算金額 が 30000 以上",
+                  "verdict": "not-run",
+                  "reason": "unavailable",
+                  "reasonCategory": "environment",
+                  "observed": null,
+                  "message": "模擬テストの環境が使えないため実行していません"
+                }
+              ],
+              "calls": 0,
+              "conditions": null,
+              "uncheckedScope": [
+                {
+                  "key": "environment-values",
+                  "text": "利用者・日時・画面の URL・ブラウザの保存領域・画面の要素による、処理の中の動きの違い（模擬テストは固定の条件で 1 通りだけ動かします）"
+                },
+                {
+                  "key": "known-libraries",
+                  "text": "読み込み時に既知のライブラリ（luxon・dayjs・SweetAlert2・kintone UI Component など）を使う既存の JavaScript の動き（ライブラリの本文は模擬テストに送りません）"
+                },
+                {
+                  "key": "url-scripts",
+                  "text": "URL で読み込む JavaScript の中身（本文を取得しません。npm で配布された JavaScript も含みます）"
+                },
+                {
+                  "key": "swallowed-errors",
+                  "text": "既存の JavaScript が try / catch で模擬テストの環境の欠けを握りつぶした場合の動き"
+                },
+                {
+                  "key": "kintone-rules",
+                  "text": "kintone の規則のうち実際の画面で確かめていないもの（作成画面のシステムのフィールドと空の値・詳細から編集への切り替えでの処理の残り方）"
+                },
+                {
+                  "key": "machine-only",
+                  "text": "変更のイベントをまたぐ編集不可の残り方と、処理の中の kintone.app.record.get / set は、模擬テストではなくコードの検査で確かめます（編集不可を戻す条件が要件の条件と同じかは確かめていません）"
+                },
+                {
+                  "key": "boundary-finer",
+                  "text": "数値の境界の書き方の違いのうち、半分の幅より細かい違い（例: 1 以上を 0.9 より大きいと書く）"
+                },
+                {
+                  "key": "date-cancel",
+                  "text": "UTC の日付で今日を作る誤りと境界の含み方の誤りが打ち消し合う日付の条件（時計 1 点（日本時間の朝 8 時）では正しく見えます）"
+                },
+                {
+                  "key": "omitted-files",
+                  "text": "模擬テストで動かさなかった既存の JavaScript（本文の無いもの・件数や大きさの上限を超えたもの・必須の動作のイベントを登録せず対象のフィールドも参照しないもの）の中身"
+                },
+                {
+                  "key": "ai-error-rate",
+                  "text": "生成 AI がどの誤り方をどれくらいするか"
+                }
+              ]
+            },
+            "repairs": {
+              "count": 0,
+              "reasons": [],
+              "stoppedBy": null
+            },
+            "unverified": [
+              "kintone の実際の画面での動作は未確認です",
+              "既存ファイルの中のほかの処理との実行順と相互作用",
+              "模擬テストを実行できなかった確かめる条件があります（模擬テストの環境が使えないため実行していません）。実行できなかった分は合格にも不合格にも数えていません"
+            ],
+            "relatedOmitted": []
+          },
+          "artifactOutcome": {
+            "version": "artifact-outcome-1",
+            "state": "unverified",
+            "reasonCodes": [
+              "BEHAVIOR_unavailable"
+            ],
+            "message": "模擬テストの環境が使えないため実行していません",
+            "reasons": [
+              {
+                "code": "BEHAVIOR_unavailable",
+                "message": "模擬テストの環境が使えないため実行していません"
+              }
+            ],
+            "candidateHash": "5e162735e97d7e91",
+            "verifiedBodyHash": "2dc3b896a93b3d6c",
+            "contentHash": "7547cabbc128f5cfe944213d46a810d548ae67f00e5e7172c918764584b8ac06",
+            "scope": {
+              "customizationId": "C1",
+              "planId": "release-plan",
+              "planVersion": 1,
+              "platforms": [
+                "desktop"
+              ],
+              "events": [
+                "app.record.create.submit",
+                "app.record.edit.submit"
+              ],
+              "fields": [
+                {
+                  "code": "精算金額",
+                  "access": "READ"
+                },
+                {
+                  "code": "高額申請の理由",
+                  "access": "CONTROL"
+                }
+              ],
+              "requirementIds": [
+                "C1"
+              ]
+            },
+            "operations": [],
+            "runtime": {
+              "state": "unverified",
+              "message": "実際の画面での動作は、反映後に動作テスト環境で確かめます。"
+            }
+          }
+        }
+      }
+    },
+    {
+      "customizationId": "C2",
+      "title": "別のJavaScriptファイルを新規作成する。PCの追加・編集保存時に「旅費」の各行を確認し、同じ行の手段が電車・バス・タクシーで金額（円）が0円より大きい場合だけ、出発地と到着地の入力を確認する。空欄または空白だけの項目には、それぞれ「出発地を入力してください。」「到着地を入力してください。」と表示して保存を止める。宿泊など対象外の手段と0円以下の行は対象外にし、入力が直った場合や対象外になった場合は、このチェックが付けたエラーだけを解除する。既存のチェック結果は維持する。",
+      "result": {
+        "verification": {
+          "version": "1",
+          "candidateHash": "51ed2e17ef852309",
+          "bodyHash": "4240befd9782ca6f",
+          "sameAsPrevious": false,
+          "passed": true,
+          "machine": [
+            {
+              "name": "syntax",
+              "ok": true,
+              "severity": "info",
+              "message": "構文解析を通りました"
+            },
+            {
+              "name": "modern-js",
+              "ok": true,
+              "severity": "info",
+              "message": "新規・変更したコードに var と再代入しない let はありません"
+            },
+            {
+              "name": "events",
+              "ok": true,
+              "severity": "info",
+              "message": "使うイベントはすべて kintone のイベントです（2 件）"
+            },
+            {
+              "name": "fields",
+              "ok": true,
+              "severity": "info",
+              "message": "コードで参照しているフィールドはすべてアプリ（計画で新設するものを含む）にあります"
+            },
+            {
+              "name": "apis",
+              "ok": true,
+              "severity": "info",
+              "message": "使う kintone の機能はすべて扱える機能の一覧にあり、計画に無い通信はありません"
+            },
+            {
+              "name": "plan-consistency",
+              "ok": true,
+              "severity": "info",
+              "message": "計画のイベントとフィールドの範囲内です"
+            },
+            {
+              "name": "planned-usage",
+              "ok": true,
+              "severity": "info",
+              "message": "比べているステータス名はすべて今の設定か計画の新設にあります"
+            },
+            {
+              "name": "security",
+              "ok": true,
+              "severity": "info",
+              "message": "秘密情報の直書き・外部への通信・eval は見つかりませんでした"
+            },
+            {
+              "name": "return-event",
+              "ok": true,
+              "severity": "info",
+              "message": "1 件の handler はすべて event を返しています"
+            },
+            {
+              "name": "required-effects",
+              "ok": true,
+              "severity": "info",
+              "message": "必須の動作 2 件の処理の形が、効果のイベントのすべてにあります（コードの検査で足りるもの 0 件・模擬テストで確かめるもの 2 件）"
+            },
+            {
+              "name": "coverage",
+              "ok": true,
+              "severity": "info",
+              "message": "要件ごとの達成を申告しています（満たす 1 / 範囲外 0）"
+            }
+          ],
+          "requiredEffects": [
+            {
+              "requirementIds": [
+                "C2"
+              ],
+              "requirementId": "C2",
+              "field": "旅費出発地",
+              "effect": "block-save",
+              "index": 0,
+              "status": "present",
+              "message": "「出発地」の処理（保存を止める）があります",
+              "events": [
+                {
+                  "event": "app.record.create.submit",
+                  "status": "present"
+                },
+                {
+                  "event": "app.record.edit.submit",
+                  "status": "present"
+                }
+              ],
+              "check": "behavior",
+              "checkReason": "existing-same-event",
+              "checkReasons": [
+                "existing-same-event",
+                "effect-kind",
+                "conditional"
+              ]
+            },
+            {
+              "requirementIds": [
+                "C2"
+              ],
+              "requirementId": "C2",
+              "field": "旅費到着地",
+              "effect": "block-save",
+              "index": 1,
+              "status": "present",
+              "message": "「到着地」の処理（保存を止める）があります",
+              "events": [
+                {
+                  "event": "app.record.create.submit",
+                  "status": "present"
+                },
+                {
+                  "event": "app.record.edit.submit",
+                  "status": "present"
+                }
+              ],
+              "check": "behavior",
+              "checkReason": "existing-same-event",
+              "checkReasons": [
+                "existing-same-event",
+                "effect-kind",
+                "conditional"
+              ]
+            }
+          ],
+          "behavior": {
+            "version": "1",
+            "status": "not-run",
+            "reason": "condition-unparsed",
+            "reasonText": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）",
+            "reasonCategory": "condition",
+            "cases": [
+              {
+                "id": "S1",
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費出発地",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": null,
+                "event": "app.record.create.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "",
+                "condition": "",
+                "verdict": "not-run",
+                "reason": "condition-unparsed",
+                "reasonCategory": "condition",
+                "observed": null,
+                "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+              },
+              {
+                "id": "S2",
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費出発地",
+                "effect": "block-save",
+                "effectIndex": 0,
+                "expect": null,
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "",
+                "condition": "",
+                "verdict": "not-run",
+                "reason": "condition-unparsed",
+                "reasonCategory": "condition",
+                "observed": null,
+                "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+              },
+              {
+                "id": "S3",
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費到着地",
+                "effect": "block-save",
+                "effectIndex": 1,
+                "expect": null,
+                "event": "app.record.create.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "",
+                "condition": "",
+                "verdict": "not-run",
+                "reason": "condition-unparsed",
+                "reasonCategory": "condition",
+                "observed": null,
+                "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+              },
+              {
+                "id": "S4",
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費到着地",
+                "effect": "block-save",
+                "effectIndex": 1,
+                "expect": null,
+                "event": "app.record.edit.submit",
+                "platform": "desktop",
+                "kind": "match",
+                "side": "match",
+                "note": "",
+                "condition": "",
+                "verdict": "not-run",
+                "reason": "condition-unparsed",
+                "reasonCategory": "condition",
+                "observed": null,
+                "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+              }
+            ],
+            "calls": 0,
+            "conditions": null,
+            "uncheckedScope": [
+              {
+                "key": "environment-values",
+                "text": "利用者・日時・画面の URL・ブラウザの保存領域・画面の要素による、処理の中の動きの違い（模擬テストは固定の条件で 1 通りだけ動かします）"
+              },
+              {
+                "key": "known-libraries",
+                "text": "読み込み時に既知のライブラリ（luxon・dayjs・SweetAlert2・kintone UI Component など）を使う既存の JavaScript の動き（ライブラリの本文は模擬テストに送りません）"
+              },
+              {
+                "key": "url-scripts",
+                "text": "URL で読み込む JavaScript の中身（本文を取得しません。npm で配布された JavaScript も含みます）"
+              },
+              {
+                "key": "swallowed-errors",
+                "text": "既存の JavaScript が try / catch で模擬テストの環境の欠けを握りつぶした場合の動き"
+              },
+              {
+                "key": "kintone-rules",
+                "text": "kintone の規則のうち実際の画面で確かめていないもの（作成画面のシステムのフィールドと空の値・詳細から編集への切り替えでの処理の残り方）"
+              },
+              {
+                "key": "machine-only",
+                "text": "変更のイベントをまたぐ編集不可の残り方と、処理の中の kintone.app.record.get / set は、模擬テストではなくコードの検査で確かめます（編集不可を戻す条件が要件の条件と同じかは確かめていません）"
+              },
+              {
+                "key": "boundary-finer",
+                "text": "数値の境界の書き方の違いのうち、半分の幅より細かい違い（例: 1 以上を 0.9 より大きいと書く）"
+              },
+              {
+                "key": "date-cancel",
+                "text": "UTC の日付で今日を作る誤りと境界の含み方の誤りが打ち消し合う日付の条件（時計 1 点（日本時間の朝 8 時）では正しく見えます）"
+              },
+              {
+                "key": "omitted-files",
+                "text": "模擬テストで動かさなかった既存の JavaScript（本文の無いもの・件数や大きさの上限を超えたもの・必須の動作のイベントを登録せず対象のフィールドも参照しないもの）の中身"
+              },
+              {
+                "key": "ai-error-rate",
+                "text": "生成 AI がどの誤り方をどれくらいするか"
+              }
+            ]
+          },
+          "repairs": {
+            "count": 0,
+            "reasons": [],
+            "stoppedBy": null
+          },
+          "unverified": [
+            "kintone の実際の画面での動作は未確認です",
+            "同じアプリの他の JavaScript（expense-reason.js）との実行順と相互作用",
+            "模擬テストを実行できなかった確かめる条件があります（条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで））。実行できなかった分は合格にも不合格にも数えていません"
+          ],
+          "relatedOmitted": []
+        },
+        "artifactOutcome": {
+          "version": "artifact-outcome-1",
+          "state": "unverified",
+          "reasonCodes": [
+            "BEHAVIOR_condition-unparsed"
+          ],
+          "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）",
+          "reasons": [
+            {
+              "code": "BEHAVIOR_condition-unparsed",
+              "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+            }
+          ],
+          "candidateHash": "51ed2e17ef852309",
+          "verifiedBodyHash": "4240befd9782ca6f",
+          "contentHash": "72a261f5cd7e5ddad6df0202be2686bd67f5abb7efa5b860f15de941911cef4b",
+          "scope": {
+            "customizationId": "C2",
+            "planId": "release-plan",
+            "planVersion": 1,
+            "platforms": [
+              "desktop"
+            ],
+            "events": [
+              "app.record.create.submit",
+              "app.record.edit.submit"
+            ],
+            "fields": [
+              {
+                "code": "旅費",
+                "access": "READ"
+              },
+              {
+                "code": "手段",
+                "access": "READ"
+              },
+              {
+                "code": "旅費金額",
+                "access": "READ"
+              },
+              {
+                "code": "旅費出発地",
+                "access": "CONTROL"
+              },
+              {
+                "code": "旅費到着地",
+                "access": "CONTROL"
+              }
+            ],
+            "requirementIds": [
+              "C2"
+            ]
+          },
+          "operations": [],
+          "runtime": {
+            "state": "unverified",
+            "message": "実際の画面での動作は、反映後に動作テスト環境で確かめます。"
+          }
+        },
+        "generated": {
+          "strategy": "NEW_JS_FILE",
+          "targetFile": "travel-location-validation.js",
+          "summary": "PCの追加・編集画面で保存するとき、「旅費」の手段が電車・バス・タクシーで金額（円）が0円より大きい行について、出発地・到着地が空欄または空白だけなら、該当項目にエラーを表示して保存を止めます。入力が直った場合や対象外になった場合は、このチェックのエラーだけを解除し、ほかのチェック結果は維持します。",
+          "code": "(function () {\n  'use strict';\n\n  const EVENTS = ['app.record.create.submit', 'app.record.edit.submit'];\n  const TARGET_METHODS = ['電車', 'バス', 'タクシー'];\n\n  function validateLocation(field, required, message) {\n    const value = field.value;\n    const empty = value === undefined || value === null || String(value).trim() === '';\n    if (required && empty) {\n      if (!field.error) {\n        field.error = message;\n      }\n    } else if (field.error === message) {\n      field.error = null;\n    }\n  }\n\n  kintone.events.on(EVENTS, (event) => {\n    event.record['旅費'].value.forEach((row) => {\n      const fields = row.value;\n      const amount = Number(fields['旅費金額'].value);\n      const required = TARGET_METHODS.includes(fields['手段'].value) &&\n        Number.isFinite(amount) && amount > 0;\n\n      validateLocation(fields['旅費出発地'], required, '出発地を入力してください。');\n      validateLocation(fields['旅費到着地'], required, '到着地を入力してください。');\n    });\n    return event;\n  });\n})();\n",
+          "patch": null,
+          "events": [
+            "app.record.create.submit",
+            "app.record.edit.submit"
+          ],
+          "fields": [
+            {
+              "code": "旅費",
+              "access": "READ"
+            },
+            {
+              "code": "手段",
+              "access": "READ"
+            },
+            {
+              "code": "旅費金額",
+              "access": "READ"
+            },
+            {
+              "code": "旅費出発地",
+              "access": "CONTROL"
+            },
+            {
+              "code": "旅費到着地",
+              "access": "CONTROL"
+            }
+          ],
+          "apis": [
+            "kintone.events.on"
+          ],
+          "assumptions": [],
+          "warnings": [],
+          "coverage": [
+            {
+              "requirementId": "C2",
+              "status": "MET",
+              "note": "",
+              "text": "別のJavaScriptファイルを新規作成する。PCの追加・編集保存時に「旅費」の各行を確認し、同じ行の手段が電車・バス・タクシーで金額（円）が0円より大きい場合だけ、出発地と到着地の入力を確認する。空欄または空白だけの項目には、それぞれ「出発地を入力してください。」「到着地を入力してください。」と表示して保存を止める。宿泊など対象外の手段と0円以下の行は対象外にし、入力が直った場合や対象外になった場合は、このチェックが付けたエラーだけを解除する。既存のチェック結果は維持する。"
+            }
+          ],
+          "verification": {
+            "version": "1",
+            "candidateHash": "51ed2e17ef852309",
+            "bodyHash": "4240befd9782ca6f",
+            "sameAsPrevious": false,
+            "passed": true,
+            "machine": [
+              {
+                "name": "syntax",
+                "ok": true,
+                "severity": "info",
+                "message": "構文解析を通りました"
+              },
+              {
+                "name": "modern-js",
+                "ok": true,
+                "severity": "info",
+                "message": "新規・変更したコードに var と再代入しない let はありません"
+              },
+              {
+                "name": "events",
+                "ok": true,
+                "severity": "info",
+                "message": "使うイベントはすべて kintone のイベントです（2 件）"
+              },
+              {
+                "name": "fields",
+                "ok": true,
+                "severity": "info",
+                "message": "コードで参照しているフィールドはすべてアプリ（計画で新設するものを含む）にあります"
+              },
+              {
+                "name": "apis",
+                "ok": true,
+                "severity": "info",
+                "message": "使う kintone の機能はすべて扱える機能の一覧にあり、計画に無い通信はありません"
+              },
+              {
+                "name": "plan-consistency",
+                "ok": true,
+                "severity": "info",
+                "message": "計画のイベントとフィールドの範囲内です"
+              },
+              {
+                "name": "planned-usage",
+                "ok": true,
+                "severity": "info",
+                "message": "比べているステータス名はすべて今の設定か計画の新設にあります"
+              },
+              {
+                "name": "security",
+                "ok": true,
+                "severity": "info",
+                "message": "秘密情報の直書き・外部への通信・eval は見つかりませんでした"
+              },
+              {
+                "name": "return-event",
+                "ok": true,
+                "severity": "info",
+                "message": "1 件の handler はすべて event を返しています"
+              },
+              {
+                "name": "required-effects",
+                "ok": true,
+                "severity": "info",
+                "message": "必須の動作 2 件の処理の形が、効果のイベントのすべてにあります（コードの検査で足りるもの 0 件・模擬テストで確かめるもの 2 件）"
+              },
+              {
+                "name": "coverage",
+                "ok": true,
+                "severity": "info",
+                "message": "要件ごとの達成を申告しています（満たす 1 / 範囲外 0）"
+              }
+            ],
+            "requiredEffects": [
+              {
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費出発地",
+                "effect": "block-save",
+                "index": 0,
+                "status": "present",
+                "message": "「出発地」の処理（保存を止める）があります",
+                "events": [
+                  {
+                    "event": "app.record.create.submit",
+                    "status": "present"
+                  },
+                  {
+                    "event": "app.record.edit.submit",
+                    "status": "present"
+                  }
+                ],
+                "check": "behavior",
+                "checkReason": "existing-same-event",
+                "checkReasons": [
+                  "existing-same-event",
+                  "effect-kind",
+                  "conditional"
+                ]
+              },
+              {
+                "requirementIds": [
+                  "C2"
+                ],
+                "requirementId": "C2",
+                "field": "旅費到着地",
+                "effect": "block-save",
+                "index": 1,
+                "status": "present",
+                "message": "「到着地」の処理（保存を止める）があります",
+                "events": [
+                  {
+                    "event": "app.record.create.submit",
+                    "status": "present"
+                  },
+                  {
+                    "event": "app.record.edit.submit",
+                    "status": "present"
+                  }
+                ],
+                "check": "behavior",
+                "checkReason": "existing-same-event",
+                "checkReasons": [
+                  "existing-same-event",
+                  "effect-kind",
+                  "conditional"
+                ]
+              }
+            ],
+            "behavior": {
+              "version": "1",
+              "status": "not-run",
+              "reason": "condition-unparsed",
+              "reasonText": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）",
+              "reasonCategory": "condition",
+              "cases": [
+                {
+                  "id": "S1",
+                  "requirementIds": [
+                    "C2"
+                  ],
+                  "requirementId": "C2",
+                  "field": "旅費出発地",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": null,
+                  "event": "app.record.create.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "",
+                  "condition": "",
+                  "verdict": "not-run",
+                  "reason": "condition-unparsed",
+                  "reasonCategory": "condition",
+                  "observed": null,
+                  "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+                },
+                {
+                  "id": "S2",
+                  "requirementIds": [
+                    "C2"
+                  ],
+                  "requirementId": "C2",
+                  "field": "旅費出発地",
+                  "effect": "block-save",
+                  "effectIndex": 0,
+                  "expect": null,
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "",
+                  "condition": "",
+                  "verdict": "not-run",
+                  "reason": "condition-unparsed",
+                  "reasonCategory": "condition",
+                  "observed": null,
+                  "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+                },
+                {
+                  "id": "S3",
+                  "requirementIds": [
+                    "C2"
+                  ],
+                  "requirementId": "C2",
+                  "field": "旅費到着地",
+                  "effect": "block-save",
+                  "effectIndex": 1,
+                  "expect": null,
+                  "event": "app.record.create.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "",
+                  "condition": "",
+                  "verdict": "not-run",
+                  "reason": "condition-unparsed",
+                  "reasonCategory": "condition",
+                  "observed": null,
+                  "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+                },
+                {
+                  "id": "S4",
+                  "requirementIds": [
+                    "C2"
+                  ],
+                  "requirementId": "C2",
+                  "field": "旅費到着地",
+                  "effect": "block-save",
+                  "effectIndex": 1,
+                  "expect": null,
+                  "event": "app.record.edit.submit",
+                  "platform": "desktop",
+                  "kind": "match",
+                  "side": "match",
+                  "note": "",
+                  "condition": "",
+                  "verdict": "not-run",
+                  "reason": "condition-unparsed",
+                  "reasonCategory": "condition",
+                  "observed": null,
+                  "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+                }
+              ],
+              "calls": 0,
+              "conditions": null,
+              "uncheckedScope": [
+                {
+                  "key": "environment-values",
+                  "text": "利用者・日時・画面の URL・ブラウザの保存領域・画面の要素による、処理の中の動きの違い（模擬テストは固定の条件で 1 通りだけ動かします）"
+                },
+                {
+                  "key": "known-libraries",
+                  "text": "読み込み時に既知のライブラリ（luxon・dayjs・SweetAlert2・kintone UI Component など）を使う既存の JavaScript の動き（ライブラリの本文は模擬テストに送りません）"
+                },
+                {
+                  "key": "url-scripts",
+                  "text": "URL で読み込む JavaScript の中身（本文を取得しません。npm で配布された JavaScript も含みます）"
+                },
+                {
+                  "key": "swallowed-errors",
+                  "text": "既存の JavaScript が try / catch で模擬テストの環境の欠けを握りつぶした場合の動き"
+                },
+                {
+                  "key": "kintone-rules",
+                  "text": "kintone の規則のうち実際の画面で確かめていないもの（作成画面のシステムのフィールドと空の値・詳細から編集への切り替えでの処理の残り方）"
+                },
+                {
+                  "key": "machine-only",
+                  "text": "変更のイベントをまたぐ編集不可の残り方と、処理の中の kintone.app.record.get / set は、模擬テストではなくコードの検査で確かめます（編集不可を戻す条件が要件の条件と同じかは確かめていません）"
+                },
+                {
+                  "key": "boundary-finer",
+                  "text": "数値の境界の書き方の違いのうち、半分の幅より細かい違い（例: 1 以上を 0.9 より大きいと書く）"
+                },
+                {
+                  "key": "date-cancel",
+                  "text": "UTC の日付で今日を作る誤りと境界の含み方の誤りが打ち消し合う日付の条件（時計 1 点（日本時間の朝 8 時）では正しく見えます）"
+                },
+                {
+                  "key": "omitted-files",
+                  "text": "模擬テストで動かさなかった既存の JavaScript（本文の無いもの・件数や大きさの上限を超えたもの・必須の動作のイベントを登録せず対象のフィールドも参照しないもの）の中身"
+                },
+                {
+                  "key": "ai-error-rate",
+                  "text": "生成 AI がどの誤り方をどれくらいするか"
+                }
+              ]
+            },
+            "repairs": {
+              "count": 0,
+              "reasons": [],
+              "stoppedBy": null
+            },
+            "unverified": [
+              "kintone の実際の画面での動作は未確認です",
+              "同じアプリの他の JavaScript（expense-reason.js）との実行順と相互作用",
+              "模擬テストを実行できなかった確かめる条件があります（条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで））。実行できなかった分は合格にも不合格にも数えていません"
+            ],
+            "relatedOmitted": []
+          },
+          "artifactOutcome": {
+            "version": "artifact-outcome-1",
+            "state": "unverified",
+            "reasonCodes": [
+              "BEHAVIOR_condition-unparsed"
+            ],
+            "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）",
+            "reasons": [
+              {
+                "code": "BEHAVIOR_condition-unparsed",
+                "message": "条件の値が特定できません（読める形: = / != / > / < / >= / <= / in / not in を and でつないだもの。日付は TODAY() / YESTERDAY() / TOMORROW() / FROM_TODAY() / NOW() まで）"
+              }
+            ],
+            "candidateHash": "51ed2e17ef852309",
+            "verifiedBodyHash": "4240befd9782ca6f",
+            "contentHash": "72a261f5cd7e5ddad6df0202be2686bd67f5abb7efa5b860f15de941911cef4b",
+            "scope": {
+              "customizationId": "C2",
+              "planId": "release-plan",
+              "planVersion": 1,
+              "platforms": [
+                "desktop"
+              ],
+              "events": [
+                "app.record.create.submit",
+                "app.record.edit.submit"
+              ],
+              "fields": [
+                {
+                  "code": "旅費",
+                  "access": "READ"
+                },
+                {
+                  "code": "手段",
+                  "access": "READ"
+                },
+                {
+                  "code": "旅費金額",
+                  "access": "READ"
+                },
+                {
+                  "code": "旅費出発地",
+                  "access": "CONTROL"
+                },
+                {
+                  "code": "旅費到着地",
+                  "access": "CONTROL"
+                }
+              ],
+              "requirementIds": [
+                "C2"
+              ]
+            },
+            "operations": [],
+            "runtime": {
+              "state": "unverified",
+              "message": "実際の画面での動作は、反映後に動作テスト環境で確かめます。"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "initialJs": "(function () {\n  'use strict';\n\n  // 撮影用アプリ427の初期カスタマイズ。PCの追加・編集保存時に確認する。\n  var THRESHOLD_YEN = 50000;\n  var REASON_CODE = '高額申請の理由';\n  var MESSAGE = '5万円以上の申請には、高額申請の理由を入力してください。';\n\n  kintone.events.on(['app.record.create.submit', 'app.record.edit.submit'], function (event) {\n    if (String(event.appId) !== '427') return event;\n    var record = event.record;\n    var reason = record[REASON_CODE];\n    if (!reason || !record['精算金額']) return event;\n    var amount = Number(record['精算金額'].value);\n    if (Number.isFinite(amount) && amount >= THRESHOLD_YEN && !String(reason.value || '').trim()) {\n      reason.error = MESSAGE;\n    } else if (reason.error === MESSAGE) {\n      // このJSが設定したエラーだけを解除し、ほかのチェック結果は維持する。\n      reason.error = null;\n    }\n    return event;\n  });\n})();\n"
+}

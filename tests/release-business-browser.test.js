@@ -31,7 +31,7 @@ test('業務理解の無料取得・候補・根拠・保存・旧Gatewayの画�
    assert.ok(ctx.clientCapabilities.includes('businessUnderstandingCredits10'));assert.ok(ctx.clientCapabilities.includes('businessWorkflowV1'));if(modelHold)await modelHold;if(modelFailure)throw Error('fixed model failure');remaining-=10;return {...F.workflowAnswer(ctx.businessSnapshot),proposalUnchanged:true,usage:usage()};
   });
   await page.goto('https://business.test.invalid/');
-  let source=fs.readFileSync(path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
+  let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');
   const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.BusinessTest={mountReleaseWorkspace,KTAiClient,KTReleaseHistory};\n'+source.slice(end);
   await page.addScriptTag({content:source});
   await page.evaluate(()=>{

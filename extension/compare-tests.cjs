@@ -26,7 +26,7 @@ function run(file, src) {
   });
 }
 (async () => {
-  const rows = []; let same = 0;
+  const rows = []; let same = 0, passing = 0;
   const queue = files.slice();
   const worker = async () => {
     while (queue.length) {
@@ -34,9 +34,11 @@ function run(file, src) {
       const [a, b] = await Promise.all([run(f, null), run(f, EXT)]);
       const eq = a.code === b.code && a.pass === b.pass && a.fail === b.fail && JSON.stringify(a.fails) === JSON.stringify(b.fails);
       if (eq) same++;
+      const passed = [a, b].every(r => r.code === 0 && r.fail === 0 && !r.timeout);
+      if (passed) passing++;
       rows.push({ file: f, userscript: a, extension: b, same: eq });
       console.log(`${eq ? '同じ' : '違う'}  ${f}  ユーザースクリプト: exit ${a.code} ${a.pass}/${a.pass + a.fail}${a.timeout ? ' TIMEOUT' : ''}  拡張機能: exit ${b.code} ${b.pass}/${b.pass + b.fail}${b.timeout ? ' TIMEOUT' : ''}`);
-      if (!eq) { for (const x of a.fails) console.log('   [US] FAIL: ' + x); for (const x of b.fails) console.log('   [EX] FAIL: ' + x); }
+      if (!eq || !passed) { for (const x of a.fails) console.log('   [US] FAIL: ' + x); for (const x of b.fails) console.log('   [EX] FAIL: ' + x); }
     }
   };
   await Promise.all([worker(), worker(), worker()]);
@@ -44,5 +46,5 @@ function run(file, src) {
   fs.writeFileSync(path.join(ROOT, 'dist', 'extension-tests.json'), JSON.stringify(rows, null, 1));
   const tot = (k) => rows.reduce((s, r) => s + r[k].pass, 0);
   console.log(`\n${rows.length} ファイル中 ${same} が同じ結果。合格の件数: ユーザースクリプト ${tot('userscript')} / 拡張機能 ${tot('extension')}。失敗のあるファイル: ユーザースクリプト ${rows.filter((r) => r.userscript.code !== 0).length} / 拡張機能 ${rows.filter((r) => r.extension.code !== 0).length}`);
-  process.exit(same === rows.length ? 0 : 1);
+  process.exit(rows.length > 0 && same === rows.length && passing === rows.length ? 0 : 1);
 })();

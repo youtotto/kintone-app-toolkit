@@ -97,10 +97,10 @@ test('更新失敗は古い案を採用せず、明示再送で回復する', as
   const f = await start({ propose: args => { if (args.previous && fail) throw Error('固定の通信失敗'); return initial(); } });
   select(f.controller, 'B3'); const request = W.suggestionRequest(f.controller.getState());
   assert.equal(await f.controller.updateSuggestions(reference(f.controller)), false);
-  assert.equal(f.controller.getState().proposalPending, true); assert.deepEqual(f.controller.getState().selectedSuggestionIds, []);
-  assert.equal(select(f.controller, 'B3'), false); assert.equal(await f.controller.adopt(), false);
+  assert.equal(f.controller.getState().proposalPending, true); assert.deepEqual(f.controller.getState().selectedSuggestionIds, ['B3']);
+  assert.equal(select(f.controller, 'B3'), true); assert.equal(await f.controller.adopt(), false);
   assert.equal(f.count('propose'), 2); fail = false;
-  await f.controller.send(request); assert.equal(f.controller.getState().proposalPending, false);
+  await f.controller.updateSuggestions(reference(f.controller)); assert.equal(f.controller.getState().proposalPending, false);
   assert.equal(f.count('propose'), 3); assert.equal(f.count('plan'), 0); assert.equal(f.writes.length, 0);
 });
 
@@ -119,4 +119,12 @@ test('更新中断後の遅い応答を新しい会話へ持ち込まない', as
   assert.equal(f.controller.newTask(), true); wait.resolve(initial()); await pending;
   const state = f.controller.getState(); assert.equal(state.phase, 'idle'); assert.equal(state.proposal, null);
   assert.deepEqual(state.selectedSuggestionIds, []); assert.equal(f.count('plan'), 0); assert.equal(f.writes.length, 0);
+});
+
+test('AIの必須補足は基本案の採用に含み、任意の改善案は明示選択まで含めない',async()=>{
+ const r=proposal();r.proposal.behaviors=[{id:'B1',text:'理由が空なら保存を止める',origin:'user'},{id:'B2',text:'理由の入力先として理由欄を追加する',origin:'ai'},{id:'B3',text:'理由を一覧に表示する',origin:'suggestion'}];
+ const f=fixture(W,{propose:()=>r});await f.controller.send('理由が空なら保存を止めたい');
+ assert.equal(select(f.controller,'B2'),false);assert.equal(f.writes.length,0);
+ await f.controller.adopt();const p=f.calls.find(c=>c.method==='plan').proposal;
+ assert.deepEqual(p.behaviors.map(b=>b.id),['B1','B2']);assert.equal(p.behaviors[1].origin,'ai');assert.equal(f.writes.length,0);
 });

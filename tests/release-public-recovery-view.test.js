@@ -112,12 +112,13 @@ test('復元結果が不明なら再実行でなく確認を案内し、その�
   assert.doesNotMatch(html,/data-release-action="recheck-rollback"/);
 });
 
-test('相談の失敗で入力を戻し、送った文は会話にも残す', async () => {
+test('相談の失敗でも送信済み本文は入力欄へ戻さず会話に保持する', async () => {
   const f=await mounted({fixture:{propose:async()=>{throw Error('固定の通信失敗');}}});
   await type(f.host,'備考を編集不可にしてください');await click(f.host,'send');
-  assert.equal(f.host.querySelector('#kt-release-input').value,'備考を編集不可にしてください');
+  assert.equal(f.host.querySelector('#kt-release-input').value,'');
   assert.equal(f.controller.getState().messages[0].text,'備考を編集不可にしてください');
-  assert.match(normal(f.host.innerHTML),/固定の通信失敗/);
+  assert.doesNotMatch(normal(f.host.innerHTML),/固定の通信失敗/);
+  assert.match(normal(f.host.innerHTML),/操作を完了できませんでした/);
 });
 
 test('失敗中に別の下書きが入っていれば元の文で上書きしない', async () => {
@@ -129,7 +130,7 @@ test('失敗中に別の下書きが入っていれば元の文で上書きし�
   assert.equal(f.host.querySelector('#kt-release-input').value,'次の下書き');
 });
 
-test('送信処理が例外を返す場合も入力を戻す', async () => {
+test('会話へ受理する前の例外では未送信の入力を保持する', async () => {
   const f=await mounted();f.controller.send=async()=>{throw Error('呼び出し失敗');};
   await type(f.host,'保存したい依頼');await click(f.host,'send');
   assert.equal(f.host.querySelector('#kt-release-input').value,'保存したい依頼');
@@ -163,4 +164,38 @@ test('第三者変更を検出して復元不可とした結果には復元操�
   assert.match(KTReleaseView.render(s),/data-release-action="request-rollback"/);
   delete s.runs[0].rollback.retryable;
   assert.match(KTReleaseView.render(s),/data-release-action="request-rollback"/);
+});
+
+
+test('出力途中終了でも本文は履歴に一度だけ保持し、正常終了でも入力欄を空にする', async () => {
+  for (const truncated of [true, false]) {
+    const f = await mounted(truncated ? {fixture:{propose:async()=>{throw Object.assign(Error('provider-private-path'), {code:'MODEL_OUTPUT_INVALID',details:{reason:'OUTPUT_TRUNCATED'}});}}} : {});
+    await type(f.host,'理由を必須にしてください'); await click(f.host,'send');
+    assert.equal(f.host.querySelector('#kt-release-input').value,'');
+    assert.equal(f.controller.getState().messages.filter(m=>m.role==='user'&&m.text==='理由を必須にしてください').length,1);
+    if(truncated){assert.match(normal(f.host.innerHTML),/回答を完了できませんでした/);assert.doesNotMatch(normal(f.host.innerHTML),/OUTPUT_TRUNCATED|provider-private-path|技術者向け/);}
+  }
+});
+
+test('会話へ受理する前の拒否では未送信の入力を保持する', async () => {
+  const f=await mounted();f.controller.send=async()=>false;
+  await type(f.host,'まだ受理されていない依頼');await click(f.host,'send');
+  assert.equal(f.host.querySelector('#kt-release-input').value,'まだ受理されていない依頼');
+  assert.equal(f.controller.getState().messages.length,0);
+});
+
+test('内部例外と検証詳細をDOMへ出さず、公開案内と操作判定は保持する', () => {
+  const privateText='PRIVATE_PROVIDER_MESSAGE sk-private /worker/private.mjs:321';
+  for (const code of ['MODEL_OUTPUT_INVALID','NETWORK_ERROR','BASE_CHANGED','MONTHLY_LIMIT_EXCEEDED','UNKNOWN_PRIVATE_CODE']) {
+    const state={phase:'idle',messages:[],runs:[],artifacts:[],error:{code,message:privateText,stack:privateText,detail:{reason:'OUTPUT_TRUNCATED',errors:[{code:'PRIVATE_VALIDATOR',path:'/private/path',message:privateText}]}}};
+    const before=JSON.stringify(state),html=KTReleaseView.render(state,{connection:{connected:false,message:privateText},historyStatus:{state:'error',message:privateText}});
+    assert.doesNotMatch(html,/PRIVATE_|sk-private|private\.mjs|private\/path|OUTPUT_TRUNCATED|response-diagnostics|技術者向け/);
+    assert.match(html,/data-release-action="connect"/);
+    assert.match(html,/会話を保存できませんでした/);
+    if(code==='BASE_CHANGED')assert.match(html,/最新の設定で変更案を確認し直してください/);
+    if(code==='MONTHLY_LIMIT_EXCEEDED')assert.match(html,/残数と更新日を確認してください/);
+    assert.equal(JSON.stringify(state),before,'内部エラーは制御・回収のため改変しない');
+  }
+  const state={phase:'incomplete',messages:[],runs:[],plan:{customizations:[{customizationId:'C1',requirement:'入力確認'}]},artifacts:[{customizationId:'C1',title:'入力確認',error:{code:'NETWORK_ERROR',message:privateText},result:{artifactOutcome:{state:'failed',message:privateText}}}]};
+  assert.doesNotMatch(KTReleaseView.render(state),/PRIVATE_|sk-private/);
 });

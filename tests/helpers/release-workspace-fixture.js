@@ -66,7 +66,7 @@ function fixture(Module, options = {}) {
       calls.push({ method: 'prepare', baseStamp: args.base.stamp });
       if (options.prepare) return options.prepare(args);
       const settings = args.plan.steps.filter(s => s.actionType !== 'CUSTOMIZATION_REQUIRED').map(s => ({ stepId: s.id, title: s.title }));
-      const files = Object.values(args.artifacts || {}).flatMap(a => (a.artifactOutcome || a.result?.artifactOutcome || {}).operations || []).filter(o => o.action !== 'unchanged');
+      const files = Object.values(args.artifacts || {}).flatMap(a => a.result?.artifactOutcome?.state === 'unverified' ? [{ action: 'create', targetFile: a.result.targetFile, code: a.result.code }] : (a.artifactOutcome || a.result?.artifactOutcome || {}).operations || []).filter(o => o.action !== 'unchanged');
       return { ok: true, settings, files, changes: [...settings, ...files], confirmations: [], reasons: [], baseStamp: args.base.stamp,
         signature: sha(JSON.stringify([args.base.stamp, args.plan, files])) };
     },

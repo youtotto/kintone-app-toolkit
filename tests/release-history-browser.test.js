@@ -8,7 +8,7 @@ const { makeKintoneMock } = require('./helpers/kintone-preview-mock.js');
 const F = require('./helpers/release-workspace-fixture.js'), E = require('./helpers/release-explanation-fixture.js');
 const root = path.resolve(__dirname, '..'), origin = 'https://release-history.test.invalid';
 function bundle() {
-  const source = fs.readFileSync(path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
+  const source = fs.readFileSync(process.env.KT_SRC || path.join(root, 'kintoneAppToolkit.user.js'), 'utf8').replace('waitReady().then(() => startToolkit());', '');
   const end = source.lastIndexOf('})();');
   return source.slice(0, end) + '\nglobalThis.HistoryTest={mountReleaseWorkspace,KTAiClient,KTReleaseHistory};\n' + source.slice(end);
 }

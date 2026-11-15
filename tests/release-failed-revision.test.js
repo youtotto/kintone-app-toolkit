@@ -135,7 +135,7 @@ for (const outcome of ['failure', 'cancel']) test('質問ID高水位は' + outco
   assert.equal(state(f).proposalPending, false); assert.equal(f.writes.length, 0);
 });
 
-test('応答形式の診断は閉じた詳細に許可した三項目だけを文字として表示する', async () => {
+test('応答形式の内部診断を保持しても利用者画面には表示しない', async () => {
   const details = { error: { detail: {
     errors: [{ code: 'PROPOSAL_ANSWER_ID_UNKNOWN', path: 'turn.answers[0].id', message: '<img src=x onerror=alert(1)>', token: 'PRIVATE_TOKEN' }],
     warnings: [{ code: 'W1', path: 'proposal.decisions', message: '識別子を確認', rawResponse: 'PRIVATE_RESPONSE' }],
@@ -145,16 +145,15 @@ test('応答形式の診断は閉じた詳細に許可した三項目だけを�
   const f = fixture(Workspace, { propose: () => { if (++n > 1) throw Object.assign(error('MODEL_OUTPUT_INVALID'), { details }); return proposal(); } });
   await f.controller.send(REQUEST); await f.controller.send('一覧を取消');
   const html = View.render(state(f));
-  assert.match(html, /<details data-release-panel="response-diagnostics"><summary>問題の詳細（技術者向け）/);
-  assert.match(html, /PROPOSAL_ANSWER_ID_UNKNOWN/); assert.match(html, /turn.answers\[0\].id/);
-  assert.match(html, /&lt;img/); assert.doesNotMatch(html, /<img src=x|PRIVATE_|AI model output/);
-  assert.deepEqual(state(f).error.detail, details, '診断情報は消さず、画面に出すキーだけを限定');
+  assert.match(html, /回答を完了できませんでした/);
+  assert.doesNotMatch(html, /response-diagnostics|技術者向け|PROPOSAL_ANSWER_ID_UNKNOWN|turn.answers|識別子を確認|&lt;img|<img src=x|PRIVATE_|AI model output/);
+  assert.deepEqual(state(f).error.detail, details, '制御・回収用の内部診断は保持し、画面へは出さない');
 });
 
 test('診断が無い形でも通常の失敗案内を残し、別種のエラーには形式診断を出さない', () => {
   for (const [code, detail] of [['MODEL_OUTPUT_INVALID', { unknown: 'PRIVATE_RAW' }], ['NETWORK_ERROR', { errors: [{ code: 'PRIVATE_CODE', message: 'PRIVATE_DETAIL' }] }]]) {
     const html = View.render({ phase: 'proposal', proposal: proposal().proposal, proposalPending: true, messages: [], error: { code, message: '案は更新していません。', detail } });
-    assert.match(html, /案は更新していません/);
+    assert.match(html, code==='MODEL_OUTPUT_INVALID'?/回答を完成できませんでした/:/接続状態を確認してください/);
     assert.doesNotMatch(html, /response-diagnostics|PRIVATE_/);
   }
 });
