@@ -287,7 +287,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
             return {plugins: (url.includes('/preview/') ? ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'] : ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']).map(id=>({id}))};
           };
           api.url = url => url;
-          window.kintone = {api, app:{getId:()=>310}, system:{getPermissions:async()=>true}};
+          window.kintone = {api, app:{getId:()=>310}, system:{getPermissions:async()=>({administration:true})}};
           await ThemeTest.renderPlugins(shell,{appId:'310',plugins:{plugins:[
             {id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',name:'入力サポート',description:'入力内容を確認するプラグイン',version:'1.0'},
             {id:'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',name:'確認サポート',description:'確認する対象を案内するプラグイン',version:'2.0'},
@@ -344,7 +344,7 @@ test('本物のToolkit shell・AI Assistant・body直下dialogの共通テーマ
         assert.deepEqual(await page.evaluate(()=>pluginHostStyle()),outsideBefore,'PluginsのCSSをホスト側の同名classへ漏らさない');
 
         if(scene.name==='full-1440') {
-          await page.evaluate(async()=>{kintone.system.getPermissions=async()=>false;await ThemeTest.renderPlugins(shell,{appId:'310'});});
+          await page.evaluate(async()=>{kintone.system.getPermissions=async()=>({administration:false});await ThemeTest.renderPlugins(shell,{appId:'310'});});
           assert.match(await page.locator('#view-plugins').innerText(),/システム管理者/);
           assert.equal(await page.locator('#view-plugins button').count(),0,'権限なしでは登録・反映の操作を出さない');
           const deniedView=await inspect(page,['#view-plugins > div','#view-plugins > div > div']);

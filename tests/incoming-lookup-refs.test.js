@@ -26,7 +26,7 @@ const vm = require('vm');
 const FX = require('./fixtures/lookup-apps-296-297.js');
 
 // ---- 実スクリプトを sandbox に読み込み、内部モジュール／関数を取り出す ----
-const SRC = path.join(__dirname, '..', 'kintoneAppToolkit.user.js');
+const SRC = process.env.KT_SRC || path.join(__dirname, '..', 'kintoneAppToolkit.user.js');
 let code = fs.readFileSync(SRC, 'utf8');
 const lastClose = code.lastIndexOf('})();');
 if (lastClose < 0) throw new Error('IIFE close not found');
@@ -89,7 +89,7 @@ const api = async (u, method, params) => {
   return {};
 };
 api.url = (p) => p;
-sandbox.kintone = { api, app: { getId: () => null } };
+sandbox.kintone = { api, app: { getId: () => null }, getLoginUser: () => ({id:'test-user',code:'test-user'}) };
 
 // ---- テストユーティリティ ----
 let failed = 0;
@@ -301,7 +301,7 @@ const makeView = () => {
 
   // 走査結果は新形式（v2）で保存され、次回はキャッシュから復元できる
   const cached = KTIncoming.loadCache(SELF);
-  assert(store.has(`ktIncoming.v2.${SELF}`) && !!cached, '走査結果は v2 形式でキャッシュされる');
+  assert(store.has('ktIncoming.v3.' + JSON.stringify(['test-user', String(SELF)])) && !!cached, '走査結果はユーザー別の v3 形式でキャッシュされる');
   assert(!!cached && cached.rows.some(r => r.sourceField === 'product_lookup' && (r.copyFields || []).some(c => c.from === 'old_price')),
     'キャッシュにコピー元（copyFields）が含まれる');
 

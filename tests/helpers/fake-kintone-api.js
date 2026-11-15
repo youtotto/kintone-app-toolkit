@@ -65,7 +65,8 @@ function makeFakeKintone(data, { admin = true, appId = 310, layout = null, gatew
       getFormFields: async () => { const p = 'kintone.app.getFormFields'; calls.push({ kind: 'js', path: p }); await waitHold(p); return clone(data.fields); },
       getFormLayout: async () => { const p = 'kintone.app.getFormLayout'; calls.push({ kind: 'js', path: p }); await waitHold(p); return clone(LAYOUT); },
     },
-    system: { getPermissions: async () => { const p = 'kintone.system.getPermissions'; calls.push({ kind: 'js', path: p }); await waitHold(p); return admin; } },
+    system: { getPermissions: async () => { const p = 'kintone.system.getPermissions'; calls.push({ kind: 'js', path: p }); await waitHold(p); return { administration: admin }; } },
+    getLoginUser: () => ({ id: 'test-user', code: 'test-user' }),
     getRequestToken: () => 'tok',
     proxy: async (url, method, headers, body) => {
       const p = norm(url);

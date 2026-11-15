@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.6
+// @version      2.3.7
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.6';
+  const SCRIPT_VERSION = '2.3.7';
   // Published build identifier.
-  const KT_BUILD = '2.3.6';
+  const KT_BUILD = '2.3.7';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -2333,38 +2333,49 @@
   //    結果はキャッシュする（自動実行はしない）。
   // ==========================================
   const KTIncoming = (() => {
-    // v2: ルックアップ行に「ほかのフィールドのコピー」のコピー元（copyFields）を持つ。
-    //     v1 の結果はコピー元を持たないため読まずに破棄し、再走査で最新形式にする。
-    const CACHE_PREFIX = 'ktIncoming.v2.';
-    const LEGACY_CACHE_PREFIXES = ['ktIncoming.v1.'];
+    // v3: ユーザー別に保存し、アクションの部分取得も記録する。旧形式は引き継がない。
+    const CACHE_PREFIX = 'ktIncoming.v3.';
+    const LEGACY_CACHE_PREFIXES = ['ktIncoming.v1.', 'ktIncoming.v2.'];
     const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24時間
     const CONCURRENCY = 5;                    // 同時実行数（サーバ負荷を抑える）
     const MAX_APPS = 500;                     // 走査対象の上限（超過時は警告して打ち切る）
 
     // ---- キャッシュ ----
-    const cacheKey = (appId) => `${CACHE_PREFIX}${appId}`;
+    const cacheKey = (appId) => {
+      try {
+        const id = kintone.getLoginUser()?.id;
+        return id == null || String(id).trim() === '' ? null : CACHE_PREFIX + JSON.stringify([String(id), String(appId)]);
+      } catch (e) { return null; }
+    };
 
     function loadCache(appId) {
       try {
         for (const p of LEGACY_CACHE_PREFIXES) localStorage.removeItem(`${p}${appId}`);
-        const raw = localStorage.getItem(cacheKey(appId));
+        const key = cacheKey(appId);
+        if (!key) return null;
+        const raw = localStorage.getItem(key);
         if (!raw) return null;
         const c = JSON.parse(raw);
         if (!c?.scannedAt) return null;
-        if (Date.now() - new Date(c.scannedAt).getTime() > CACHE_TTL_MS) return null;
+        const age = Date.now() - new Date(c.scannedAt).getTime();
+        if (!Number.isFinite(age) || age < 0 || age > CACHE_TTL_MS) return null;
         return c;
       } catch (e) {
         return null; // 壊れたキャッシュは無視する
       }
     }
 
-    function saveCache(appId, data) {
-      try { localStorage.setItem(cacheKey(appId), JSON.stringify(data)); }
+    function saveCache(key, data) {
+      if (!key) return;
+      try { localStorage.setItem(key, JSON.stringify(data)); }
       catch (e) { console.warn('[KTIncoming] 結果のキャッシュ保存に失敗しました', e); }
     }
 
     function clearCache(appId) {
-      try { localStorage.removeItem(cacheKey(appId)); } catch (e) { }
+      try {
+        for (const p of LEGACY_CACHE_PREFIXES) localStorage.removeItem(`${p}${appId}`);
+        const key = cacheKey(appId); if (key) localStorage.removeItem(key);
+      } catch (e) { }
     }
 
     /** 指定した並列数でタスクを順に処理する（サーバへの同時接続を抑える） */
@@ -2464,19 +2475,23 @@
     async function run(selfId, opt = {}) {
       const { includeActions = true, onProgress = null, force = false } = opt;
       const self = String(selfId);
+      const key = cacheKey(self);
 
       if (!force) {
         const cached = loadCache(self);
-        if (cached) return { ...cached, fromCache: true };
+        if (cached && cached.stats?.includeActions === includeActions) return { ...cached, fromCache: true };
       }
 
       if (onProgress) onProgress(0, 0, 'アプリ一覧を取得中');
-      const apps = (await KTApi.getAppList({ max: MAX_APPS }))
-        .filter(a => String(a.appId) !== self);
-
-      const truncated = apps.length >= MAX_APPS;
+      const listedApps = await KTApi.getAppList({ max: MAX_APPS });
+      const truncated = listedApps.length >= MAX_APPS;
+      const apps = listedApps.filter(a => String(a.appId) !== self);
       const rows = [];
       const errors = [];   // 取得できなかったアプリ（権限不足など）
+      const recordError = (app, what, error) => errors.push({
+        appId: String(app.appId), appName: app.name || '', what,
+        reason: error?.status === 403 || /403|permission|権限/i.test(String(error?.message || error)) ? '権限不足' : '取得失敗',
+      });
 
       await runPool(apps, async (app) => {
         try {
@@ -2484,14 +2499,11 @@
           let actionsRes = null;
           if (includeActions) {
             // アクション設定はアプリ管理権限が必要なため、取れなくても続行する
-            try { actionsRes = await KTApi.getActionsOf(app.appId); } catch (e) { actionsRes = null; }
+            try { actionsRes = await KTApi.getActionsOf(app.appId); } catch (e) { recordError(app, 'actions', e); }
           }
           rows.push(...analyzeApp(app, self, fieldsRes, actionsRes));
         } catch (e) {
-          errors.push({
-            appId: String(app.appId), appName: app.name || '',
-            reason: /403|permission|権限/i.test(String(e?.message || e)) ? '権限不足' : '取得失敗',
-          });
+          recordError(app, 'fields', e);
         }
       }, CONCURRENCY, (done, total) => {
         if (onProgress) onProgress(done, total, '各アプリを確認中');
@@ -2508,13 +2520,15 @@
         stats: {
           scannedApps: apps.length,
           referencingApps: new Set(rows.map(r => r.appId)).size,
-          failedApps: errors.length,
+          failedApps: new Set(errors.map(e => e.appId)).size,
+          actionsFailedApps: errors.filter(e => e.what === 'actions').length,
           includeActions,
           truncated,
         },
         scannedAt: new Date().toISOString(),
       };
-      saveCache(self, data);
+      if (cacheKey(self) !== key) throw new Error('ログインユーザーが変わったため、走査結果を表示しません。ページを再読み込みしてください。');
+      saveCache(key, data);
       return { ...data, fromCache: false };
     }
 
@@ -3807,6 +3821,12 @@
       const common = [];
       if (!deps?.meta?.incomingScannedAt) {
         common.push('他アプリからこのアプリへの参照は未走査です。Relationsタブの「他アプリからの参照」で走査すると反映されます。');
+      } else {
+        const stats = deps.meta.incomingStats || {};
+        if (stats.failedApps) common.push(`他アプリ${stats.failedApps}件の設定を一部または全部確認できていないため、参照がないとは判断できません。`);
+        if (stats.actionsFailedApps) common.push(`うち${stats.actionsFailedApps}件のアプリアクションを確認できていません。`);
+        if (stats.truncated) common.push('他アプリの走査は上限で打ち切っています。未走査のアプリからの参照は分かりません。');
+        if (stats.includeActions === false) common.push('アプリアクションは走査対象外です。転記先への参照は未確認です。');
       }
       if (!scannerDone) {
         common.push('JavaScriptカスタマイズは未解析です。JS Scannerで「Scan」を実行すると、JSからの参照が反映されます。');
@@ -5312,10 +5332,12 @@
       if (jsSource === 'snippets') notes.push('JavaScript の本文は前回の解析結果だけを使っているため、一部しか含みません');
       if (jsAnalyzed && urlJs) notes.push(`URL 指定の JavaScript ${urlJs} 件は本文を取得できないため未解析`);
       if (!incomingScanned) notes.push('ほかのアプリからこのアプリへの参照はまだ調べていません');
-      if (incomingScanned && incoming?.stats?.truncated) notes.push('ほかのアプリを調べる処理は上限の件数で止めています');
+      if (incomingScanned && (incoming?.stats || meta.incomingStats)?.truncated) notes.push('ほかのアプリを調べる処理は上限の件数で止めています');
       if (incomingScanned && (incoming?.stats?.failedApps || meta.incomingStats?.failedApps)) {
         notes.push(`他アプリの走査で取得できなかったアプリがある（${incoming?.stats?.failedApps ?? meta.incomingStats?.failedApps} 件）`);
       }
+      if (incomingScanned && (incoming?.stats || meta.incomingStats)?.actionsFailedApps) notes.push(`アプリアクションを確認できていないアプリがあります（${(incoming?.stats || meta.incomingStats).actionsFailedApps} 件）`);
+      if (incomingScanned && (incoming?.stats || meta.incomingStats)?.includeActions === false) notes.push('アプリアクションは走査対象外です');
       if (meta.pluginCount) notes.push(`プラグイン ${meta.pluginCount} 個の設定内容は Toolkit では読めないため、調べていません`);
       notes.push('レコードの実データ・添付ファイルは含まない');
       return {
@@ -5435,6 +5457,9 @@
           referencingApps: (incoming?.stats || meta.incomingStats)?.referencingApps ?? null,
           scannedApps: (incoming?.stats || meta.incomingStats)?.scannedApps ?? null,
           failedApps: (incoming?.stats || meta.incomingStats)?.failedApps ?? null,
+          actionsFailedApps: (incoming?.stats || meta.incomingStats)?.actionsFailedApps ?? null,
+          includeActions: (incoming?.stats || meta.incomingStats)?.includeActions ?? null,
+          truncated: (incoming?.stats || meta.incomingStats)?.truncated ?? null,
         },
         brokenRefs: { total: broken.length, byConfidence: brokenByConf },
         appLinks: { count: links.length, byKind: linksByKind },
@@ -22106,6 +22131,8 @@
         `${st.scannedApps ?? 0} アプリを確認`,
         `${st.referencingApps ?? 0} アプリから参照あり`,
         st.failedApps ? `${st.failedApps} アプリは確認できず` : null,
+        st.actionsFailedApps ? `うち ${st.actionsFailedApps} アプリのアプリアクションは確認できていません` : null,
+        st.includeActions === false ? 'アプリアクションは走査対象外' : null,
         st.truncated ? `※ 上限 ${KTIncoming.MAX_APPS} アプリで打ち切り` : null,
       ].filter(Boolean).join(' / ');
 
@@ -22125,8 +22152,11 @@
       if (!rows.length) {
         $result.innerHTML = `
           <div style="padding:10px;font-size:12px;opacity:.85">
-            このアプリを参照しているアプリは見つかりませんでした。
+            取得できた設定の範囲では、このアプリを参照しているアプリは見つかりませんでした。
             ${st.failedApps ? `<br><span style="opacity:.75">ただし ${st.failedApps} アプリは権限等の理由で確認できていません。</span>` : ''}
+            ${st.actionsFailedApps ? `<br>${st.actionsFailedApps} アプリのアプリアクションを確認できていません。` : ''}
+            ${st.truncated ? '<br>走査は上限で打ち切っています。未走査のアプリからの参照は分かりません。' : ''}
+            ${st.includeActions === false ? '<br>アプリアクションは走査対象外です。' : ''}
           </div>`;
         return;
       }
@@ -22160,7 +22190,7 @@
         ${(data.errors || []).length ? `
           <div style="margin-top:6px;font-size:11px;opacity:.75">
             確認できなかったアプリ: ${(data.errors || []).slice(0, 20)
-          .map(e => `app ${escapeHtml(e.appId)}（${escapeHtml(e.reason)}）`).join(' / ')}${(data.errors || []).length > 20 ? ' ほか' : ''}
+          .map(e => `app ${escapeHtml(e.appId)}（${e.what === 'actions' ? 'アプリアクション: ' : ''}${escapeHtml(e.reason)}）`).join(' / ')}${(data.errors || []).length > 20 ? ' ほか' : ''}
           </div>` : ''}
         <div style="margin-top:8px;display:flex;justify-content:flex-end">
           <button id="kt-in-copy" class="btn" style="padding:2px 10px;font-size:11px">Copy MD</button>
@@ -26089,8 +26119,11 @@
     if (!view) return;
 
     // ★ ここでガード
-    const ok = await kintone.system.getPermissions();
-    if (!ok) {
+    // 再描画中も古い操作を残さず、権限の取得失敗・不正な応答では操作を許可しない。
+    view.textContent = '権限を確認しています…';
+    let permissions = null;
+    try { permissions = await kintone.system.getPermissions(); } catch (e) { }
+    if (permissions?.administration !== true) {
       view.innerHTML = `
         <div style="padding:12px; border:1px solid var(--kt-line); border-radius:10px;">
           <div style="font-weight:700; margin-bottom:6px;">🔒 plug-in タブ（管理者専用）</div>
@@ -26304,8 +26337,7 @@
         </div>
       `;
         const $cb = el.querySelector('input');
-        el.addEventListener('click', (e) => {
-          if (e.target !== $cb) $cb.checked = !$cb.checked;
+        $cb.addEventListener('change', () => {
           if ($cb.checked) selected.add(id);
           else selected.delete(id);
           $add.disabled = selected.size === 0;

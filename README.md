@@ -8,7 +8,7 @@
 
 初めて使う方は、[導入から最初の相談までのガイド](docs/getting-started.md)をご覧ください。無料機能の試し方、AI接続、相談文の例を順番に確認できます。
 
-**公開版：2.3.6**（2026年11月16日）。既存JavaScriptを編集する提案で、編集対象のファイルとその理由を右側の仮案に表示します。導入から最初の相談までのガイドも追加しました。[今回の変更内容](docs/RELEASE-NOTES-2.3.6.md)
+**公開版：2.3.7**（2026年11月16日）。他アプリ参照の保存・未確認範囲の表示、Pluginsの管理者判定と選択操作の5件を修正しました。[今回の変更内容](docs/RELEASE-NOTES-2.3.7.md)
 
 ![ToolkitのFields画面。上部のタブで機能を切り替え、項目の使用箇所と変更影響の候補を確認できます。](docs/images/fields.jpg)
 
@@ -65,11 +65,11 @@ PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です
 2. **[公開中のToolkitを開く](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)。** Tampermonkeyの画面でインストールする。
 3. **kintoneアプリのレコード一覧画面を開き、Toolkitを使う。** ［Fields］で項目を選び、無料の設定確認から始めます。AIを使う場合は［AI Assistant］→［接続］→［接続する］からNest Rec会員で接続します。[接続と最初の相談](docs/getting-started.md#3-aiを使うときにnest-rec会員で接続する)
 
-既存版から更新するときは、必要な会話・コードを保存してから上記スクリプトを開き、更新後にkintoneアプリを再読み込みしてください。[2.3.6の変更点と更新方法](docs/RELEASE-NOTES-2.3.6.md)
+既存版から更新するときは、必要な会話・コードを保存してから上記スクリプトを開き、更新後にkintoneアプリを再読み込みしてください。[2.3.7の変更点と更新方法](docs/RELEASE-NOTES-2.3.7.md)
 
 ### Chrome・Edge用の拡張機能ZIP
 
-同じソースから作った[2.3.6の拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.6/kintone-app-toolkit-2.3.6-chrome-extension.zip)もGitHubで配布しています。ZIPを展開し、ブラウザーの拡張機能管理画面から読み込めます。[導入・更新手順](extension/README.md)を参照してください。Tampermonkey版と拡張機能版は、どちらか一方だけを有効にします。
+同じソースから作った[2.3.7の拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.7/kintone-app-toolkit-2.3.7-chrome-extension.zip)もGitHubで配布しています。ZIPを展開し、ブラウザーの拡張機能管理画面から読み込めます。[導入・更新手順](extension/README.md)を参照してください。Tampermonkey版と拡張機能版は、どちらか一方だけを有効にします。
 
 Chromeウェブストアでの公開は別途審査対象です。GitHubでのZIP配布は、ストア公開済みを意味しません。
 
@@ -87,6 +87,7 @@ Chromeウェブストアでの公開は別途審査対象です。GitHubでのZI
 |---|---|
 | [機能リファレンス](docs/feature-reference.md) | 各タブの使い方、解析範囲、安全性、API一覧、過去の更新履歴 |
 | [AI Assistantのガイド](docs/release-workspace.md) | 相談・資料作成・変更案・反映・会話保存の流れと確認範囲 |
+| [2.3.7の変更内容](docs/RELEASE-NOTES-2.3.7.md) | 参照情報のユーザー別保存・未確認範囲の表示、Pluginsの管理者判定・選択操作 |
 | [2.3.6の変更内容](docs/RELEASE-NOTES-2.3.6.md) | 仮案でのJavaScript変更方針の表示、初回導入ガイド |
 | [2.3.5の変更内容](docs/RELEASE-NOTES-2.3.5.md) | 回答の一括送信・入力と回答の保持、フィールド配置・テーブル列の追加、拡張機能ZIPの配布 |
 | [2.3.4の修正内容](docs/RELEASE-NOTES-2.3.4.md) | ビルド識別子・版情報の整合と、開発・検証手順の整理 |
@@ -99,6 +100,7 @@ Chromeウェブストアでの公開は別途審査対象です。GitHubでのZI
 
 | 版 | 公開日 | 主な変更 |
 |---|---|---|
+| [2.3.7](docs/RELEASE-NOTES-2.3.7.md) | 2026-11-16 | 他アプリ参照とPluginsの5件の不具合を修正 |
 | [2.3.6](docs/RELEASE-NOTES-2.3.6.md) | 2026-11-16 | 仮案に編集対象のJSファイルと理由を表示。初回導入ガイドを追加 |
 | [2.3.5](docs/RELEASE-NOTES-2.3.5.md) | 2026-11-15 | 確認事項の回答をまとめて送信。入力・回答の保持、フィールド配置・テーブル列の追加、暗いテーマの矢印を改善。拡張機能ZIPも配布 |
 | [2.3.4](docs/RELEASE-NOTES-2.3.4.md) | 2026-11-14 | ビルド識別子・表示版・配布版を統一し、版の自動照合と検証手順を整備 |
