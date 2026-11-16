@@ -61,20 +61,37 @@ const summarize = values => { const sorted = values.slice().sort((a,b)=>a-b); re
           await timed('longConversationPaintMs',async()=>{window.view=T.KTReleaseView.create(host,{controller,connection:{connected:true,available:true}});shell.ktTabs.switchTab('ai');await paint();});
           shell.ktTabs.onSwitch(id=>{if(id==='ai')view.onVisible();});
           await timed('tabRoundTripPaintMs',async()=>{shell.ktTabs.switchTab('fields');await paint();shell.ktTabs.switchTab('ai');await paint();});
+          const originalMessage=host.querySelector('.ktr-message'), originalInput=host.querySelector('#kt-release-input');
+          await timed('fiveUnchangedRedrawsMs',()=>{for(let i=0;i<5;i++)view.render();});
+          out.messageNodeRetained=Number(originalMessage===host.querySelector('.ktr-message'));
+          out.inputNodeRetained=Number(originalInput===host.querySelector('#kt-release-input'));
           const store=T.KTReleaseHistory.create({scope:{domain:location.origin,appId:'310',userId:'benchmark-user',environment:'preview'},dbName:'benchmark-history'});
           const history=T.KTReleaseHistorySession.create({store,capture:()=>payload,restore:async()=>true,verifyAccess:async()=>true});
           await timed('firstHistorySaveMs',()=>history.flush());
           payload.draft+='追記';
           await timed('updatedHistorySaveMs',()=>history.flush());
           await timed('unchangedHistorySaveMs',()=>history.flush());
+          await timed('tenUnchangedHistorySavesMs',async()=>{for(let i=0;i<10;i++)await history.flush();});
+          // Count allocations separately from timings, restoring native JSON even on failure.
+          const parse=JSON.parse,stringify=JSON.stringify;
+          out.unchangedJsonParses=0;out.unchangedJsonStringifies=0;
+          try {
+            JSON.parse=function(...args){out.unchangedJsonParses++;return parse.apply(this,args);};
+            JSON.stringify=function(...args){out.unchangedJsonStringifies++;return stringify.apply(this,args);};
+            await history.flush();
+          } finally {JSON.parse=parse;JSON.stringify=stringify;}
           const saved=await store.load(history.getCurrent().id);
           if(JSON.stringify(saved.payload)!==JSON.stringify(payload))throw Error('History round-trip mismatch');
           if(host.querySelectorAll('.ktr-message').length!==200)throw Error('Conversation truncated');
           out.domNodes=document.querySelectorAll('*').length;
-          await history.dispose();view.dispose();return out;
+          window.disposeBenchmark=async()=>{await history.dispose();view.dispose();};return out;
         });
         const cdp=await context.newCDPSession(page);
         await cdp.send('HeapProfiler.collectGarbage');await cdp.send('Performance.enable');
+        const activeMetrics=await cdp.send('Performance.getMetrics');
+        row.activeJsHeapBytes=activeMetrics.metrics.find(x=>x.name==='JSHeapUsedSize').value;
+        await page.evaluate(async()=>{await window.disposeBenchmark();delete window.disposeBenchmark;});
+        await cdp.send('HeapProfiler.collectGarbage');
         const metrics=await cdp.send('Performance.getMetrics');
         row.retainedJsHeapBytes=metrics.metrics.find(x=>x.name==='JSHeapUsedSize').value;
         if(iteration>=0)rows.push(row);
@@ -82,7 +99,7 @@ const summarize = values => { const sorted = values.slice().sort((a,b)=>a-b); re
     }
     assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
     const result={timestamp:new Date().toISOString(),sourceRoot:root,sourceSha256:crypto.createHash('sha256').update(raw).digest('hex'),sourceBytes:Buffer.byteLength(raw),browser:browser.version(),node:process.version,cpu:os.cpus()[0]?.model,samples,warmup:1,
-      scope:'Isolated Edge, synthetic 500 fields / 200 messages / 10 editor drafts, real IndexedDB. Full app network startup and real AI latency excluded. Paint includes two animation frames. Heap after disposing history/view and forced GC; not peak memory.',
+      scope:'Isolated Edge, synthetic 500 fields / 200 messages / 10 editor drafts, real IndexedDB. Full app network startup and real AI latency excluded. Paint includes two animation frames. Active and disposed JS heap both measured after forced GC; not peak memory. capture returns the synthetic snapshot, excluding production exportSession work.',
       errors,unexpectedRequests:unexpected,summary:Object.fromEntries(Object.keys(rows[0]).map(k=>[k,summarize(rows.map(r=>r[k]))])),rows};
     fs.mkdirSync(path.dirname(path.resolve(output)),{recursive:true});fs.writeFileSync(output,JSON.stringify(result,null,2)+'\n');
     console.log(JSON.stringify({sourceBytes:result.sourceBytes,browser:result.browser,summary:result.summary},null,2));

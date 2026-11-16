@@ -452,11 +452,21 @@ const KTReleaseView = (() => {
       const h=state.businessContext;
       return h?JSON.stringify(['business',h.analysisId,h.analysisHash]):null;
     }
-    let panelsRendered = false, composerHeight = '', composerScrollTop = 0;
+    let panelsRendered = false, composerHeight = '', composerScrollTop = 0, previousMarkup = null, previousTaskId = null, previousVersion = null;
     let previousPhase = controller.getState().phase, previousRunId = null, previousMessageCount = 0, previousExplanationId = null, previousSmalltalkSignature = null;
     function draw(state = controller.getState(), capturePanels = true) {
       if (disposed) return;
       const smallState=options.smalltalk?.getState(), smallSignature=smallState?.open ? smallState.turns.length+':'+smallState.turns.filter(t=>t.reply!==null).length+':'+smallState.pending : null;
+      const input = host.querySelector?.('#kt-release-input');
+      if (input) { draft = input.value; composerHeight = input.style?.height || ''; composerScrollTop = input.scrollTop || 0; }
+      const markup = render(state, { ...options, draft, sending: sending || switching || !!smallState?.pending, switching, selectedRunId, notice });
+      // Returning to an unchanged conversation must not rebuild every message and
+      // input. Compare actual markup, not message counts or lossy state hashes.
+      // Workflow readers retain their existing remount/resize lifecycle.
+      if (capturePanels && panelsRendered && !overviewControls && state.taskId === previousTaskId && state.version === previousVersion && state.phase === previousPhase && selectedRunId === previousRunId && state.explanationId === previousExplanationId && markup === previousMarkup) {
+        for (const listener of displayListeners) listener();
+        return;
+      }
       // A native toggle event can still be queued when an input causes redraw.
       // Snapshot the visible panel state synchronously before replacing the DOM.
       if(capturePanels && panelsRendered)host.querySelectorAll?.('details[data-release-panel]').forEach(el=>{if(el.open)expanded.add(el.dataset.releasePanel);else expanded.delete(el.dataset.releasePanel);});
@@ -466,8 +476,7 @@ const KTReleaseView = (() => {
         ? activeControl.dataset?.releaseAction || (activeControl.matches?.('.ktr-more>summary') ? 'header-more' : null) : null;
       const smallInput = host.querySelector?.('#kt-smalltalk-input'), smallFocused = smallInput && host.ownerDocument?.activeElement === smallInput;
       const smallSelection = smallFocused ? [smallInput.selectionStart, smallInput.selectionEnd] : null;
-      const input = host.querySelector?.('#kt-release-input'), focused = !!input && host.ownerDocument?.activeElement === input;
-      if (input) { draft = input.value; composerHeight = input.style?.height || ''; composerScrollTop = input.scrollTop || 0; }
+      const focused = !!input && host.ownerDocument?.activeElement === input;
       const selection = focused ? [input.selectionStart, input.selectionEnd] : null;
       const activeSuggestion = host.ownerDocument?.activeElement?.dataset;
       const suggestionFocus = activeSuggestion?.releaseSuggestion ? { id: activeSuggestion.releaseSuggestion, task: activeSuggestion.releaseTask, version: activeSuggestion.releaseVersion } : null;
@@ -492,7 +501,11 @@ const KTReleaseView = (() => {
       const codePanel = options.codePanelElement?.();
       const codeFocus = codePanel?.contains(host.ownerDocument?.activeElement) ? host.ownerDocument.activeElement : null;
       codePanel?.remove();
-      host.innerHTML = render(state, { ...options, draft, sending: sending || switching || !!options.smalltalk?.getState().pending, switching, selectedRunId, notice });
+      host.innerHTML = markup;
+      // Retain only one bounded snapshot (at most 512K UTF-16 code units).
+      // Larger views still render in full; no content is truncated.
+      previousMarkup = markup.length <= 512 * 1024 ? markup : null;
+      previousTaskId = state.taskId; previousVersion = state.version;
       panelsRendered = true;
       if (codePanel) host.querySelector('.ktr-detail-pane').appendChild(codePanel);
       codeFocus?.focus?.({ preventScroll: true });
@@ -539,6 +552,7 @@ const KTReleaseView = (() => {
       if (!slot) return;
       const markup = historyStatusHtml(options);
       if (slot.innerHTML === markup) return;
+      previousMarkup = null;
       const previous = slot.querySelector('details'), wasOpen = !!previous?.open;
       const hadFocus = !!previous && previous.querySelector('summary') === host.ownerDocument?.activeElement;
       const scrollTop = previous?.querySelector('.ktr-history-status-message')?.scrollTop || 0;
@@ -550,6 +564,9 @@ const KTReleaseView = (() => {
       if (next?.open) { const message = next.querySelector('.ktr-history-status-message'); if (message) message.scrollTop = scrollTop; }
     }
     function updateDraftGuard() {
+      // These controls are updated without render(). The DOM no longer matches
+      // its cached HTML, even if a later canceled operation restores the state.
+      previousMarkup = null;
       const state = controller.getState();
       const pending = draftPending({ draft, smalltalk: options.smalltalk, sending: sending || switching });
       host.querySelectorAll?.('[data-release-base-disabled]').forEach(el => { const conn=connectionOf(options); const base=el.dataset.releaseAction==='adopt' && state.phase==='proposal' ? !!state.proposalPending || workspace.questions(state.proposal,state.answers).length>0 || conn.connected===false || conn.available===false || conn.canPlan===false || conn.canCreate===false : el.dataset.releaseBaseDisabled === 'true'; el.disabled = base || pending || !!state.responseRecovery || (el.dataset.releaseAction === 'adopt' && workspace.hasProposalFeedback(state)); });
@@ -822,7 +839,7 @@ const KTReleaseView = (() => {
       draw(state);
     });
     draw();
-    return { updateHistoryStatus, newTask: () => act('new-task'), canSwitchSession() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !busy.has(controller.getState().phase); }, resetDisplay() { if (disposed) return; selectedRunId = null; notice = ''; expanded.clear(); clearWorkflowPositions(); draw(undefined,false); }, getDraft: () => String(host.querySelector?.('#kt-release-input')?.value ?? draft), setDraft, subscribeDraft(fn) { draftListeners.add(fn); return () => draftListeners.delete(fn); }, canRequestDocument: (operation = 'document') => canSend(operation), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { if(options.smalltalk?.getState().open)options.smalltalk.close(); const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { setDraft(text); } input?.focus?.(); }, dispose() { disposed = true; overviewControls?.dispose(); displayListeners.clear(); draftListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
+    return { updateHistoryStatus, newTask: () => act('new-task'), canSwitchSession() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !busy.has(controller.getState().phase); }, resetDisplay() { if (disposed) return; selectedRunId = null; notice = ''; expanded.clear(); clearWorkflowPositions(); draw(undefined,false); }, getDraft: () => String(host.querySelector?.('#kt-release-input')?.value ?? draft), setDraft, subscribeDraft(fn) { draftListeners.add(fn); return () => draftListeners.delete(fn); }, canRequestDocument: (operation = 'document') => canSend(operation), requestDocument: (text, sendOptions) => send(text, null, null, sendOptions), render: draw, getSelectedRunId: () => selectedRunId, subscribeDisplay(fn) { displayListeners.add(fn); return () => displayListeners.delete(fn); }, onVisible() { draw(); }, canFocusConsultation() { return !options.smalltalk?.getState().pending && !disposed && !sending && !switching && !selectedRunId && !busy.has(controller.getState().phase); }, focusConsultation(text) { if(options.smalltalk?.getState().open)options.smalltalk.close(); const input = host.querySelector?.('#kt-release-input'); if (input && !input.value.trim()) { setDraft(text); } input?.focus?.(); }, dispose() { disposed = true; previousMarkup = null; overviewControls?.dispose(); displayListeners.clear(); draftListeners.clear(); unsubscribe(); host.removeEventListener?.('click', clicked); host.removeEventListener?.('input', inputChanged); host.removeEventListener?.('change', suggestionChanged); host.removeEventListener?.('keydown', keydown); host.removeEventListener?.('toggle', toggled, true); } };
   }
   const styles = `
     .ktr-workspace,.kt-release-dialog{--ktr-text:var(--kt-text,#253247);--ktr-muted:var(--kt-muted,#58677d);--ktr-line:var(--kt-line,#dbe2ec);--ktr-paper:var(--kt-paper,#fff);--ktr-soft:var(--kt-soft,#f5f7fb);--ktr-accent:var(--kt-accent,#285fbd);--ktr-primary:var(--kt-primary,#285fbd);--ktr-warning:var(--kt-warning,#805c15);--ktr-danger:var(--kt-danger,#9d3d22);--ktr-success:var(--kt-success,#24634f);color:var(--ktr-text);background:var(--ktr-paper);font:14px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;overflow-wrap:anywhere}

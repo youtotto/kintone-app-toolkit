@@ -8,6 +8,20 @@ const content = text => ({ ...blank(), draft: text, session: { state: { messages
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const metadata = entry => { const { payload, ...result } = clone(entry); return result; };
 
+test('unchanged-save selection repair retains edits made while the selection write is pending', async t => {
+  const f = fixture(); t.after(() => f.manager.dispose());
+  f.selectFailures = 1;
+  assert.equal(await f.manager.initialize(), false);
+  const gate = f.pause('select'), saving = f.manager.flush();
+  await gate.started.promise;
+  f.payload.draft = '選択の復旧中に入力した文章';
+  gate.release.resolve(); await saving;
+  assert.equal(f.manager.isDirty(), true);
+  await f.manager.flush();
+  assert.equal(f.saved.get(f.manager.getCurrent().id).payload.draft, '選択の復旧中に入力した文章');
+  assert.equal(f.manager.isDirty(), false);
+});
+
 function fixture({ selection = { id: 'older' }, initial = blank() } = {}) {
   let payload = clone(initial), selected = clone(selection), time = 10000, nextId = 0, access = true, selectFailures = 0;
   const saved = new Map(), barriers = new Map(), statuses = [];

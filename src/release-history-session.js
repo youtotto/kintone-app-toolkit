@@ -4,12 +4,22 @@ const KTReleaseHistorySession = (() => {
   const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
   const failure = (code, message) => Object.assign(new Error(message), { code });
   const editedFiles = payload => (payload?.editor?.files || []).filter(file => file.isNew || typeof file.registeredText !== 'string' || file.text !== file.registeredText);
-  function signature(payload) {
-    const value = clone(payload), state = value?.session?.state;
-    if (state) { delete state.explanationId; delete state.resultRunId; }
-    if (value?.editor) { const files = editedFiles(value); for (const file of files) delete file.viewState; value.editor = files.length ? { version: value.editor.version, files } : null; }
-    return JSON.stringify(value);
+  // The save path already owns a JSON snapshot. Project only the display-only
+  // containers instead of cloning every message and generated file again.
+  function snapshotSignature(value) {
+    const projected = value && typeof value === 'object' ? (Array.isArray(value) ? value.slice() : { ...value }) : value;
+    if (value?.session?.state && typeof value.session.state === 'object') {
+      const state = Array.isArray(value.session.state) ? value.session.state.slice() : { ...value.session.state };
+      delete state.explanationId; delete state.resultRunId;
+      projected.session = { ...value.session, state };
+    }
+    if (value?.editor) {
+      const files = editedFiles(value).map(({ viewState, ...file }) => file);
+      projected.editor = files.length ? { version: value.editor.version, files } : null;
+    }
+    return JSON.stringify(projected);
   }
+  function signature(payload) { return snapshotSignature(clone(payload)); }
   function hasContent(payload) {
     const s = payload?.session?.state || {};
     return !!(payload?.smalltalk?.draft || payload?.smalltalk?.turns?.length || payload?.draft || editedFiles(payload).length || s.messages?.length || s.explanations?.length || s.runs?.length || s.proposal || s.plan);
@@ -30,13 +40,22 @@ const KTReleaseHistorySession = (() => {
         : error?.message || 'ブラウザーに保存できませんでした。画面の内容は残っています。', error?.name === 'QuotaExceededError' ? 'HISTORY_LIMIT' : error?.code);
     };
     async function saveCurrent({ completedAt, pinned, snapshot } = {}) {
-      const payload = snapshot || clone(capture()), nextSignature = signature(payload);
+      const snapshotText = JSON.stringify(snapshot || capture());
+      if (snapshotText === lastSnapshot && completedAt === undefined && pinned === undefined && current) {
+        dirty = false;
+        if (selectionDirty) {
+          await verifyAccess(false); await store.select(current.id); selectionDirty = false;
+          // Selection repair is asynchronous; newer edits must still be saved.
+          dirty = JSON.stringify(capture()) !== snapshotText;
+          if (dirty && !disposed) schedule();
+        }
+        notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : 'このブラウザーに保存済み'); return current;
+      }
+      // Capture before the first await, retaining JSON normalization and isolating
+      // in-flight writes from subsequent typing even when changed() was not called.
+      const payload = snapshot || (snapshotText === undefined ? undefined : JSON.parse(snapshotText)), nextSignature = snapshotSignature(payload);
       if (!current && !hasContent(payload)) { lastSignature = nextSignature; dirty = false; notify('saved'); return current; }
       const changed = nextSignature !== lastSignature;
-      if (!changed && JSON.stringify(payload) === lastSnapshot && completedAt === undefined && pinned === undefined && current) {
-        if (selectionDirty) { await verifyAccess(false); await store.select(current.id); selectionDirty = false; }
-        dirty = false; notify('saved', 'このブラウザーに保存済み'); return current;
-      }
       await verifyAccess(false);
       const s = payload.session.state;
       const title = s.goal || s.messages?.find(m => m.role === 'user')?.text || s.explanations?.[0]?.title || '作業中の会話';
@@ -44,7 +63,7 @@ const KTReleaseHistorySession = (() => {
       const saved = await store.save({ id: prior?.id || makeId(), revision: prior?.revision ?? null,
         title: String(title).slice(0, 120), payload, completedAt: completedAt !== undefined ? completedAt : changed ? null : current?.completedAt ?? null,
         pinned: pinned !== undefined ? pinned : !!current?.pinned });
-      current = saved; lastSignature = nextSignature; lastSnapshot = JSON.stringify(payload); selectionDirty = false;
+      current = saved; lastSignature = nextSignature; lastSnapshot = snapshotText; selectionDirty = false;
       dirty = JSON.stringify(capture()) !== lastSnapshot;
       notify(dirty ? 'saving' : 'saved', dirty ? '保存しています…' : 'このブラウザーに保存済み');
       if (dirty && !disposed) schedule();
