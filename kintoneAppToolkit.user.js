@@ -10282,121 +10282,10 @@
   //   set-value（値を設定する）/ show-hide（表示を切り替える）。同じ効果として扱わない。要件の台帳・計画・必須の効果（requiredEffects）で同じ語彙を使い回す
   //   （各段階で文から効果を推定しない）
   const KT_EFFECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hide-row-buttons']);   // hide-row-buttons（2026-10-23・§12.69）: テーブルの行の追加・削除のボタンを隠す（公式 API showAddTableRowButtons / showDeleteTableRowButtons。テーブルのフィールドに付ける。condition は隠す条件）
-  const KT_EFFECT_JA = Object.freeze({ lock: '編集できない', warn: '警告を出す（編集・保存は許可）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える', 'hide-row-buttons': 'テーブルの行の追加・削除のボタンを隠す' });
-  /** 要件として必要な動作の言い方（要件未達の理由の文） */
-  /** レビューの指摘 row1（2026-10-09）: 効果の名詞の形（最終案の「依頼に無い「明細の保存の停止」は入れていません」の 1 行） */
-  const KT_EFFECT_NOUN_JA = Object.freeze({ lock: '編集の禁止', warn: '警告', 'block-save': '保存の停止', 'set-value': '値の設定', 'show-hide': '表示の切り替え', 'hide-row-buttons': '行の追加・削除のボタンの非表示' });
-  const KT_EFFECT_NEED_JA = Object.freeze({ lock: '編集できないようにする', warn: '警告を出す（編集・保存は止めない）', 'block-save': '保存を止める', 'set-value': '値を設定する', 'show-hide': '表示を切り替える', 'hide-row-buttons': 'テーブルの行の追加・削除のボタンを隠す' });
-  /**
-   * 動作テストを実行できなかった理由の語彙（§0c.6・契約 20 §13。生成工程の behavior.reason と behavior.cases[].reason）。区分ごとに利用者への理由と次の方針を変える:
-   *   env（環境）/ condition（条件の形）/ limit（件数）/ existing（既存 JS）/ machine（機械検査で未実行）/ scope（対象外。その代表条件はこの効果に当たらない）。
-   *   旧い名前（network・unsupported・load-error・existing-exception など）も受ける。語彙外は other（理由の名前は詳細表示だけ）
-   */
-  const KT_BEHAVIOR_REASONS = Object.freeze({
-    timeout: { category: 'env', text: '時間内に終わりませんでした' }, memory: { category: 'env', text: 'メモリの上限を超えました' },
-    internal: { category: 'env', text: '模擬テストの環境の内部の問題で実行できませんでした' }, unavailable: { category: 'env', text: '模擬テストの環境を使えませんでした' },
-    'not-configured': { category: 'env', text: '模擬テストの環境が用意されていません' }, network: { category: 'env', text: '通信を試みる処理は模擬テストの環境では確かめられません' },
-    //   §0c.8（2026-10-08）: 候補が隔離環境で動かせない機能を使った（unsupported・unsupported-feature）ときは、作り直しの操作（fix regenerate）を出す。
-    //   作り直しは通常の計画の差分更新の依頼として送る（依頼の文が生成の入力に入るので、同じ入力の再生成を AI を呼ばずに案内する規則とぶつからない）
-    unsupported: { category: 'env', text: '作った JavaScript が、模擬テストの環境で扱えない書き方・機能を使っています', fix: 'regenerate', next: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っているため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、その書き方を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が模擬テストの環境で動かせない書き方・機能を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
-    'load-error': { category: 'env', text: '模擬テストの環境での読み込みに失敗しました' },
-    //   2026-10-24（§12.70）: 模擬テストの環境がこの確かめ方に対応していない（AI サービスの sandbox-outdated。features などの印の有無で判定）。計画や JavaScript を直しても解けないので、環境の更新を待つ
-    'sandbox-outdated': { category: 'env', text: '模擬テストの環境が、この確かめ方に対応していません（模擬テストの環境の更新が必要です）', next: '模擬テストの環境の更新が必要です。作った JavaScript の誤りとは判定しておらず、AI に直させてはいません。環境が更新されたら、チャット欄で変更を頼むと最終案を作り直します。', readiness: '模擬テストの環境がこの確かめ方に対応していないため、必須の動作を模擬テストで確かめられず、まだ反映できません（模擬テストの環境の更新が必要です）。' },
-    //   2026-10-24（§12.70）: 画面の処理が終わった後に続く非同期の処理の中で画面を操作する書き方（kintone の画面で効くかは未確認）は、模擬テストでは観測できない。不合格ではなく未確認。作り直しで直接呼ぶ形にできる
-    'async-after-return': { category: 'env', text: '作った JavaScript が、画面の処理が終わった後に続く非同期の処理の中で画面を操作しているため、模擬テストではその結果を観測できません（誤りとは判定していません）', fix: 'regenerate', next: '模擬テストでは確かめられない書き方のため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、画面の処理の中で直接呼ぶ形への作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript の画面の操作が非同期の続きの中にあり、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
-    'condition-unparsed': { category: 'condition', text: '計画の条件を、模擬テストで確かめる条件にできる形で読めませんでした' },
-    //   §0c.8（2026-10-08）: 条件に合うレコードを作れない（条件の値が今の設定にも計画の新設にも無い）。条件の形の区分で判定に数える
-    'condition-value-unknown': { category: 'condition', text: '条件に合うレコードを作れません（条件の値が、今の設定にも計画で新設するものにもありません）', next: '計画の条件の値（ステータス名・選択肢など）を今の設定か計画で新設するものと同じ表記に直すか、新設の手順を足します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '条件に合うレコードを作れず（条件の値が今の設定にも計画の新設にもありません）、必須の動作を確かめられないため、まだ反映できません（計画の条件を直します。作った JavaScript の誤りとは判定していません）。' },
-    limit: { category: 'limit', text: '確かめる条件が上限を超えました' },
-    //   §0c.10（2026-10-08）: existing は隔離環境で既存 JS との競合が観測されたとき（既存 JS の error で編集不可が取り消された・既存 JS が値を変えた・
-    //   既存 JS が保存を止めて作った JavaScript の処理が動かなかった）。次の手は［計画を直すよう依頼する］（既存の JavaScript に統合する・役割分担を見直す）
-    existing: { category: 'existing', text: '既存の JavaScript との競合を、模擬テストで確認しました（既存の JavaScript が同じ画面で編集の可否・値・エラー・保存を変えました）' },
-    //   C-1 第 3 段（2026-10-08）: 既存 JS の編集不可を、作った JavaScript の警告（error）が取り消さないかを確かめられない（既存 JS の編集不可の条件が、
-    //   隔離環境の代表条件のレコードで成り立たない。例: 承認済のときだけ編集不可）。取り消しを観測できないので合格にしない。
-    //   次の手は［計画を直すよう依頼する］。依頼の文は構造化した値（代表条件の details.files・details.file のファイル名）から作る（fixRequestOf）
-    'existing-lock-unverified': { category: 'existing', fix: 'revise', text: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを、模擬テストで確かめられません（既存の JavaScript が編集不可にする条件のレコードを、模擬テストの環境で作れません）', next: '警告を、値を変えたとき・保存するときに出す形か、作る JavaScript を既存の JavaScript に統合する形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '既存の JavaScript の編集不可を、作った JavaScript の警告が取り消さないかを確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
-    //   §0c.10: 既存 JS の handler が隔離環境で動かせない（handler の中の例外・unsupported・通信）。計画を直しても解けないので、操作を出さず「対応できない範囲」
-    'existing-unrunnable': { category: 'existing', unfixable: true, text: '既存の JavaScript のこの画面の処理が、模擬テストの環境で動かせない処理（例外・通信・模擬テストの環境に無い機能）を含んでいます', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
-    //   旧い名前（handler の中の例外）。existing-unrunnable と同じく計画を直しても解けない
-    'existing-exception': { category: 'existing', unfixable: true, text: '既存の JavaScript が模擬テストの環境で例外になりました' },
-    //   §0c.9（2026-10-08）: 計画を直しても解けない理由（unfixable）。既存 JS の本文を渡せない（URL 指定・本文が無い・件数の上限など）・既存 JS の読み込みを隔離環境で再現できない
-    //   （existing-unverifiable）は、操作（［計画を直すよう依頼する］）を出さず「対応できない範囲」として理由とファイル名を出す
-    'related-file-omitted': { category: 'existing', unfixable: true, text: '同じ画面で動く既存の JavaScript を、模擬テストに渡せませんでした', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
-    //   §0c.10: 既存 JS の登録が読めない（イベント名を組み立てる・入れ子の登録・別名など）・静的に読んだ登録が隔離環境で登録されなかった（読み込み時の例外・環境の値での分岐・タイマーなど）
-    'existing-unverifiable': { category: 'existing', unfixable: true, text: '既存の JavaScript がその画面で登録する処理を確かめられません（登録を本文から読めない、または読み込みのときに模擬テストの環境で登録されませんでした）', readiness: '既存の JavaScript と一緒の動きを模擬テストで確かめられないため、まだ反映できません（対応できない範囲です。計画を直しても解けないため、依頼の操作は出していません。作った JavaScript の誤りとは判定していません）。' },
-    //   §0c.9: Toolkit の二重の安全（Toolkit の中だけの理由）。効果のイベントのそれぞれで「条件に合う」（条件つきなら「合わない」も）の合格が揃わない。区分は条件の形
-    'case-coverage': { category: 'condition', text: '必須の動作のうち、画面の操作ごとに条件に合うレコードと合わないレコードの両方の結果がそろわなかったものがあります', next: '計画の動作の画面の操作・条件を、それぞれの画面の操作で条件に合う・合わないレコードを作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '必須の動作の画面の操作のうち、条件に合う・合わないレコードで確かめた結果がそろわないため、まだ反映できません（計画の画面の操作・条件を直します。作った JavaScript の誤りとは判定していません）。' },
-    'machine-blocked': { category: 'machine', text: 'コードの検査で登録を止める問題があるため、模擬テストは実行していません' },
-    'patch-not-applicable': { category: 'machine', text: '既存の JavaScript への統合を合成できないため、模擬テストは実行していません' },
-    'no-event': { category: 'scope', text: 'その確かめ方に当たる画面の操作が計画にありません' },
-    //   §0c.10（2026-10-08）: 「条件に合う・条件に使わないフィールドは空」のケースを既存 JS が原因で確かめられない（判定に数えない・対象外）
-    'empty-by-existing': { category: 'scope', text: '条件に使わないフィールドが空のレコードは、既存の JavaScript が原因で確かめられないため、判定に数えていません' }, 'not-on-create': { category: 'scope', text: '作成画面では当たらない確かめ方です' },
-    //   §0c.8: 代表条件が無い効果は、確かめられるようになるのを待つのではなく計画（効果のイベント・条件）を直す
-    'no-cases': { category: 'scope', text: '確かめる条件がありません', fix: 'revise', next: '計画の動作の画面の操作・条件を、模擬テストで確かめる条件を作れる形に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
-    //   §0c.7（2026-10-08）: no-other-value（条件に合わない値を作れない＝その確かめ方は当たらない）は対象外。other-platform は「条件の形」の区分で判定に数える
-    //   （必須の効果のイベントに、候補が読み込まれない画面のものがある＝その効果は確かめていない。次の手は計画を直す）
-    'no-other-value': { category: 'scope', text: '条件に合わない値（またはほかの保存を止める条件に合わない値）を作れないため、この確かめ方は当たりません' },
-    'other-platform': { category: 'condition', text: '必須の動作に、この JavaScript が読み込まれない画面（PC / モバイル）のものがあります', next: 'その画面の操作を外すか、その画面（PC / モバイル）を担当する JavaScript を計画に置きます。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '必須の動作の画面の操作に、作った JavaScript が読み込まれない画面（PC / モバイル）のものがあるため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
-    //   §0c.7 の補い: 隔離環境で扱えない機能（BigInt など。機械検査 unsupported-feature）は環境の区分（候補の誤りにしない）。
-    //   ignored（window・document のイベントの登録を呼ばずに記録したもの）は判定に使わない記録。実行できなかった理由として届いたときは合格に数えない（環境の区分）
-    'unsupported-feature': { category: 'env', text: '模擬テストの環境で扱えない機能（BigInt など）を使っているため、模擬テストを実行していません', fix: 'regenerate', next: '作った JavaScript が模擬テストの環境で動かせない機能（BigInt など）を使っているため、AI に直させてはいません。最終案のカードの［作り直しを依頼する］で、その機能を使わない形での作り直しを依頼できます（自動では依頼しません）。', readiness: '作った JavaScript が模擬テストの環境で動かせない機能（BigInt など）を使っていて、必須の動作を模擬テストで確かめられないため、まだ反映できません（［作り直しを依頼する］で作り直せます）。' },
-    ignored: { category: 'env', text: 'ブラウザのイベントの登録（addEventListener など）は模擬テストの環境では呼ばずに記録だけしました' },
-    //   2026-10-10（誤った検証による修復の繰り返しを止める §3.2・契約 20 §13）: 模擬テストの入力（代表条件の change の形など）が隔離環境の約束と合わない。
-    //   検証入力の誤りで、作った JavaScript の不合格ではない（区分 env。修復も［計画を直すよう依頼する］も出さない）
-    'case-invalid': { category: 'env', text: '模擬テストに使う条件の形が模擬テストの環境の決まりと合わないため、実行していません（生成したコードの誤りとは判定していません）', readiness: '模擬テストに使う条件の形が模擬テストの環境の決まりと合わず、必須の動作を確かめられないため、まだ反映できません（検証の入力の問題です。作った JavaScript の誤りとは判定していないため、AI に直させてはいません）。' },
-    //   §4.2: 保存を止める条件が分からない（移植元の本文が無い・比べられない）ので代表条件を作らなかった。計画を直す対象（区分 condition。修復はしない）
-    'condition-unknown': { category: 'condition', text: '保存を止める条件が分からない（移植元の本文が無い・比べられない）ため、確かめる条件を作っていません', next: '保存を止める条件を推測で決めず、移植元の既存の JavaScript（本文を取得できるもの）から引き継ぐ形に計画を直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。', readiness: '保存を止める条件が分からず（移植元の本文が無い・比べられない）、必須の動作を確かめられないため、まだ反映できません（計画を直します。作った JavaScript の誤りとは判定していません）。' },
-  });
-  /** 区分ごとの見出しと次の方針（通常画面に出す。理由の名前・例外文は詳細表示） */
-  const KT_REASON_CATEGORY = Object.freeze({
-    //   §0c.8: 環境の制約は作り直しても変わらないので、操作（修復・作り直しの依頼）は出さない。待つだけの次の手にせず、何が起きていて利用者が何をすれば作り直せるかを書く
-    env: { label: '環境', next: '作った JavaScript の誤りとは判定していないため、AI に直させてはいません（同じ内容で作り直しても結果は変わりません）。この最終案は反映できません。模擬テストの環境の問題が解消したら、チャット欄で変更を頼むと最終案を作り直します。' },
-    //   §0c.8（2026-10-08）: 「計画を直す」が次の手の区分（fix revise）は、構造化した理由から作った修正の依頼を、最終案のカードの［計画を直すよう依頼する］で
-    //   通常の計画の差分更新に送れる（自動では送らない）。日付の条件も Gateway が解くので「単純な比較に直す」とは言わない
-    condition: { label: '条件の形', fix: 'revise', next: '計画の条件を、模擬テストで条件に合うレコード・合わないレコードを作れる形（フィールドと値の比較を and でつないだ形）に直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。' },
-    limit: { label: '件数の上限', fix: 'revise', next: '確かめる条件が多すぎます。計画の JavaScript を分けるか、対象のフィールド・条件を絞ります。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません。AI に直させてはいません）。' },
-    //   §0c.7（2026-10-08）: 既存 JS が原因で確かめられないときは準備未完了のまま、次の手は計画を直す（承認できないので「実機で確かめる」とは出さない）
-    existing: { label: '既存の JavaScript', fix: 'revise', next: '既存の JavaScript との競合を直すため、計画を直します（作る JavaScript を既存の JavaScript に統合する・既存の処理を見直す）。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。競合が残る間は、反映できる最終案にしません（AI に直させてはいません）。' },
-    machine: { label: 'コードの検査で未実行', next: 'コードの検査の問題を直した JavaScript で、模擬テストを実行します。' },
-    scope: { label: '対象外', fix: 'revise', next: '計画の画面の操作・対象の画面を見直します。最終案のカードの［計画を直すよう依頼する］で依頼できます（自動では依頼しません）。' },
-    other: { label: 'そのほか', next: '詳細を確かめてから、最終案を作り直します（AI に直させてはいません）。' },
-  });
-  /** §0c.8: 代表条件の「条件に合う」側の期待（Gateway の behavior-cases の pos。show-hide は条件があれば show-hide、無ければ hidden）。
-   *  §0c.10（2026-10-08）: show-hide の condition は隠す条件（条件に合えば hidden・合わなければ表示）。向きは Gateway が side ごとに判定する（Toolkit は期待を作らない） */
-  const KT_MATCH_EXPECTS = Object.freeze(['lock', 'warn', 'block-save', 'set-value', 'show-hide', 'hidden', 'row-buttons-hidden']);   // row-buttons-hidden（2026-10-23・§12.69）
-  /** 2026-10-10（§4.2）: 移植元と同じ動きかを比べる代表条件の期待（kind port・side match）。conditionFrom のある効果だけ「合う」側の確かめに数える */
-  const KT_PORT_EXPECT = 'same-as-source';
-  /** §0c.8: 次の手の操作の名前（最終案のカードのボタン。fix revise = 計画の差分更新の依頼 / regenerate = 作り直しの依頼） */
-  const KT_FIX_LABEL = Object.freeze({ revise: '計画を直すよう依頼する', regenerate: '作り直しを依頼する' });
-  const ktBehaviorReasonOf = (r) => (r && KT_BEHAVIOR_REASONS[r]) || null;
-  const ktBehaviorReasonCategory = (r) => (ktBehaviorReasonOf(r) ? ktBehaviorReasonOf(r).category : r ? 'other' : 'env');
-  const ktBehaviorReasonJa = (r) => (r ? (ktBehaviorReasonOf(r) ? ktBehaviorReasonOf(r).text : 'AI サービスが、この画面では扱えない理由を返しました（詳細を見てください）') : '');
   /**
    * §0d.1（2026-10-08）: 模擬テストが要る理由（生成工程の requiredEffects[].checkReason の語）の言い方。語の名前は利用者に出さない。
    *   語彙外の語は、文字が英小文字・数字・ハイフンだけなら共通の言い方にし（語の名前は詳細表示だけ）、それ以外（生成工程が文で返したもの）はそのまま使う
    */
-  //   語は生成工程の CHECK_REASON_ORDER（AI版 worker/src/v2/toolkit/verify-generated.mjs・契約 20 §13）と、Toolkit が構造から足す語（condition・warn・block-save）。
-  //   effect-kind（警告・保存禁止）は、Toolkit が効果の種類（warn・block-save）から足す語と重なるので、文にしない（空文字）。
-  //   §0d.4（2026-10-08）: 既知の競合（同じ表示のイベントの error と編集不可）は生成工程の candidate-error-same-event だけで受ける（Toolkit の形式確認では判定しない）
-  const KT_CHECK_REASON_JA = Object.freeze({
-    'event-missing': '動作を行う画面の操作の一部に処理がありません', 'candidate-error-same-event': '同じ画面の操作でエラーの表示と編集不可の両方を設定しています',
-    'existing-same-event': '既存の JavaScript が同じ画面の操作で動きます（または読み取れません）', 'platform-omitted': '模擬テストに渡せなかった既存の JavaScript が同じ画面にあります',
-    'other-platform': 'この JavaScript が読み込まれない画面の操作があります', 'subtable-column': 'テーブルの列', 'effect-kind': '',
-    conditional: '条件つき', 'no-event': '動作を行う画面の操作がありません', 'event-unreadable': 'どの画面の操作で動くかを本文から読めない処理があります',
-    'not-top-level': '処理の登録がトップレベルにない（ループの中など）', nested: '処理の本体の直下で設定していない（条件・try・入れ子の関数の中など）',
-    'early-return': '設定の前に処理を抜ける return がある（または event を返さない）', 'not-constant': '設定する値が定数ではない（表示の切り替えが隠すでない）', unchecked: '本文を解析できない',
-    //   Toolkit が構造から足す語（Toolkit が固定した必須の効果の条件・効果の種類）
-    condition: '条件つき', warn: '警告', 'block-save': '保存を止める',
-  });
-  const ktCheckReasonJa = (r) => (Object.prototype.hasOwnProperty.call(KT_CHECK_REASON_JA, r) ? KT_CHECK_REASON_JA[r] : (/^[a-z0-9-]+$/.test(String(r)) ? 'コードの検査だけでは確かめられない形' : String(r)));
-  /** §0d.1: 模擬テストが要る効果を、模擬テストの環境が使えないために確かめられないときの理由（一度にまとめて出す。labels = 効果の言い方、reasons = checkReason の語） */
-  const ktBehaviorNeededText = (labels, reasons) => {
-    const rs = [...new Set((reasons || []).map(ktCheckReasonJa).filter(Boolean))];
-    const ls = [...new Set(labels || [])];
-    return `この動作は模擬テストで確かめる必要があります（${rs.length ? rs.join('・') : '条件つき・警告・保存を止めるなど、コードの検査だけでは確かめられない形'}）。模擬テストの環境が使えないため、まだ反映できません${ls.length ? `（対象: ${ls.slice(0, 4).join('・')}${ls.length > 4 ? ` ほか ${ls.length - 4} 件` : ''}。作った JavaScript の誤りとは判定していません）` : '（作った JavaScript の誤りとは判定していません）'}`;
-  };
-  /** 効果の配列の正規化（語彙外は落とす・重複は 1 つ）。配列でなければ null（未指定と [] を区別する）。要件の台帳の effects（文字列の配列）用 */
-  const ktEffectsOf = (a) => (Array.isArray(a) ? [...new Set(a.map(x => (x && typeof x === 'object' ? x.effect : x)).filter(x => KT_EFFECTS.includes(x)))] : null);
   /**
    * §0c.6（2026-10-08）: 計画の fields[].effects（効果ごとの条件 [{ effect, condition }]）の正規化。旧い文字列の配列は { effect, condition: "" } に変換する。
    *   condition が "" ならフィールドの condition を使う（必須の効果を作るとき）。語彙外は落とす・同じ効果と条件の組は 1 つ。配列でなければ null
@@ -10427,8 +10316,6 @@
     const uniq = list.filter((c, i) => list.findIndex(d => d.file === c.file && d.target === c.target) === i).slice(0, 3);
     return uniq.length ? uniq : null;
   };
-  /** conditionFrom（移植元の候補）の指紋（流用の鍵・効果の組の鍵。無ければ ''） */
-  const ktConditionFromKey = (x) => { const cf = ktConditionFromOf(x); return cf ? cf.map(c => `${c.target}:${c.file}`).join('|') : ''; };
   /**
    * §0c.7（2026-10-08）: 生成工程が必須の効果の検証（新しい形）に対応しているか。health の customization-generator.verification に
    *   requiredEffects・effectGroups・relatedOmitted・appFields・saveDialog・reasonCategory・caseSide がすべてあるときだけ対応とみなす（欠ければ「接続先が非対応」）。
@@ -12797,6 +12684,16 @@
   //   回答済みでも、計画の検証（実在・権限・反映の可否）は省略しない（ここは対応づけと記録だけ。検証は KTPlanReview / Executor）。
   // ==========================================
   // BEGIN RELEASE WORKSPACE (generated from src/release-*.js)
+  /* Shared pure operations. Preserve the JSON snapshot and HTML text contracts. */
+  'use strict';
+  const KTReleaseUtils = (() => {
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    // Intentionally JSON-based: persisted snapshots omit undefined object members,
+    // convert dates to strings, and reject cycles. structuredClone has other semantics.
+    const cloneJson = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    return { escapeHtml, cloneJson };
+  })();
+
   /* Pure comparison functions extracted unchanged from kintone Config Lens v0.9.2.
    * https://github.com/youtotto/kintone-config-lens
    * Commit: fa9a942024c7947c3766414d5e6a2d254940260d
@@ -13520,7 +13417,7 @@
   const KTReleaseConfigLensLayout = (() => {
     const Lens = typeof KTConfigLensCompare !== 'undefined' ? KTConfigLensCompare : require('./vendor/config-lens-compare.js').KTConfigLensCompare;
     const { stable, flatten } = Lens;
-    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     function layoutIndex(layout) {
       const nodes = [], counts = new Map();
       function walk(items, path = []) {
@@ -13662,7 +13559,7 @@
     const Diff = typeof KTReleaseEnvironmentDiff !== 'undefined' ? KTReleaseEnvironmentDiff : require('./release-environment-diff.js').KTReleaseEnvironmentDiff;
     const Environment = typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView;
     const Layout = typeof KTReleaseConfigLensLayout !== 'undefined' ? KTReleaseConfigLensLayout : require('./release-config-lens-layout.js').KTReleaseConfigLensLayout;
-    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     const KINDS = Object.freeze({ added: '追加', changed: '変更', deleted: '削除' });
     const entryKey = entry => entry.id != null && String(entry.id) !== '' ? String(entry.id) : JSON.stringify([String(entry.categoryId || ''), String(entry.code ?? entry.label ?? '')]);
     const countsOf = entries => Object.fromEntries(Object.keys(KINDS).map(kind => [kind, entries.filter(e => e.kind === kind).length]));
@@ -14228,7 +14125,7 @@
   /* Browser-local session lifecycle. Storage failures never erase the active workspace. */
   'use strict';
   const KTReleaseHistorySession = (() => {
-    const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
     const failure = (code, message) => Object.assign(new Error(message), { code });
     const editedFiles = payload => (payload?.editor?.files || []).filter(file => file.isNew || typeof file.registeredText !== 'string' || file.text !== file.registeredText);
     function signature(payload) {
@@ -14903,7 +14800,7 @@
   const KTWorkflowDiagram = (() => {
     let sequence = 0;
     const nextId = () => 'workflow-' + (++sequence);
-    const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const escape = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     // Count Unicode code points; never cut a surrogate pair or discard long labels.
     const linesOf = (value, width = 16) => String(value ?? '').split(/\r?\n/).flatMap(line => {
       const chars = Array.from(line), out = [];
@@ -15067,7 +14964,7 @@
   'use strict';
   const KTWorkflowOverview = (() => {
     const D = typeof KTWorkflowDiagram !== 'undefined' ? KTWorkflowDiagram : require('./release-workflow-diagram.js').KTWorkflowDiagram;
-    const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     function scaleFor(width, height, availableWidth, zoom = '1') {
       if (!(width > 0 && height > 0 && availableWidth > 0)) return null;
       return ['1','1.5','2'].includes(zoom) ? Number(zoom) : 1;
@@ -15220,7 +15117,7 @@
   const KTBusinessView = (() => {
     const C=typeof KTBusinessContract!=='undefined'?KTBusinessContract:require('./release-business-contract.js').KTBusinessContract;
     const D=typeof KTWorkflowDiagram!=='undefined'?KTWorkflowDiagram:require('./release-workflow-diagram.js').KTWorkflowDiagram;
-    const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const escape = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     const md=s=>String(s??'').replace(/[\\\x60*_{}\[\]()#+.!|<>-]/g,c=>'\\'+c);
     const status=c=>({not_requested:'未取得',loading:'取得中',success:'取得済み',forbidden:'権限不足で取得不可',failed:'取得失敗',cancelled:'取得中断'}[c.acquisition]||'不明')+
       (c.acquisition==='success'?'・'+({present:'設定あり',empty:'明示設定なし',unknown:'内容不明'}[c.presence])+(c.activation==='disabled'?'・無効':c.activation==='enabled'?'・有効':''):'');
@@ -15713,7 +15610,7 @@
     const consultation = () => typeof KTBusinessConsultation !== 'undefined' ? KTBusinessConsultation : require('./release-business-consultation.js').KTBusinessConsultation;
     const business = () => typeof KTBusinessContract !== 'undefined' ? KTBusinessContract : require('./release-business-contract.js').KTBusinessContract;
     const businessView = () => typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView;
-    const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
     const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
     async function hash(value) {
       const text = typeof value === 'string' ? value : JSON.stringify(stable(value));
@@ -16644,7 +16541,7 @@
    * Reuse the existing analysis; never interpret the conversation here. */
   'use strict';
   const KTReleaseContext = (() => {
-    const clone = x => x == null ? x : JSON.parse(JSON.stringify(x));
+    const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
     const entries = x => Object.values(x || {});
     const sameFileEnvironment = (file, base) => file.env == null || file.env === base.env;
     function fieldsOf(properties, parent = null) {
@@ -16897,7 +16794,7 @@
   /* Coordinates preview-only writes using the same approved operations and real readback. */
   'use strict';
   const KTReleaseExecution = (() => {
-    const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
     const messageOf = item => item?.message || item?.summary || '';
     const good = prepared => !prepared || prepared.status === 'PREPARED';
     const pending = prepared => (prepared?.changes || prepared?.steps || []).filter(s => s.status === 'PENDING');
@@ -17413,7 +17310,7 @@
   const KTReleaseView = (() => {
     const overviewReader = typeof KTWorkflowOverview !== 'undefined' ? KTWorkflowOverview : require('./release-workflow-overview.js').KTWorkflowOverview;
     const workspace = typeof KTReleaseWorkspace !== 'undefined' ? KTReleaseWorkspace : require('./release-workspace.js').KTReleaseWorkspace;
-    const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
     const textOf = value => typeof value === 'string' ? value : value?.message || value?.title || value?.text || value?.description || value?.label || value?.name || '';
     const bodyOf = result => {
       const generated = result?.generated || result || {};
@@ -18702,36 +18599,6 @@
     }
 
     return { createComparison, comparisonOf, referenceInfoOf, createDependencySnapshot, dependencyInfoOf, renderDependencyInfo, createManualRegistration };
-  })();
-
-  /* Receiver-side usage facts only. Never reconstruct these from normalized token counts. */
-  const KTReleaseUsageDiagnostics = (() => {
-    const obj = value => !!value && typeof value === 'object' && !Array.isArray(value);
-    const own = (value, key) => obj(value) && Object.prototype.hasOwnProperty.call(value, key);
-    const containerKeys = ['usageState', 'inputDetailsState', 'writeDetailsState'];
-    const tokenKeys = ['writeTokensState', 'ttl30mState', 'ttl12hState'];
-    function sanitize(value) {
-      if (!obj(value) || !own(value, 'version') || value.version !== 1 || !own(value, 'inputDetailsSource') ||
-          ![null, 'input_tokens_details', 'prompt_tokens_details'].includes(value.inputDetailsSource) ||
-          !own(value, 'hasUnrecognizedWriteFields') || typeof value.hasUnrecognizedWriteFields !== 'boolean') return null;
-      if (containerKeys.some(key => !own(value, key) || !['object', 'missing', 'null', 'invalid'].includes(value[key])) ||
-          tokenKeys.some(key => !own(value, key) || !['valid', 'missing', 'null', 'invalid'].includes(value[key]))) return null;
-      return { version: 1, usageState: value.usageState, inputDetailsSource: value.inputDetailsSource,
-        inputDetailsState: value.inputDetailsState, writeDetailsState: value.writeDetailsState,
-        writeTokensState: value.writeTokensState, ttl30mState: value.ttl30mState, ttl12hState: value.ttl12hState,
-        hasUnrecognizedWriteFields: value.hasUnrecognizedWriteFields };
-    }
-    function html(value) {
-      const d = sanitize(value);
-      if (!d) return '<p>使用量の受信状態は未記録です。この記録だけでは、保持期間別の項目がないのか、値の形式が異なるのかを判断できません。</p>';
-      const labels = { object: 'オブジェクトあり', valid: '有効な数値あり', missing: '項目なし', null: 'null', invalid: '形式不正' };
-      const fields = { usageState: '使用量全体', inputDetailsState: '入力の内訳', writeDetailsState: '保持期間別の内訳', writeTokensState: '書き込み合計', ttl30mState: '書込30分', ttl12hState: '書込12時間' };
-      return '<details><summary>使用量の受信状態</summary><p>受信した使用量の既知の項目について、変換前の状態を記録しています。未取得の内訳を補完する情報ではありません。</p><p>入力の取得元：' +
-        (d.inputDetailsSource === 'input_tokens_details' ? 'Responses形式' : d.inputDetailsSource === 'prompt_tokens_details' ? 'Chat Completions形式' : '項目なし') + '</p><dl>' +
-        Object.entries(fields).map(([key, label]) => '<dt>' + label + '</dt><dd>' + labels[d[key]] + '</dd>').join('') + '</dl>' +
-        (d.hasUnrecognizedWriteFields ? '<p>保持期間別の内訳には、既知の2項目以外も含まれています。項目名や内容は記録していません。</p>' : '') + '</details>';
-    }
-    return { sanitize, html };
   })();
 
   /* Browser composition. Authentication, limits and preview executors are reused;

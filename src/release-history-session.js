@@ -1,7 +1,7 @@
 /* Browser-local session lifecycle. Storage failures never erase the active workspace. */
 'use strict';
 const KTReleaseHistorySession = (() => {
-  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
   const failure = (code, message) => Object.assign(new Error(message), { code });
   const editedFiles = payload => (payload?.editor?.files || []).filter(file => file.isNew || typeof file.registeredText !== 'string' || file.text !== file.registeredText);
   function signature(payload) {

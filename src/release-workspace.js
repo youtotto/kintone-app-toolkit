@@ -7,7 +7,7 @@ const KTReleaseWorkspace = (() => {
   const consultation = () => typeof KTBusinessConsultation !== 'undefined' ? KTBusinessConsultation : require('./release-business-consultation.js').KTBusinessConsultation;
   const business = () => typeof KTBusinessContract !== 'undefined' ? KTBusinessContract : require('./release-business-contract.js').KTBusinessContract;
   const businessView = () => typeof KTBusinessView !== 'undefined' ? KTBusinessView : require('./release-business-view.js').KTBusinessView;
-  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
   async function hash(value) {
     const text = typeof value === 'string' ? value : JSON.stringify(stable(value));

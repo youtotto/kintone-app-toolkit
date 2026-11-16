@@ -29,7 +29,7 @@
 const KTReleaseConfigLensLayout = (() => {
   const Lens = typeof KTConfigLensCompare !== 'undefined' ? KTConfigLensCompare : require('./vendor/config-lens-compare.js').KTConfigLensCompare;
   const { stable, flatten } = Lens;
-  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   function layoutIndex(layout) {
     const nodes = [], counts = new Map();
     function walk(items, path = []) {

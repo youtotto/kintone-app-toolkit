@@ -27,7 +27,8 @@ function digestGateModule(match) {
     if (!intercepted && match(new TextDecoder().decode(bytes))) { intercepted = true; entered.resolve(); await gate.promise; }
     return crypto.webcrypto.subtle.digest(algorithm, bytes);
   } } } };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../src/release-workspace.js'), 'utf8'), context);
+  const source = ['release-utils.js', 'release-workspace.js'].map(file => fs.readFileSync(require.resolve('../src/' + file), 'utf8')).join('\n');
+  vm.runInNewContext(source, context);
   return { Module: context.module.exports.KTReleaseWorkspace, entered, gate };
 }
 

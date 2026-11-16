@@ -6,7 +6,7 @@
 const KTReleaseView = (() => {
   const overviewReader = typeof KTWorkflowOverview !== 'undefined' ? KTWorkflowOverview : require('./release-workflow-overview.js').KTWorkflowOverview;
   const workspace = typeof KTReleaseWorkspace !== 'undefined' ? KTReleaseWorkspace : require('./release-workspace.js').KTReleaseWorkspace;
-  const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   const textOf = value => typeof value === 'string' ? value : value?.message || value?.title || value?.text || value?.description || value?.label || value?.name || '';
   const bodyOf = result => {
     const generated = result?.generated || result || {};

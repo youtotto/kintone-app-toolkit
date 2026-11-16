@@ -2,7 +2,7 @@
  * Reuse the existing analysis; never interpret the conversation here. */
 'use strict';
 const KTReleaseContext = (() => {
-  const clone = x => x == null ? x : JSON.parse(JSON.stringify(x));
+  const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
   const entries = x => Object.values(x || {});
   const sameFileEnvironment = (file, base) => file.env == null || file.env === base.env;
   function fieldsOf(properties, parent = null) {

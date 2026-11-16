@@ -2,7 +2,7 @@
 'use strict';
 const KTWorkflowOverview = (() => {
   const D = typeof KTWorkflowDiagram !== 'undefined' ? KTWorkflowDiagram : require('./release-workflow-diagram.js').KTWorkflowDiagram;
-  const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   function scaleFor(width, height, availableWidth, zoom = '1') {
     if (!(width > 0 && height > 0 && availableWidth > 0)) return null;
     return ['1','1.5','2'].includes(zoom) ? Number(zoom) : 1;

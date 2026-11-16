@@ -3,7 +3,7 @@
 const KTWorkflowDiagram = (() => {
   let sequence = 0;
   const nextId = () => 'workflow-' + (++sequence);
-  const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const escape = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   // Count Unicode code points; never cut a surrogate pair or discard long labels.
   const linesOf = (value, width = 16) => String(value ?? '').split(/\r?\n/).flatMap(line => {
     const chars = Array.from(line), out = [];

@@ -18,7 +18,7 @@ async function mounted(t, connection = {}) {
   page.on('pageerror', e => errors.push(e.message));
   await page.route('**/*', route => { network.push(route.request().url()); return route.abort(); });
   await page.setContent('<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="host" style="height:100vh"></div></body></html>');
-  for (const file of ['release-workflow-diagram.js', 'release-workflow-overview.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
+  for (const file of ['release-utils.js', 'release-workflow-diagram.js', 'release-workflow-overview.js']) await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') });
   await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src/release-workspace.js'), 'utf8') + '\nwindow.Workspace = KTReleaseWorkspace;' });
   await page.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../src/release-view.js'), 'utf8') + '\nwindow.View = KTReleaseView;' });
   await page.evaluate(async ({ initial, connection }) => {

@@ -12,7 +12,7 @@ test('保存回答をローカル画面で開き、確認不能の表示なし�
     page.on('pageerror',e=>errors.push(e.message));
     await page.route('**/*',r=>r.request().url()==='https://release.test.invalid/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body><div id="host" style="height:100vh"></div></body></html>'}):(network.push(r.request().url()),r.abort()));
     await page.goto('https://release.test.invalid/');
-    for(const file of ['release-workflow-diagram.js','release-workflow-overview.js','release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
+    for(const file of ['release-utils.js', 'release-workflow-diagram.js','release-workflow-overview.js','release-workspace.js','release-view.js'])await page.addScriptTag({content:fs.readFileSync(path.join(__dirname,'../src',file),'utf8')});
     const payload=fixture(Workspace).controller.exportSession();
     Object.assign(payload.state,{phase:'incomplete',plan:saved.plan,artifacts:saved.artifacts,version:1});
     payload.baseline={stamp:'fixed',appId:'427',environment:'preview',verificationFingerprint:null};

@@ -5,7 +5,7 @@ const KTReleaseConfigLensView = (() => {
   const Diff = typeof KTReleaseEnvironmentDiff !== 'undefined' ? KTReleaseEnvironmentDiff : require('./release-environment-diff.js').KTReleaseEnvironmentDiff;
   const Environment = typeof KTReleaseEnvironmentView !== 'undefined' ? KTReleaseEnvironmentView : require('./release-environment-view.js').KTReleaseEnvironmentView;
   const Layout = typeof KTReleaseConfigLensLayout !== 'undefined' ? KTReleaseConfigLensLayout : require('./release-config-lens-layout.js').KTReleaseConfigLensLayout;
-  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const esc = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   const KINDS = Object.freeze({ added: '追加', changed: '変更', deleted: '削除' });
   const entryKey = entry => entry.id != null && String(entry.id) !== '' ? String(entry.id) : JSON.stringify([String(entry.categoryId || ''), String(entry.code ?? entry.label ?? '')]);
   const countsOf = entries => Object.fromEntries(Object.keys(KINDS).map(kind => [kind, entries.filter(e => e.kind === kind).length]));

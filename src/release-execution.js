@@ -1,7 +1,7 @@
 /* Coordinates preview-only writes using the same approved operations and real readback. */
 'use strict';
 const KTReleaseExecution = (() => {
-  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const clone = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).cloneJson;
   const messageOf = item => item?.message || item?.summary || '';
   const good = prepared => !prepared || prepared.status === 'PREPARED';
   const pending = prepared => (prepared?.changes || prepared?.steps || []).filter(s => s.status === 'PENDING');

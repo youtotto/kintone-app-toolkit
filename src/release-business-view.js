@@ -3,7 +3,7 @@
 const KTBusinessView = (() => {
   const C=typeof KTBusinessContract!=='undefined'?KTBusinessContract:require('./release-business-contract.js').KTBusinessContract;
   const D=typeof KTWorkflowDiagram!=='undefined'?KTWorkflowDiagram:require('./release-workflow-diagram.js').KTWorkflowDiagram;
-  const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const escape = (typeof KTReleaseUtils !== 'undefined' ? KTReleaseUtils : require('./release-utils.js').KTReleaseUtils).escapeHtml;
   const md=s=>String(s??'').replace(/[\\\x60*_{}\[\]()#+.!|<>-]/g,c=>'\\'+c);
   const status=c=>({not_requested:'未取得',loading:'取得中',success:'取得済み',forbidden:'権限不足で取得不可',failed:'取得失敗',cancelled:'取得中断'}[c.acquisition]||'不明')+
     (c.acquisition==='success'?'・'+({present:'設定あり',empty:'明示設定なし',unknown:'内容不明'}[c.presence])+(c.activation==='disabled'?'・無効':c.activation==='enabled'?'・有効':''):'');
