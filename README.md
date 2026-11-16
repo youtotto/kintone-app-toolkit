@@ -61,11 +61,13 @@ Config Lensは、設定の種類や追加・変更・削除で絞り込み、変
 
 PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です。kintoneにプラグインZIPを読み込む方式ではありません。
 
-1. **[Tampermonkey](https://www.tampermonkey.net/)をブラウザーに追加する。**
-2. **[公開中のToolkitを開く](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)。** Tampermonkeyの画面でインストールする。
+**最初に、拡張機能版かTampermonkey版のどちらかを選んでください。両方を有効にするとToolkitが二重に起動します。**
+
+1. **使う版を選ぶ。** Chrome・Edgeでは拡張機能ZIPまたはTampermonkey版、FirefoxではTampermonkey版を利用します。
+2. **選んだ版だけを導入する。** 拡張機能ZIPは[導入手順](extension/README.md#zipから導入する)へ。Tampermonkey版は[Tampermonkey](https://www.tampermonkey.net/)を追加し、[公開中のToolkit](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)を開いてインストールします。
 3. **kintoneアプリのレコード一覧画面を開き、Toolkitを使う。** ［Fields］で項目を選び、無料の設定確認から始めます。AIを使う場合は［AI Assistant］→［接続］→［接続する］からNest Rec会員で接続します。[接続と最初の相談](docs/getting-started.md#3-aiを使うときにnest-rec会員で接続する)
 
-既存版から更新するときは、必要な会話・コードを保存してから上記スクリプトを開き、更新後にkintoneアプリを再読み込みしてください。[2.3.7の変更点と更新方法](docs/RELEASE-NOTES-2.3.7.md)
+既存版から更新するときは、必要な会話・コードを保存してから、[使っている版の更新手順](docs/getting-started.md#更新するとき)へ進んでください。更新後はkintoneアプリを再読み込みし、**表示が「Ver 2.3.7」で、Toolkitのパネルが1つだけ**であることを確認します。[2.3.7の変更点](docs/RELEASE-NOTES-2.3.7.md)
 
 ### Chrome・Edge用の拡張機能ZIP
 

@@ -8,11 +8,13 @@ GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/relea
 
 ## ZIPから導入する
 
+**拡張機能版を使う場合は、Tampermonkey版を同時に有効にしないでください。** 導入済みなら、Tampermonkeyの一覧で「kintone App Toolkit」スクリプトだけをOFFにします。他のスクリプトやTampermonkey全体を無効にする必要はありません。
+
 1. 拡張機能ZIPをダウンロードし、使い続ける場所へ展開します。
 2. Chromeは `chrome://extensions`、Edgeは `edge://extensions` を開きます。
 3. 「デベロッパー モード」をオンにします。
 4. 「パッケージ化されていない拡張機能を読み込む」で、展開したフォルダー（`manifest.json` がある場所）を選びます。
-5. kintoneアプリの一覧画面を開き、Toolkitの表示版を確認します。
+5. kintoneアプリの一覧画面を再読み込みし、「Ver 2.3.7」とToolkitのパネルが1つだけであることを確認します。
 
 Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どちらか一方だけを有効にしてください。
 
@@ -20,7 +22,12 @@ Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どち
 
 ## ZIP版を更新する
 
-必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。その後kintoneアプリを再読み込みし、「Ver 2.3.7」を確認してください。ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。
+1. 必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。
+2. 現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。別フォルダーからもう1つ追加する操作は不要です。
+3. 拡張機能版が有効で、Tampermonkeyの「kintone App Toolkit」スクリプトがOFFのままであることを確認します。Tampermonkey版を更新した場合も、この有効状態を確認してください。
+4. kintoneアプリを再読み込みし、**「Ver 2.3.7」とToolkitのパネルが1つだけであること**を確認します。開いている他のkintoneタブも再読み込みしてください。
+
+ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。Tampermonkey版へ切り替える場合は、この拡張機能をOFFにしてからToolkitスクリプトを有効にします。
 
 ## 作り方
 

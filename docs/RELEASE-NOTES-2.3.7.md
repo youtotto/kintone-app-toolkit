@@ -19,7 +19,7 @@
 - Tampermonkey版：[公開スクリプト](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)を開いて更新します。
 - Chrome・Edge用拡張機能版：[2.3.7のZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.7/kintone-app-toolkit-2.3.7-chrome-extension.zip)を取得し、[導入・更新手順](../extension/README.md)に沿って既存フォルダーの内容を置き換え、拡張機能を再読み込みします。ZIP手動導入版は自動更新されません。
 
-Tampermonkey版と拡張機能版は、どちらか一方だけを有効にしてください。
+更新後も、Tampermonkey版と拡張機能版のどちらか一方だけを有効にしてください。拡張機能版を使う場合、Tampermonkeyの「kintone App Toolkit」スクリプトだけをOFFにします。kintoneアプリを再読み込みし、**「Ver 2.3.7」とToolkitのパネルが1つだけであること**を確認してください。[導入・更新の確認手順](getting-started.md#更新するとき)
 
 Chromeウェブストアの2.3.5提出はそのまま維持します。今回のGitHub公開で審査の取り消しや2.3.7のストア提出は行いません。
 
