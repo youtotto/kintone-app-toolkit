@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.8
+// @version      2.3.9
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.8';
+  const SCRIPT_VERSION = '2.3.9';
   // Published build identifier.
-  const KT_BUILD = '2.3.8';
+  const KT_BUILD = '2.3.9';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -11342,7 +11342,11 @@
       plan: (r) => (r.plan && typeof r.plan === 'object' && typeof r.plan.goal === 'string' && Array.isArray(r.plan.steps) && r.plan.assessment ? null : 'plan がありません'),
       generated: (r) => {
         const g = r.generated;
-        if (!g || typeof g !== 'object' || typeof g.code !== 'string' || !g.code.trim() || typeof g.strategy !== 'string') return 'generated（strategy・code）がありません';
+        const deletionOnly = g?.strategy === 'EXTEND_EXISTING_JS' && g.code === '' &&
+          typeof g.body === 'string' && g.body.trim() && Array.isArray(g.patch?.operations) &&
+          g.patch.operations.length > 0 && g.patch.operations.every(op => op?.type === 'REPLACE' &&
+            typeof op.anchor === 'string' && op.anchor.trim() && op.content === '');
+        if (!g || typeof g !== 'object' || typeof g.code !== 'string' || (!g.code.trim() && !deletionOnly) || typeof g.strategy !== 'string') return 'generated（strategy・code）がありません';
         if (g.strategy === 'EXTEND_EXISTING_JS' && (!g.patch || !Array.isArray(g.patch.operations) || !g.patch.operations.length)) return '既存ファイルへの統合の差分（patch）がありません';
         //   統合の本文 body は文字列か null（契約 20 §20: 合成できなかった正常な応答は null・機械検査の patch の block。登録できないことは KTCodeReview の patch の確認が出す）
         if (g.strategy === 'EXTEND_EXISTING_JS' && g.body != null && typeof g.body !== 'string') return '既存ファイルへの統合の本文（body）の形が違います';
@@ -15880,6 +15884,14 @@
       const alternativeIds = new Set(alternatives.map(idOf).filter(Boolean));
       plan.customizations = (plan.customizations || []).filter(c => !c.alternativeId && (!alternativeIds.has(c.customizationId) || mainIds.has(c.customizationId)));
       plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
+      const unresolved = plan.steps.filter(s => (s.actionType === 'ADD_PROCESS_STATUS' ||
+        (s.actionType === 'UPDATE_PROCESS' && s.spec?.changeKind === 'ASSIGNEE')) &&
+        s.spec?.assignees?.length && !['ONE', 'ANY', 'ALL'].includes(s.spec.assigneeType));
+      if (unresolved.length && !plan.questions.some(q => q?.topic === 'assignee' && q.blocking !== false)) {
+        for (const step of unresolved) plan.questions.push({ topic: 'assignee', blocking: true,
+          question: '「' + (step.spec.name || step.title) + '」の作業者が複数いるとき、誰の操作で次へ進みますか？',
+          options: ['担当者から一人を選ぶ', '候補の誰か一人が操作する', '候補全員が操作する'] });
+      }
       return plan;
     }
     const explanationBody = e => e?.kind === 'business-understanding' ? businessView().historyBody(e) : e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
@@ -16288,7 +16300,7 @@
       }
       async function apply() {
         if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-        if (state.phase !== 'review' || !state.prepared?.ok) return false;
+        if (state.phase !== 'review' || !state.prepared?.ok || state.plan?.questions?.some(q => q && q.blocking !== false)) return false;
         const approved = clone(state.prepared);
         return activity('applying', async (_, live) => {
           const fresh = await getBase('execute');
@@ -16499,7 +16511,10 @@
             if (ready && !next.plan.questions.some(q => q && q.blocking !== false)) {
               next.phase = 'blocked'; next.error = { code: baseline && stampOf(fresh) !== baseline.stamp ? 'BASE_CHANGED' : 'APPROVAL_CHANGED',
                 message: '保存した変更案を開きました。反映する前に、最新の設定で内容を確認し直してください。' };
-            } else if (next.plan.questions.some(q => q && q.blocking !== false)) next.phase = 'blocked';
+            } else if (next.plan.questions.some(q => q && q.blocking !== false)) {
+              next.phase = 'blocked';
+              next.error = { code: 'PLAN_QUESTION', message: '仮案に未確定の項目があります。回答を相談欄から送信してください。' };
+            }
             else {
               next.phase = 'incomplete';
               if (baseline && stampOf(fresh) !== baseline.stamp) next.error = { code: 'BASE_CHANGED', message: '保存後に設定が変わりました。最新の設定で変更案を作り直してください。' };
@@ -17560,13 +17575,31 @@
         return `<li><strong>${esc(title)}</strong>${change.placementDescription ? `<p class="ktr-note">${esc(change.placementDescription)}</p>` : ''}${change.description && change.description !== title ? `<p>${esc(change.description)}</p>` : ''}${values.length || change.technicalSummary ? `<details data-release-panel="change-${esc(change.id || index)}"><summary>設定の詳細（技術者向け）</summary>${change.technicalSummary ? `<p>${esc(change.technicalSummary)}</p>` : ''}${values.map(([label, value]) => `<h4>${label}</h4><pre class="ktr-setting-values">${esc(JSON.stringify(value, null, 2))}</pre>`).join('')}</details>` : ''}</li>`;
       }).join('')}</ul>`;
     }
+    function planQuestionsHtml(state) {
+      const plan = state.plan;
+      return '<section class="ktr-section"><h2>仮案を確認してください</h2>' + list(plan.steps) +
+        '<h3>反映前に決めること</h3>' + plan.questions.map((q, index) => {
+          const question = typeof q === 'string' ? q : q.question || textOf(q);
+          return '<article class="ktr-question"><h4>' + esc(question) + '</h4>' +
+            (q.impact ? '<p>' + esc(q.impact) + '</p>' : '') +
+            (q.options || []).map((choice, choiceIndex) => button('plan-choice', choice, { id: index + '-' + choiceIndex })).join('') +
+            '</article>';
+        }).join('') + '<p>候補を選ぶか相談欄に回答を入力し、送信してください。回答をもとに変更案を作り直し、反映前に確認できます。</p></section>';
+    }
+    function approvalRulesHtml(plan) {
+      const modes = { ONE: '候補から作業者を一人選ぶ', ANY: '候補の誰か一人が操作すると次へ進む', ALL: '候補全員が操作すると次へ進む' };
+      const rules = (plan?.steps || []).filter(s => (s.actionType === 'ADD_PROCESS_STATUS' ||
+        (s.actionType === 'UPDATE_PROCESS' && s.spec?.changeKind === 'ASSIGNEE')) &&
+        s.spec?.assignees?.length && Object.hasOwn(modes, s.spec.assigneeType));
+      return rules.length ? '<h3>反映する承認ルール</h3>' + list(rules.map(s => (s.spec.name || s.title) + '：' + modes[s.spec.assigneeType])) : '';
+    }
     function reviewHtml(state, options) {
       const prep = state.prepared || {};
       return `<section class="ktr-section"><h2>今回反映する内容</h2>${changesHtml(prep.changes || [])}
         ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
         ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
         ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-        ${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
+        ${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
         ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
         <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
         ${(state.artifacts || []).length ? '<p class="ktr-note">JavaScriptは作成済みです。コードと変更内容を確認して反映してください。</p>' : ''}
@@ -17737,6 +17770,7 @@
       else if (state.phase === 'review') body = reviewHtml(state, options);
       else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
       else if (state.phase === 'unchanged') body = `<section class="ktr-section"><h2>反映する変更はありません</h2><p>確認した範囲は、現在の内容で実現しています。設定やJavaScriptの登録は行いません。</p>${list(state.adopted?.behaviors || [])}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
+      else if (state.phase === 'blocked' && state.error?.code === 'PLAN_QUESTION' && state.plan) body = planQuestionsHtml(state);
       else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list([...new Map((state.prepared?.reasons || []).map(r => [textOf(r), r])).values()], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p>${workspace.canReprepare(state) ? reprepareHtml(options) : ''}</section>`;
       else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
       else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
@@ -17751,7 +17785,8 @@
         // without repeating its workflow or changing the saved consultation.
         const reference=businessContextReference(state, busy.has(state.phase)||!!options.sending||!!options.switching);
         body=busy.has(state.phase)?body+reference:reference+body;
-        if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
+        if(state.phase==='blocked' && state.error?.code==='PLAN_QUESTION' && state.plan) body=planQuestionsHtml(state)+body;
+        else if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
       }
       if(state.businessPlanContext&&!state.businessContext&&!historical)body='<aside class="ktr-section"><p>業務分析と確認した運用をもとにした仮案です。質問への回答や修正は相談欄へ入力できます。</p>'+button('business-start','業務の確認へ戻る',{id:state.businessPlanContext.analysisId,extra:state.businessPlanContext.selection.ruleId?' data-business-rule="'+esc(state.businessPlanContext.selection.ruleId)+'"':''})+'</aside>'+body;
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : state.businessContext && !historical && !busy.has(state.phase) && stageOf(state.phase, false) === 'empty' ? 'business' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
@@ -18016,6 +18051,18 @@
         if (['adopt','resume','reprepare','apply'].includes(action)&&state.businessReviewRequired){notice='運用の前提が変わりました。変更希望を整理して仮案を確認し直してください。';draw();return;}
         if (action === 'adopt' && connectionOf(options).canCreate === false) return;
         if (action === 'resume' && resumeBlocked(connectionOf(options))) return;
+        if (action === 'plan-choice') {
+          if (selectedRunId || sending || state.phase !== 'blocked' || state.error?.code !== 'PLAN_QUESTION') return;
+          const [index, choiceIndex] = String(id).split('-');
+          const q = state.plan?.questions?.[index], choice = q?.options?.[choiceIndex];
+          if (typeof choice !== 'string') return;
+          controller.setRequestPurpose('consultation');
+          const line = q.question + '：' + choice;
+          const alternatives = new Set(q.options.map(value => q.question + '：' + value));
+          setDraft([...draft.split('\n').filter(text => text && !alternatives.has(text)), line].join('\n'));
+          host.querySelector?.('#kt-release-input')?.focus?.();
+          return;
+        }
         if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }
         if (action === 'code') {
           const opened = options.onToggleCode?.();

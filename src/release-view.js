@@ -237,13 +237,31 @@ const KTReleaseView = (() => {
       return `<li><strong>${esc(title)}</strong>${change.placementDescription ? `<p class="ktr-note">${esc(change.placementDescription)}</p>` : ''}${change.description && change.description !== title ? `<p>${esc(change.description)}</p>` : ''}${values.length || change.technicalSummary ? `<details data-release-panel="change-${esc(change.id || index)}"><summary>設定の詳細（技術者向け）</summary>${change.technicalSummary ? `<p>${esc(change.technicalSummary)}</p>` : ''}${values.map(([label, value]) => `<h4>${label}</h4><pre class="ktr-setting-values">${esc(JSON.stringify(value, null, 2))}</pre>`).join('')}</details>` : ''}</li>`;
     }).join('')}</ul>`;
   }
+  function planQuestionsHtml(state) {
+    const plan = state.plan;
+    return '<section class="ktr-section"><h2>仮案を確認してください</h2>' + list(plan.steps) +
+      '<h3>反映前に決めること</h3>' + plan.questions.map((q, index) => {
+        const question = typeof q === 'string' ? q : q.question || textOf(q);
+        return '<article class="ktr-question"><h4>' + esc(question) + '</h4>' +
+          (q.impact ? '<p>' + esc(q.impact) + '</p>' : '') +
+          (q.options || []).map((choice, choiceIndex) => button('plan-choice', choice, { id: index + '-' + choiceIndex })).join('') +
+          '</article>';
+      }).join('') + '<p>候補を選ぶか相談欄に回答を入力し、送信してください。回答をもとに変更案を作り直し、反映前に確認できます。</p></section>';
+  }
+  function approvalRulesHtml(plan) {
+    const modes = { ONE: '候補から作業者を一人選ぶ', ANY: '候補の誰か一人が操作すると次へ進む', ALL: '候補全員が操作すると次へ進む' };
+    const rules = (plan?.steps || []).filter(s => (s.actionType === 'ADD_PROCESS_STATUS' ||
+      (s.actionType === 'UPDATE_PROCESS' && s.spec?.changeKind === 'ASSIGNEE')) &&
+      s.spec?.assignees?.length && Object.hasOwn(modes, s.spec.assigneeType));
+    return rules.length ? '<h3>反映する承認ルール</h3>' + list(rules.map(s => (s.spec.name || s.title) + '：' + modes[s.spec.assigneeType])) : '';
+  }
   function reviewHtml(state, options) {
     const prep = state.prepared || {};
     return `<section class="ktr-section"><h2>今回反映する内容</h2>${changesHtml(prep.changes || [])}
       ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
       ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
       ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-      ${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
+      ${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
       ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
       <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
       ${(state.artifacts || []).length ? '<p class="ktr-note">JavaScriptは作成済みです。コードと変更内容を確認して反映してください。</p>' : ''}
@@ -414,6 +432,7 @@ const KTReleaseView = (() => {
     else if (state.phase === 'review') body = reviewHtml(state, options);
     else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
     else if (state.phase === 'unchanged') body = `<section class="ktr-section"><h2>反映する変更はありません</h2><p>確認した範囲は、現在の内容で実現しています。設定やJavaScriptの登録は行いません。</p>${list(state.adopted?.behaviors || [])}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
+    else if (state.phase === 'blocked' && state.error?.code === 'PLAN_QUESTION' && state.plan) body = planQuestionsHtml(state);
     else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list([...new Map((state.prepared?.reasons || []).map(r => [textOf(r), r])).values()], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p>${workspace.canReprepare(state) ? reprepareHtml(options) : ''}</section>`;
     else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
     else if (state.phase === 'rollback-confirm') body = rollbackHtml(state, options);
@@ -428,7 +447,8 @@ const KTReleaseView = (() => {
       // without repeating its workflow or changing the saved consultation.
       const reference=businessContextReference(state, busy.has(state.phase)||!!options.sending||!!options.switching);
       body=busy.has(state.phase)?body+reference:reference+body;
-      if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
+      if(state.phase==='blocked' && state.error?.code==='PLAN_QUESTION' && state.plan) body=planQuestionsHtml(state)+body;
+      else if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
     }
     if(state.businessPlanContext&&!state.businessContext&&!historical)body='<aside class="ktr-section"><p>業務分析と確認した運用をもとにした仮案です。質問への回答や修正は相談欄へ入力できます。</p>'+button('business-start','業務の確認へ戻る',{id:state.businessPlanContext.analysisId,extra:state.businessPlanContext.selection.ruleId?' data-business-rule="'+esc(state.businessPlanContext.selection.ruleId)+'"':''})+'</aside>'+body;
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : state.businessContext && !historical && !busy.has(state.phase) && stageOf(state.phase, false) === 'empty' ? 'business' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
@@ -693,6 +713,18 @@ const KTReleaseView = (() => {
       if (['adopt','resume','reprepare','apply'].includes(action)&&state.businessReviewRequired){notice='運用の前提が変わりました。変更希望を整理して仮案を確認し直してください。';draw();return;}
       if (action === 'adopt' && connectionOf(options).canCreate === false) return;
       if (action === 'resume' && resumeBlocked(connectionOf(options))) return;
+      if (action === 'plan-choice') {
+        if (selectedRunId || sending || state.phase !== 'blocked' || state.error?.code !== 'PLAN_QUESTION') return;
+        const [index, choiceIndex] = String(id).split('-');
+        const q = state.plan?.questions?.[index], choice = q?.options?.[choiceIndex];
+        if (typeof choice !== 'string') return;
+        controller.setRequestPurpose('consultation');
+        const line = q.question + '：' + choice;
+        const alternatives = new Set(q.options.map(value => q.question + '：' + value));
+        setDraft([...draft.split('\n').filter(text => text && !alternatives.has(text)), line].join('\n'));
+        host.querySelector?.('#kt-release-input')?.focus?.();
+        return;
+      }
       if (action === 'focus-consultation') { if (!busy.has(state.phase)) { controller.setRequestPurpose('consultation'); host.querySelector?.('#kt-release-input')?.focus?.(); } return; }
       if (action === 'code') {
         const opened = options.onToggleCode?.();

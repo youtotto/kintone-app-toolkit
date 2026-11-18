@@ -258,6 +258,14 @@ const KTReleaseWorkspace = (() => {
     const alternativeIds = new Set(alternatives.map(idOf).filter(Boolean));
     plan.customizations = (plan.customizations || []).filter(c => !c.alternativeId && (!alternativeIds.has(c.customizationId) || mainIds.has(c.customizationId)));
     plan.questions = [...(plan.questions || []), ...plan.customizations.flatMap(c => c.questions || [])];
+    const unresolved = plan.steps.filter(s => (s.actionType === 'ADD_PROCESS_STATUS' ||
+      (s.actionType === 'UPDATE_PROCESS' && s.spec?.changeKind === 'ASSIGNEE')) &&
+      s.spec?.assignees?.length && !['ONE', 'ANY', 'ALL'].includes(s.spec.assigneeType));
+    if (unresolved.length && !plan.questions.some(q => q?.topic === 'assignee' && q.blocking !== false)) {
+      for (const step of unresolved) plan.questions.push({ topic: 'assignee', blocking: true,
+        question: '「' + (step.spec.name || step.title) + '」の作業者が複数いるとき、誰の操作で次へ進みますか？',
+        options: ['担当者から一人を選ぶ', '候補の誰か一人が操作する', '候補全員が操作する'] });
+    }
     return plan;
   }
   const explanationBody = e => e?.kind === 'business-understanding' ? businessView().historyBody(e) : e ? clone({ title: e.title, sections: e.sections, unknowns: e.unknowns }) : null;
@@ -666,7 +674,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function apply() {
       if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-      if (state.phase !== 'review' || !state.prepared?.ok) return false;
+      if (state.phase !== 'review' || !state.prepared?.ok || state.plan?.questions?.some(q => q && q.blocking !== false)) return false;
       const approved = clone(state.prepared);
       return activity('applying', async (_, live) => {
         const fresh = await getBase('execute');
@@ -877,7 +885,10 @@ const KTReleaseWorkspace = (() => {
           if (ready && !next.plan.questions.some(q => q && q.blocking !== false)) {
             next.phase = 'blocked'; next.error = { code: baseline && stampOf(fresh) !== baseline.stamp ? 'BASE_CHANGED' : 'APPROVAL_CHANGED',
               message: '保存した変更案を開きました。反映する前に、最新の設定で内容を確認し直してください。' };
-          } else if (next.plan.questions.some(q => q && q.blocking !== false)) next.phase = 'blocked';
+          } else if (next.plan.questions.some(q => q && q.blocking !== false)) {
+            next.phase = 'blocked';
+            next.error = { code: 'PLAN_QUESTION', message: '仮案に未確定の項目があります。回答を相談欄から送信してください。' };
+          }
           else {
             next.phase = 'incomplete';
             if (baseline && stampOf(fresh) !== baseline.stamp) next.error = { code: 'BASE_CHANGED', message: '保存後に設定が変わりました。最新の設定で変更案を作り直してください。' };
