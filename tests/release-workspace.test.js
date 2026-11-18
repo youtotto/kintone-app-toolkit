@@ -19,6 +19,20 @@ const plain = html => String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 const ordinary = html => plain(String(html).replace(/<details\b[\s\S]*?<\/details>/g, ''));
 const latestRun = f => stateOf(f).runs.at(-1);
 
+test('全件撤回した仮案からは作成できず、次の相談で有効な案を作成できる', async () => {
+  const empty = {behaviors:[], assumptions:[], decisions:[], approach:{standard:[],js:[]}, cannot:[]};
+  const f = fresh({propose:({text})=>text==='全件撤回' ? {...proposal(), reply:'仮案を取り下げました。', intent:'update', proposal:empty} : proposal()});
+  await f.controller.send(REQUEST);
+  await f.controller.send('全件撤回');
+  assert.doesNotMatch(KTReleaseView.render(stateOf(f)), /data-release-action="adopt"/);
+  assert.equal(await f.controller.adopt(), false);
+  assert.equal(f.count('plan'),0);
+  assert.equal(f.writes.length,0);
+  await f.controller.send('新しい一覧を追加');
+  await f.controller.adopt();
+  assert.equal(f.count('plan'),1);
+});
+
 function digestGateModule(match) {
   const vm = require('node:vm'), fs = require('node:fs'), crypto = require('node:crypto');
   const entered = deferred(), gate = deferred();

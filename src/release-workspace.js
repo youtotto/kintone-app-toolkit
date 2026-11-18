@@ -248,6 +248,8 @@ const KTReleaseWorkspace = (() => {
       suggestionRequest(state), String(text).trim()].filter(Boolean).join('\n\n');
   }
   const hasProposalFeedback = state => activeDecisionDrafts(state).length > 0 || !!suggestionRequest(state);
+  // Optional suggestions enter the plan only after the user's selection becomes a revised proposal.
+  const hasPlanScope = proposal => (proposal?.behaviors || []).some(item => item?.text?.trim() && item.origin !== 'suggestion');
   // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
   function mainPlan(value) {
     const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -633,7 +635,7 @@ const KTReleaseWorkspace = (() => {
     }
     async function adopt() {
       if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-      if (!state.proposal || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
+      if (!hasPlanScope(state.proposal) || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
       invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
       // Optional ideas are not adopted by the general create action.
       state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -942,7 +944,7 @@ const KTReleaseWorkspace = (() => {
       },
     };
   }
-  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
+  return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, hasPlanScope, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseWorkspace };

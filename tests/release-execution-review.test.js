@@ -221,7 +221,7 @@ const prepare=async(s,steps=[],artifacts=[artifact()])=>s.service.prepare({plan:
     const controller=KTReleaseWorkspace.create({
       loadBase:async()=>({...await s.loadBase(),stamp:String(m.st.revision)}),execution:s.service,
       services:{
-        propose:async()=>({reply:'一覧とJavaScriptを作ります',proposal:{behaviors:[],decisions:[]}}),
+        propose:async()=>({reply:'一覧とJavaScriptを作ります',proposal:{behaviors:[{id:'B1',text:'一覧とモバイルの編集制御を追加する',origin:'user'}],decisions:[]}}),
         plan:async()=>({plan:{steps:[setting],customizations:[customization],questions:[],proposedFields:[]}}),
         generate:async()=>clone(a.result)
       }

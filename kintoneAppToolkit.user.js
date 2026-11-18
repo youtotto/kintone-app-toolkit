@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.9
+// @version      2.3.10
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.9';
+  const SCRIPT_VERSION = '2.3.10';
   // Published build identifier.
-  const KT_BUILD = '2.3.9';
+  const KT_BUILD = '2.3.10';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -15874,6 +15874,8 @@
         suggestionRequest(state), String(text).trim()].filter(Boolean).join('\n\n');
     }
     const hasProposalFeedback = state => activeDecisionDrafts(state).length > 0 || !!suggestionRequest(state);
+    // Optional suggestions enter the plan only after the user's selection becomes a revised proposal.
+    const hasPlanScope = proposal => (proposal?.behaviors || []).some(item => item?.text?.trim() && item.origin !== 'suggestion');
     // Alternatives are suggestions, not selected operations. Follow explicit IDs only.
     function mainPlan(value) {
       const plan = clone(value), excluded = new Set((plan.alternatives || []).flatMap(a => a.stepIds || []));
@@ -16259,7 +16261,7 @@
       }
       async function adopt() {
         if (state.businessReviewRequired) { set({error:{code:'BUSINESS_REVIEW_REQUIRED',message:'運用の前提が変わりました。変更希望を整理し、最新の設定で仮案を相談してください。'}}); return false; }
-        if (!state.proposal || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
+        if (!hasPlanScope(state.proposal) || state.proposalPending || hasProposalFeedback(state) || questions(state.proposal, state.answers).length || !available() || (state.plan && state.runs.some(r => r.archived && r.taskId === state.taskId))) return false;
         invalidate(); pendingPlanQuestions = []; state.requestPurpose = 'consultation'; state.plan = null; state.adopted = clone(state.proposal); state.adoptedTarget = clone(state.proposalTarget); state.artifacts = [];
         // Optional ideas are not adopted by the general create action.
         state.adopted.behaviors = (state.adopted.behaviors || []).filter(b => b.origin !== 'suggestion');
@@ -16568,7 +16570,7 @@
         },
       };
     }
-    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
+    return { create, hash, stampOf, generatedBody, questions, canReprepare, creationStateOf, suggestionRequest, proposalFeedbackRequest, activeDecisionDrafts, hasProposalFeedback, hasPlanScope, usageOf, usageExpired, usageBlocked, usageReserved, creditCost, finalBundleAvailable, usageResetText, usagePlanLabel, monthlyLimitText };
   })();
 
   /* Current application facts, existing Deps results and explicitly accepted input.
@@ -17528,6 +17530,9 @@
       const conn = connectionOf(options), selected = new Set(state.selectedSuggestionIds || []);
       const suggestionEditable = !options.readOnly && !options.sending && !state.responseRecovery && state.phase === 'proposal';
       const suggestionRef = ` data-release-task="${esc(state.taskId)}" data-release-version="${esc(state.version)}"`;
+      if (!workspace.hasPlanScope(p) && !suggestions.length && !p.decisions?.length && !p.cannot?.length && !p.assumptions?.length) {
+        return `<section class="ktr-section"><h2>作成する変更はありません</h2><p>${esc(latest?.text || '')}</p></section>`;
+      }
       return `<section class="ktr-section"><h2>${options.readOnly ? '参照中の案' : '仮案を確認してください'}</h2>${behaviors.length ? `<ul>${behaviors.map(b => `<li>${b.origin === 'ai' ? '<strong data-release-required-support>実現に必要な補足：</strong>' : ''}${esc(textOf(b))}</li>`).join('')}</ul>` : !suggestions.length && latest?.text ? `<p class="ktr-lead">${esc(latest.text)}</p>` : ''}
         ${suggestions.length ? `<section data-release-panel="suggestions"><h3>任意の改善提案</h3><p class="ktr-note">選ばなくても基本案は進められます。チェックするだけでは、案の更新やAIの呼び出しは行いません。</p><div class="ktr-suggestion-choices">${suggestions.map(item => `<label class="ktr-suggestion-choice"><input type="checkbox" data-release-suggestion="${esc(item.id)}"${suggestionRef}${selected.has(item.id) ? ' checked' : ''}${!suggestionEditable ? ' disabled' : ''}><span>${esc(textOf(item))}</span></label>`).join('')}</div></section>` : ''}
         ${p.approach?.js?.length ? `<section aria-label="JavaScriptの変更方針"><h3>JavaScriptの変更方針</h3>${list(p.approach.js)}</section>` : ''}
@@ -17540,7 +17545,7 @@
         ${!options.readOnly && (suggestions.length || (p.decisions || []).some(q => !q.answer && !answered.has(q.id))) ? '<p class="ktr-note">回答・選んだ改善提案・相談欄の文章は、最後に［送信］でまとめて送れます。選択や入力だけではAIを呼びません。</p>' : ''}
         ${state.answers?.length ? `<h3>決めたこと</h3>${list(state.answers.map(a => ({ text: [a.label, a.answer].filter(Boolean).join('：') })))}` : ''}
         ${!options.readOnly && state.proposalPending ? `<p class="ktr-note">送信した内容を案に反映できていません。${['BUDGET_EXCEEDED', 'MONTHLY_LIMIT_EXCEEDED'].includes(state.error?.code) ? '利用状況を確認し、利用可能になってから相談内容をもう一度送信してください。' : '相談内容をもう一度送信し、更新された案を確認してください。'}</p>` : ''}
-        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !!state.responseRecovery || !!state.proposalPending || workspace.hasProposalFeedback(state) || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">${conn.usage?.version === 4 ? (conn.canCreate === false ? quotaNotice(conn, 'final') : '最終案の作成は3クレジットです。JavaScriptの本数による追加消費はありません。') : conn.usage?.version === 3 ? '必要なクレジットは計画の内容で変わります。［接続］で数え方を確認できます。' : '計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。'}この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
+        ${options.readOnly ? '<p class="ktr-note">処理中のため、この案の採用や反映はできません。</p>' : `<div class="ktr-actions">${button('adopt', 'この案で作成', { primary: true, disabled: !workspace.hasPlanScope(p) || !!state.responseRecovery || !!state.proposalPending || workspace.hasProposalFeedback(state) || pending.length > 0 || conn.connected === false || conn.available === false || conn.canPlan === false || conn.canCreate === false, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}<p class="ktr-note">${conn.usage?.version === 4 ? (conn.canCreate === false ? quotaNotice(conn, 'final') : '最終案の作成は3クレジットです。JavaScriptの本数による追加消費はありません。') : conn.usage?.version === 3 ? '必要なクレジットは計画の内容で変わります。［接続］で数え方を確認できます。' : '計画の作成に作成1回、その後のコード生成の要求ごとに作成1回を使います。全体の回数は計画の内容で変わります。'}この操作では、kintoneの設定やJavaScriptは変更しません。</p>`}</section>`;
     }
     function codeHtml(state) {
       const artifacts = (state.artifacts || []).filter(a => typeof bodyOf(a.result) === 'string');
