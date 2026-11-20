@@ -39,6 +39,24 @@ function fixture() {
 const writes = f => f.events.filter(event => ['upload', 'put', 'deploy'].includes(event[0]));
 const code = expected => error => error.code === expected;
 
+test('直接反映は動作テスト環境の登録後に別の更新が入れば配備を中止する', async () => {
+  const f = fixture();
+  const prepared = await f.controller.prepareRegistration({ document: documentOf(), content: 'new' });
+  const result = await f.controller.register(prepared, { forDeploy: true });
+  f.settings.revision = String(Number(result.revision) + 1);
+  await assert.rejects(f.controller.deploy(result.deployment), code('STALE_SETTINGS'));
+  assert.deepEqual(writes(f).map(op => op[0]), ['upload', 'put']);
+});
+
+test('直接反映は配備ステータスが成功でも運用側の本文が旧版なら成功しない', async () => {
+  const f = fixture(), production = clone(f.settings), originalRead = f.api.getCustomize;
+  f.api.getCustomize = (app, options) => options.preferPreview ? originalRead(app, options) : { source: 'production', data: production };
+  const prepared = await f.controller.prepareRegistration({ document: documentOf(), content: 'new' });
+  const result = await f.controller.register(prepared, { forDeploy: true });
+  await assert.rejects(f.controller.deploy(result.deployment), code('DEPLOY_UNCONFIRMED'));
+  assert.deepEqual(writes(f).map(op => op[0]), ['upload', 'put', 'deploy']);
+});
+
 test('登録の確認は読み取りだけ。確認した本文・位置と4一覧を保ち、読み戻し後だけ成功する', async () => {
   const f = fixture(), doc = documentOf(), original = clone(f.settings);
   const content = ' \r\nconst memo = "備考";\r\n ';

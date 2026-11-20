@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.10
+// @version      2.3.11
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.10';
+  const SCRIPT_VERSION = '2.3.11';
   // Published build identifier.
-  const KT_BUILD = '2.3.10';
+  const KT_BUILD = '2.3.11';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -18613,9 +18613,19 @@
         Object.assign(tickets.get(exposed), { document: doc, content, position });
         return exposed;
       }
-      async function prepareDeploy() {
+      function deploymentTicket(snapshot, document) {
+        const prepared = prepare('deploy', snapshot);
+        if (document?.environment === 'preview') {
+          const matches = snapshot[document.target][document.kind].filter(entry => entry.file?.name === document.name);
+          if (matches.length !== 1 || matches[0].file.fileKey !== document.fileKey)
+            throw fail('STALE_DOCUMENT', '選択したファイルの登録内容が変わりました。最新のコードを読み直してください。');
+          tickets.get(prepared).document = cloneDependency(document);
+        }
+        return prepared;
+      }
+      async function prepareDeploy(document) {
         if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
-        return prepare('deploy', await readPreview());
+        return deploymentTicket(await readPreview(), document);
       }
       async function execute(prepared, operation, action) {
         if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
@@ -18634,7 +18644,7 @@
           throw result;
         } finally { busy = false; if (writing) changed(operation === 'deploy'); }
       }
-      async function register(prepared) {
+      async function register(prepared, { forDeploy = false } = {}) {
         return execute(prepared, 'register', async (ticket, beginWrite) => {
           const { snapshot, document: doc, content, position } = ticket;
           beginWrite();
@@ -18650,7 +18660,7 @@
           let after;
           try {
             after = await readPreview();
-            let matches = after.scope === snapshot.scope && (put?.revision == null || after.revision === String(put.revision));
+            let matches = after.scope === snapshot.scope && (put?.revision == null ? !forDeploy : after.revision === String(put.revision));
             for (const target of targets) for (const kind of kinds) {
               const previous = snapshot[target][kind], actual = after[target][kind];
               const selected = target === doc.target && kind === doc.kind;
@@ -18670,8 +18680,9 @@
           } catch (error) {
             throw fail('VERIFY_FAILED', '登録後の確認が完了していません。動作テスト環境の登録内容を取り直してください。' + (error?.message ? ' ' + error.message : ''));
           }
-          return { kind: 'registered', appId: app, revision: after.revision, customize: after,
-            document: { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' } };
+          const document = { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' };
+          return { kind: 'registered', appId: app, revision: after.revision, customize: after, document,
+            ...(forDeploy ? { deployment: deploymentTicket(after, document) } : {}) };
         });
       }
       async function deploy(prepared) {
@@ -18680,6 +18691,13 @@
           await api.deploy(app, { revision: ticket.snapshot.revision });
           const status = await api.waitDeploy(app);
           if (!['SUCCESS', 'PROCESSED'].includes(status)) throw fail('DEPLOY_UNCONFIRMED', '運用環境への反映結果を確認できません。');
+          const doc = ticket.document;
+          if (doc) {
+            const production = await api.getCustomize(app, { preferPreview: false });
+            const files = production?.data?.[doc.target]?.[doc.kind]?.filter(entry => entry.type === 'FILE' && entry.file?.name === doc.name);
+            if (production?.source !== 'production' || files?.length !== 1 || await api.downloadFile(files[0].file.fileKey) !== doc.registeredText)
+              throw fail('DEPLOY_UNCONFIRMED', '運用環境のファイルを読み戻しても、確認したコードとの一致を確認できませんでした。');
+          }
           return { kind: 'deployed', appId: app, revision: ticket.snapshot.revision, status };
         });
       }
@@ -23863,8 +23881,8 @@
             <aside class="kt-customize-menu" aria-label="ファイルと依存関係">
               <section class="kt-customize-menu-section" aria-label="保存と反映">
                 <div class="kt-customize-actionbar"><div class="kt-customize-editor-tools"><button id="kt-customize-download" class="btn kt-compact-action" title="編集中のコードをローカルに保存" disabled>ローカルに保存</button><button id="kt-customize-new" class="btn kt-compact-action" title="新規ファイルを作成">＋ 新規</button></div>
-                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn kt-compact-action" title="手元のコードを動作テスト環境に登録します。運用環境は変わりません。" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn kt-compact-action" title="アプリの未反映の変更全体を運用環境へ反映します。未登録の手元のコードは含みません。">運用環境へ反映</button></div></div>
-                <details id="kt-customize-save-help"><summary>保存・反映の違い</summary><dl><dt>ローカルに保存</dt><dd>手元のコードをファイルとしてダウンロードします。kintoneは変更しません。</dd><dt>動作テスト環境に登録</dt><dd>エディターのコードを登録します。運用環境は変更しません。</dd><dt>運用環境へ反映</dt><dd>フォームなども含め、アプリの未反映の変更全体を反映します。未登録の手元のコードは含みません。</dd></dl></details>
+                <div id="kt-customize-manual-actions"><button id="kt-customize-register" class="btn kt-compact-action" title="手元のコードを動作テスト環境に登録します。運用環境は変わりません。" disabled>動作テスト環境に登録</button><button id="kt-customize-deploy" class="btn kt-compact-action" title="表示中の編集を動作テスト環境に登録し、アプリの未反映の変更全体を運用環境へ反映します。">運用環境へ反映</button></div></div>
+                <details id="kt-customize-save-help"><summary>保存・反映の違い</summary><dl><dt>ローカルに保存</dt><dd>手元のコードをファイルとしてダウンロードします。kintoneは変更しません。</dd><dt>動作テスト環境に登録</dt><dd>エディターのコードを登録します。運用環境は変更しません。</dd><dt>運用環境へ反映</dt><dd>表示中のファイルに編集があれば動作テスト環境に登録し、フォームなども含めてアプリの未反映の変更全体を反映します。</dd></dl></details>
                 <p id="kt-customize-manual-status" role="status" aria-live="polite"></p><button id="kt-customize-manual-reload" class="btn" hidden>登録済みコードを読み直す</button>
                 <section id="kt-customize-manual-confirm" aria-label="手元の編集と反映の確認" hidden><p data-manual-description></p><div><button class="btn" data-manual-cancel>キャンセル</button><button class="btn" data-manual-confirm>確認して実行</button></div></section>
               </section>
@@ -24404,7 +24422,7 @@
       updateEditingState();
       const busy = manualBusy || aiBusy();
       $register.disabled = busy || !activeDocument || activeDocument.environment !== 'preview';
-      $deploy.disabled = busy;
+      $deploy.disabled = busy || !!(activeDocument && activeDocument.environment !== 'preview' && editingState(activeDocument, editor.getValue()).key !== 'same');
       $('#kt-customize-manual-reload').disabled = busy;
       updateConsultButton();
     }
@@ -24434,18 +24452,19 @@
     async function prepareManual(operation) {
       if (!manualAvailable()) return;
       const epoch = documentEpoch, document = activeDocument ? { ...activeDocument } : null, content = editor.getValue();
-      if (operation === 'register' && (!document || document.environment !== 'preview')) return;
+      const registerFirst = operation === 'deploy' && document && editingState(document, content).key !== 'same';
+      if ((operation === 'register' || registerFirst) && document?.environment !== 'preview') return;
       manualBusy = true; updateManualButtons(); cancelManualConfirmation(); $manualStatus.textContent = '登録済みの設定を確認しています。';
       try {
-        const prepared = operation === 'register' ? await manual.prepareRegistration({ document, content }) : await manual.prepareDeploy();
+        const prepared = operation === 'register' || registerFirst ? await manual.prepareRegistration({ document, content }) : await manual.prepareDeploy(document);
         if (epoch !== documentEpoch || aiBusy() || codePane.closest('.ktr-code-slot')) { $manualStatus.textContent = '対象または状態が変わりました。もう一度操作してください。'; return; }
         const target = document?.target === 'mobile' ? 'モバイル' : 'PC';
         const description = operation === 'register'
           ? `${document.name}（${target}）を動作テスト環境に${document.isNew ? '追加' : '登録し、現在の本文を置き換え'}ます。\nエディターに表示しているコードを登録します。運用環境は変更しません。`
-          : 'このアプリの未反映の変更をすべて運用環境へ反映します。\nJavaScriptだけでなく、フォーム・一覧・プロセス管理など、ほかの操作で変更した設定も対象です。動作テスト環境での確認を終えてから実行してください。\n手元の編集中のコードは、この操作では登録しません。';
+          : (registerFirst ? `${document.name}（${target}）の表示中のコードを動作テスト環境に${document.isNew ? '追加' : '上書き登録'}してから、` : '') + 'このアプリの未反映の変更をすべて運用環境へ反映します。\nフォーム・一覧・プロセス管理など、ほかの操作で変更した設定も対象です。ほかのファイルの手元の編集は登録しません。';
         showManualConfirmation({ operation, prepared, document, content, epoch }, description, operation === 'register' ? '動作テスト環境に登録する' : 'すべての変更を運用環境へ反映する');
         $manualStatus.textContent = '';
-      } catch (error) { $manualStatus.textContent = error?.message || '準備できませんでした。'; if (operation === 'register' && document) $('#kt-customize-manual-reload').hidden = false; }
+      } catch (error) { $manualStatus.textContent = error?.message || '準備できませんでした。'; if (document) $('#kt-customize-manual-reload').hidden = false; }
       finally { manualBusy = false; updateManualButtons(); }
     }
     $register.addEventListener('click', () => prepareManual('register'));
@@ -24457,27 +24476,35 @@
       if (pending.epoch !== documentEpoch || (pending.document && editor.getValue() !== pending.content)) { invalidateManualConfirmation(); return; }
       cancelManualConfirmation(); manualBusy = true; updateManualButtons();
       $manualStatus.textContent = pending.operation === 'deploy' ? '運用環境へ反映しています。' : '動作テスト環境に登録しています。';
+      let registeredForDeploy = false;
       try {
         if (pending.operation === 'reload') {
           drafts.delete(draftKey(activeDocument)); activeDocument = null; displayDocument(pending.nextDocument);
           $('#kt-customize-manual-reload').hidden = true; $manualStatus.textContent = '最新の登録済みコードを開きました。';
-        } else if (pending.operation === 'register') {
-          const result = await manual.register(pending.prepared);
-          retainEditor(); const key = draftKey(pending.document), saved = drafts.get(key) || pending.document;
-          const updated = { ...saved, ...result.document, text: saved.text ?? pending.content, registeredText: pending.content };
-          drafts.set(key, updated);
-          if (activeDocument && draftKey(activeDocument) === key) { activeDocument = { ...updated, text: editor.getValue() }; drafts.set(key, activeDocument); }
-          renderDrafts(); $('#kt-customize-manual-reload').hidden = true;
-          $manualStatus.textContent = '動作テスト環境に登録し、読み戻して一致を確認しました。運用環境は変更していません。';
-          await refreshList().catch(() => { $manualStatus.textContent += ' ファイル一覧は取り直してください。'; });
         } else {
-          await manual.deploy(pending.prepared);
-          $manualStatus.textContent = '運用環境への反映が完了しました。';
+          let deployment = pending.prepared;
+          if (pending.prepared.operation === 'register') {
+            const forDeploy = pending.operation === 'deploy';
+            const result = await manual.register(pending.prepared, { forDeploy });
+            registeredForDeploy = forDeploy;
+            deployment = result.deployment;
+            retainEditor(); const key = draftKey(pending.document), saved = drafts.get(key) || pending.document;
+            const updated = { ...saved, ...result.document, text: saved.text ?? pending.content, registeredText: pending.content };
+            drafts.set(key, updated);
+            if (activeDocument && draftKey(activeDocument) === key) { activeDocument = { ...updated, text: editor.getValue() }; drafts.set(key, activeDocument); }
+            renderDrafts(); $('#kt-customize-manual-reload').hidden = true;
+            $manualStatus.textContent = '動作テスト環境に登録し、読み戻して一致を確認しました。運用環境は変更していません。';
+          }
+          if (pending.operation === 'deploy') {
+            $manualStatus.textContent = '運用環境へ反映しています。';
+            await manual.deploy(deployment);
+            $manualStatus.textContent = '運用環境への反映が完了しました。' + (pending.document?.environment === 'preview' ? '運用環境のファイルを読み戻し、確認した本文との一致を確認しました。' : '');
+          }
           await refreshList().catch(() => { $manualStatus.textContent += ' ファイル一覧は取り直してください。'; });
         }
       } catch (error) {
-        $manualStatus.textContent = error?.message || '処理を完了できませんでした。登録状態を確認してください。';
-        if (pending.operation === 'register' && pending.document) $('#kt-customize-manual-reload').hidden = false;
+        $manualStatus.textContent = (registeredForDeploy ? '動作テスト環境への登録は完了しました。運用環境への反映は確認できません。' : '') + (error?.message || '処理を完了できませんでした。登録状態を確認してください。');
+        if (pending.document) $('#kt-customize-manual-reload').hidden = false;
       } finally { manualBusy = false; updateManualButtons(); }
     });
     $('#kt-customize-manual-reload').addEventListener('click', async () => {

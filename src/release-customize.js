@@ -340,9 +340,19 @@ const KTReleaseCustomize = (() => {
       Object.assign(tickets.get(exposed), { document: doc, content, position });
       return exposed;
     }
-    async function prepareDeploy() {
+    function deploymentTicket(snapshot, document) {
+      const prepared = prepare('deploy', snapshot);
+      if (document?.environment === 'preview') {
+        const matches = snapshot[document.target][document.kind].filter(entry => entry.file?.name === document.name);
+        if (matches.length !== 1 || matches[0].file.fileKey !== document.fileKey)
+          throw fail('STALE_DOCUMENT', '選択したファイルの登録内容が変わりました。最新のコードを読み直してください。');
+        tickets.get(prepared).document = cloneDependency(document);
+      }
+      return prepared;
+    }
+    async function prepareDeploy(document) {
       if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
-      return prepare('deploy', await readPreview());
+      return deploymentTicket(await readPreview(), document);
     }
     async function execute(prepared, operation, action) {
       if (busy) throw fail('BUSY', '登録または運用環境への反映が進行中です。');
@@ -361,7 +371,7 @@ const KTReleaseCustomize = (() => {
         throw result;
       } finally { busy = false; if (writing) changed(operation === 'deploy'); }
     }
-    async function register(prepared) {
+    async function register(prepared, { forDeploy = false } = {}) {
       return execute(prepared, 'register', async (ticket, beginWrite) => {
         const { snapshot, document: doc, content, position } = ticket;
         beginWrite();
@@ -377,7 +387,7 @@ const KTReleaseCustomize = (() => {
         let after;
         try {
           after = await readPreview();
-          let matches = after.scope === snapshot.scope && (put?.revision == null || after.revision === String(put.revision));
+          let matches = after.scope === snapshot.scope && (put?.revision == null ? !forDeploy : after.revision === String(put.revision));
           for (const target of targets) for (const kind of kinds) {
             const previous = snapshot[target][kind], actual = after[target][kind];
             const selected = target === doc.target && kind === doc.kind;
@@ -397,8 +407,9 @@ const KTReleaseCustomize = (() => {
         } catch (error) {
           throw fail('VERIFY_FAILED', '登録後の確認が完了していません。動作テスト環境の登録内容を取り直してください。' + (error?.message ? ' ' + error.message : ''));
         }
-        return { kind: 'registered', appId: app, revision: after.revision, customize: after,
-          document: { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' } };
+        const document = { ...doc, fileKey: after[doc.target][doc.kind][position].file.fileKey, registeredText: content, isNew: false, environment: 'preview' };
+        return { kind: 'registered', appId: app, revision: after.revision, customize: after, document,
+          ...(forDeploy ? { deployment: deploymentTicket(after, document) } : {}) };
       });
     }
     async function deploy(prepared) {
@@ -407,6 +418,13 @@ const KTReleaseCustomize = (() => {
         await api.deploy(app, { revision: ticket.snapshot.revision });
         const status = await api.waitDeploy(app);
         if (!['SUCCESS', 'PROCESSED'].includes(status)) throw fail('DEPLOY_UNCONFIRMED', '運用環境への反映結果を確認できません。');
+        const doc = ticket.document;
+        if (doc) {
+          const production = await api.getCustomize(app, { preferPreview: false });
+          const files = production?.data?.[doc.target]?.[doc.kind]?.filter(entry => entry.type === 'FILE' && entry.file?.name === doc.name);
+          if (production?.source !== 'production' || files?.length !== 1 || await api.downloadFile(files[0].file.fileKey) !== doc.registeredText)
+            throw fail('DEPLOY_UNCONFIRMED', '運用環境のファイルを読み戻しても、確認したコードとの一致を確認できませんでした。');
+        }
         return { kind: 'deployed', appId: app, revision: ticket.snapshot.revision, status };
       });
     }

@@ -27,7 +27,7 @@ async function mount(page) {
     let production=clone(customize);
     const sources = {pc:'// PC original\nconst memo = 1;\n',mobile:'// mobile original\nconst memo = 2;\n',second:'// second original\n',slow:'// slow original\n',css:'.memo { color: blue; }\n'};
     window.addRegisteredFiles = count => { for(let i=0;i<count;i++){const key='extra-'+i;customize.desktop.js.push(file(key+'.js',key));production.desktop.js.push(file(key+'.js',key));sources[key]='// extra registered file '+i+'\n';} };
-    T.KTApi.getCustomize = async (_app, options) => { const result={source:options?.preferPreview === false ? 'prod' : 'preview',data:clone(options?.preferPreview === false ? production : customize)}; if(window.holdNextCustomize&&result.source==='preview'){window.holdNextCustomize=false;return new Promise(resolve=>{window.pendingList=()=>resolve(result);});} return result; };
+    T.KTApi.getCustomize = async (_app, options) => { const result={source:options?.preferPreview === false ? 'production' : 'preview',data:clone(options?.preferPreview === false ? production : customize)}; if(window.holdNextCustomize&&result.source==='preview'){window.holdNextCustomize=false;return new Promise(resolve=>{window.pendingList=()=>resolve(result);});} return result; };
     T.KTApi.downloadFile = async key => { fileReads.push(key); if(key===window.fileFailure)throw Error('Fixture download failure'); if(key === 'slow')return new Promise(resolve => {window.pendingFile=()=>resolve(sources.slow);}); return sources[key]; };
     window.actualDeploy=T.KTApi.deploy;
     for(const method of ['uploadFile','putPreviewCustomize','deploy','waitDeploy','deployAndWait'])T.KTApi[method]=denied('kintone.'+method);
@@ -167,7 +167,7 @@ test('CustomizeからAI Assistantへ相談・必要時のコード表示と手�
         await saveHelp.locator('summary').click();
         assert.match(await saveHelp.innerText(),/ローカルに保存[\s\S]*ダウンロード[\s\S]*kintoneは変更しません/);
         assert.match(await saveHelp.innerText(),/動作テスト環境に登録[\s\S]*運用環境は変更しません/);
-        assert.match(await saveHelp.innerText(),/運用環境へ反映[\s\S]*未反映の変更全体[\s\S]*未登録の手元のコードは含みません/);
+        assert.match(await saveHelp.innerText(),/運用環境へ反映[\s\S]*表示中のファイル[\s\S]*未反映の変更全体/);
         await saveHelp.locator('summary').click();
         assert.deepEqual(await page.evaluate(()=>({base:baseReads,files:fileReads.length,scan:[...scanCalls],ai:proposalCalls.length,writes:[...operations]})),beforeSaveHelp,'説明の開閉は取得・解析・AI・書き込みを増やさない');
         assert.equal(await page.locator('[data-customize-mode="comparison"]').isVisible(),false,'CustomizeにAIの差分操作を出さない');
@@ -766,11 +766,30 @@ test('手編集の登録と運用反映は別確認・編集中の保持・外�
     await editor(page).fill('// new edited again');await register.click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/現在の本文を置き換え/);await accept.click();await assertEventually(()=>register.isEnabled(),true);assert.match(await status.innerText(),/読み戻して一致/);assert.equal(await page.evaluate(()=>manualFixtures.customize.desktop.js.filter(item=>item.file.name==='new-manual.js').length),1,'回復後の新規ファイルを重複追加しない');
     await selected(page,'same.js','// after recovery');
     assert.equal(await editState(page).innerText(),'取得時と同じ');
-    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/未反映の変更をすべて運用環境/);assert.match(await confirm.innerText(),/フォーム・一覧・プロセス管理/);assert.match(await confirm.innerText(),/編集中のコードは、この操作では登録しません/);await page.screenshot({path:path.join(out,'manual-deploy-confirm.png'),fullPage:true});await cancel.click();
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);assert.match(await confirm.innerText(),/未反映の変更をすべて運用環境/);assert.match(await confirm.innerText(),/フォーム・一覧・プロセス管理/);assert.match(await confirm.innerText(),/ほかのファイルの手元の編集は登録しません/);await page.screenshot({path:path.join(out,'manual-deploy-confirm.png'),fullPage:true});await cancel.click();
     assert.equal(await page.evaluate(()=>operations.some(x=>x.type==='deploy')),false);
     await deploy.click();await assertEventually(()=>confirm.isVisible(),true);await page.evaluate(()=>manualFixtures.customize.revision=String(Number(manualFixtures.customize.revision)+1));await accept.click();await assertEventually(()=>deploy.isEnabled(),true);assert.match(await status.innerText(),/設定が変わりました/);assert.equal(await page.evaluate(()=>operations.some(x=>x.type==='deploy')),false,'確認後の別の変更を未確認で運用反映しない');
     await deploy.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();await page.waitForFunction(()=>document.querySelector('#kt-customize-manual-status').textContent.includes('反映が完了'));assert.equal(await page.evaluate(()=>operations.filter(x=>x.type==='deploy').length),1);assert.ok((await page.evaluate(()=>manualChanges)).some(change=>change.production));
     assert.equal(await editState(page).innerText(),'取得時と同じ','運用反映の結果を手元の編集状態と混同しない');
+    const directBody='// direct production edit';
+    await editor(page).fill(directBody);
+    const start=await page.evaluate(()=>operations.length);
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);
+    assert.match(await confirm.innerText(),/same\.js（PC）.*上書き登録/);
+    await cancel.click();assert.equal(await page.evaluate(()=>operations.length),start);
+    await deploy.click();await assertEventually(()=>confirm.isVisible(),true);await accept.click();
+    await page.waitForFunction(()=>document.querySelector('#kt-customize-manual-status').textContent.includes('運用環境のファイルを読み戻し'));
+    assert.deepEqual(await page.evaluate(start=>operations.slice(start).map(op=>op.type),start),['upload','put','deploy','waitDeploy'], '直接反映は登録済みの版を配備する');
+    const persisted=await page.evaluate(async()=>{
+      const api=CustomizeTest.KTApi, bodies=[];
+      for(const preferPreview of [true,false]){
+        const {data}=await api.getCustomize(310,{preferPreview});
+        const file=data.desktop.js.find(entry=>entry.file?.name==='same.js');
+        bodies.push(await api.downloadFile(file.file.fileKey));
+      }
+      return bodies;
+    });
+    assert.deepEqual(persisted,[directBody,directBody],'エディターの表示とは独立に両環境から同じ本文を再取得できる');
     await page.evaluate(()=>{fixtureClient.propose=()=>new Promise(resolve=>{window.finishConsult=()=>resolve({reply:'確認しました。',intent:'answer',turn:{ops:[],answers:[],requirementOps:[]}});});window.busyConsult=work.controller.send('今のコードを説明してください');});await page.waitForFunction(()=>work.controller.getState().phase==='consulting');assert.equal(await register.isDisabled(),true);assert.equal(await deploy.isDisabled(),true);await page.evaluate(async()=>{finishConsult();await busyConsult;});await assertEventually(()=>register.isEnabled(),true);
     await page.locator('#kt-customize-consult').click();await page.locator('[data-release-action="code"]').click();assert.equal(await register.isVisible(),false);assert.equal(await deploy.isVisible(),false,'AIの相談画面に手編集の反映ボタンを混ぜない');
     assert.equal(await page.evaluate(()=>proposalCalls.length),initialCalls,'手編集の操作からAIを呼ばない');assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await page.evaluate(()=>work.dispose());
