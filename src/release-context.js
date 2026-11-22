@@ -190,7 +190,7 @@ const KTReleaseContext = (() => {
   }
   function plan({ proposal: accepted, consultationTarget = null, requestTargets = [], answers = [], goal, requests = [], businessPremises = [], version, base }, dependencyTools = null) {
     const dependencies = dependencyContext(base, dependencyTools, consultationTarget);
-    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
+    return sizeCheck({ contextVersion: 'planner-1', releaseContract: 'release-workspace-1', clientCapabilities: ['formLayoutPlacement', 'subtableFieldPlacement', 'fieldMaintenance', 'scopedReadVerificationV1'], goal, app: appOf(base), facts: factsOf(base, dependencies, requestTargets, consultationTarget), dictionary: dictionaryOf(base),
       coverage: coverageOf(base, dependencies), truncation: { applied: false, sections: [] }, decisions: planDecisions(answers), requirements: [], userRequests: clone(requests),
       ...(consultationTarget?.type === 'FILE' ? { subject: fileSubject(consultationTarget) } : {}),
       ...(businessPremises.length ? { businessPremises: clone(businessPremises) } : {}),

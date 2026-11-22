@@ -280,11 +280,17 @@ const KTReleaseView = (() => {
     const seen = new Set((state.adopted?.cannot || []).concat(state.adopted?.assumptions || []).map(textOf));
     const unknowns = [...new Set((state.plan?.unknowns || []).map(textOf).filter(text => text && !seen.has(text)))];
     for (const text of unknowns) seen.add(text);
-    const notes = new Map(), customizations = state.plan?.customizations || [];
+    const notes = new Map(), customizations = state.plan?.customizations || [], readSummaries = [];
     const platformOf = c => (c.platform || []).map(p => ({ desktop: 'PC', mobile: 'モバイル' }[p] || p)).join('・');
     for (const c of customizations) {
       const a = (state.artifacts || []).find(item => item.customizationId === c.customizationId);
       const g = a?.result?.generated || a?.result || {};
+      if(Array.isArray(c.readPlan?.sources) && c.readPlan.sources.length){
+        const names=c.readPlan.sources.filter(s=>s && Array.isArray(s.fields)).map(s=>'アプリ '+s.app+'（'+s.fields.map(f=>f?.code).filter(Boolean).join('、')+'）');
+        const check=(a?.result?.verification || g.verification)?.readCheck;
+        const summary=check?.state==='passed'?'合成データで取得と計算が一致（'+check.checks.length+'件）':check?.message;
+        readSummaries.push('<li>'+esc(names.join(' / '))+(summary?'<p>'+esc(summary)+'</p>':'')+'</li>');
+      }
       const platform = platformOf(c), sharedPlatform = customizations.filter(other => platformOf(other) === platform).length > 1;
       const source = [platform, sharedPlatform || !platform ? g.targetFile || c.requirement : ''].filter(Boolean).join('：') || 'JavaScript';
       for (const text of [...(c.risks || []), ...(g.assumptions || []), ...(g.warnings || [])].map(textOf).filter(text => text && !seen.has(text))) {
@@ -295,7 +301,7 @@ const KTReleaseView = (() => {
     // Impact descriptions also contain change summaries. Keep their original text
     // available without repeating it as a warning or interpreting its meaning.
     const impact = (state.plan?.impact || []).map(item => typeof item === 'string' ? item : item.description || item.message || '').filter(Boolean);
-    return `${unknowns.length ? `<section class="ktr-explanation-unknowns"><h3>確認できていないこと</h3>${list(unknowns)}</section>` : ''}${notes.size ? `<section><h3>前提と注意点</h3><ul>${[...notes].map(([text, sources]) => `<li><span>${esc(text)}</span><p class="ktr-note">説明元：${esc([...sources].join('／'))}</p></li>`).join('')}</ul></section>` : ''}${impact.length ? `<details data-release-panel="plan-explanation"><summary>計画の説明を見る</summary>${list(impact)}</details>` : ''}`;
+    return `${readSummaries.length ? `<section><h3>取得するアプリと項目</h3><ul>${readSummaries.join('')}</ul></section>` : ''}${unknowns.length ? `<section class="ktr-explanation-unknowns"><h3>確認できていないこと</h3>${list(unknowns)}</section>` : ''}${notes.size ? `<section><h3>前提と注意点</h3><ul>${[...notes].map(([text, sources]) => `<li><span>${esc(text)}</span><p class="ktr-note">説明元：${esc([...sources].join('／'))}</p></li>`).join('')}</ul></section>` : ''}${impact.length ? `<details data-release-panel="plan-explanation"><summary>計画の説明を見る</summary>${list(impact)}</details>` : ''}`;
   }
   function declineHtml(artifacts) {
     return artifacts.filter(a => a.result?.error?.detail).map(a => {

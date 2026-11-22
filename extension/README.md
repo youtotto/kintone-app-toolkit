@@ -2,9 +2,9 @@
 
 ユーザースクリプト版（`kintoneAppToolkit.user.js`）と同じソースから、Chrome / Edge の拡張機能（Manifest V3）を作ります。ユーザースクリプトは変えず、違いはすべてビルドで作ります。
 
-**公開版：2.3.11**（2026年11月18日）。[変更内容と検証範囲](../docs/RELEASE-NOTES-2.3.11.md)
+**公開版：2.3.12**（2026年11月23日）。[変更内容と検証範囲](../docs/RELEASE-NOTES-2.3.12.md)
 
-GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.11/kintone-app-toolkit-2.3.11-chrome-extension.zip)を配布しています。Chromeウェブストアでの公開は別途審査対象で、このZIP配布はストア公開済みを意味しません。
+GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.12/kintone-app-toolkit-2.3.12-chrome-extension.zip)を配布しています。Chromeウェブストアでの公開は別途審査対象で、このZIP配布はストア公開済みを意味しません。
 
 ## ZIPから導入する
 
@@ -14,7 +14,7 @@ GitHubで[拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/relea
 2. Chromeは `chrome://extensions`、Edgeは `edge://extensions` を開きます。
 3. 「デベロッパー モード」をオンにします。
 4. 「パッケージ化されていない拡張機能を読み込む」で、展開したフォルダー（`manifest.json` がある場所）を選びます。
-5. kintoneアプリの一覧画面を再読み込みし、「Ver 2.3.11」とToolkitのパネルが1つだけであることを確認します。
+5. kintoneアプリの一覧画面を再読み込みし、「Ver 2.3.12」とToolkitのパネルが1つだけであることを確認します。
 
 Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どちらか一方だけを有効にしてください。
 
@@ -25,7 +25,7 @@ Tampermonkey版と同時に有効にするとToolkitが2つ動きます。どち
 1. 必要な会話・編集中コードを保存してから、新しい版のZIPを取得します。
 2. 現在読み込んでいるフォルダーの中身を新版で置き換え、拡張機能管理画面でToolkitの再読み込みを押します。別フォルダーからもう1つ追加する操作は不要です。
 3. 拡張機能版が有効で、Tampermonkeyの「kintone App Toolkit」スクリプトがOFFのままであることを確認します。Tampermonkey版を更新した場合も、この有効状態を確認してください。
-4. kintoneアプリを再読み込みし、**「Ver 2.3.11」とToolkitのパネルが1つだけであること**を確認します。開いている他のkintoneタブも再読み込みしてください。
+4. kintoneアプリを再読み込みし、**「Ver 2.3.12」とToolkitのパネルが1つだけであること**を確認します。開いている他のkintoneタブも再読み込みしてください。
 
 ZIPから手動導入した版は、GitHubの公開だけでは自動更新されません。Tampermonkey版へ切り替える場合は、この拡張機能をOFFにしてからToolkitスクリプトを有効にします。
 
@@ -83,7 +83,7 @@ Tampermonkey 版と同時に有効にすると、Toolkit が 2 つ動きます�
 
 同じテストをユーザースクリプトと拡張機能の本体に対して実行し、結果の一致と両方の失敗数を確認します。多くのテストは部品を直接読むため、この比較だけで拡張機能の実機動作すべてを確認したことにはなりません。[無料テストの準備](../docs/test-setup.md)・[版の更新と照合](../docs/versioning.md)
 
-今回の変更と検証範囲は[2.3.11のリリースノート](../docs/RELEASE-NOTES-2.3.11.md#検証範囲)をご覧ください。実AI・決済・モバイル動作など変更のない経路は、過去の検証と今回の確認を区別して記載しています。
+今回の変更と検証範囲は[2.3.12のリリースノート](../docs/RELEASE-NOTES-2.3.12.md#検証範囲)をご覧ください。実AI・決済・モバイル動作など変更のない経路は、過去の検証と今回の確認を区別して記載しています。
 
 <details>
 <summary>試作時点の検証記録（2026-11-12、2.3.3）</summary>
