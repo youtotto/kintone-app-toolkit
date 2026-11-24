@@ -31,6 +31,46 @@ const fixtures = [
 ];
 
 (async () => {
+  for (const spec of [
+    {addMappings: [{relatedField: 'address', field: 'customer_code'}]},
+    {mappings: [{from: 'address', to: 'customer_code'}]},
+  ]) {
+    const mock = mk();
+    const prepared = await prep(mock, [op('UPDATE_LOOKUP', 'customer_lookup', spec)]);
+    assert(prepared.status === 'BLOCKED' &&
+      prepared.blockers.some(reason => reason.code === 'LOOKUP_MAPPING_CONFLICT'),
+      'adding a lookup mapping preserves the existing source for the destination');
+    assert(writes(mock).length === 0, 'a conflicting lookup addition never writes');
+  }
+
+  for (const [label, transform, shouldPass] of [
+    ['reordered copy pairs', lk => lk.fieldMappings.reverse(), true],
+    ['missing copy pair', lk => lk.fieldMappings.pop(), false],
+    ['changed source', lk => { lk.fieldMappings[0].relatedField = 'address'; }, false],
+    ['extra duplicate', lk => lk.fieldMappings.push({...lk.fieldMappings[0]}), false],
+    ['reordered picker columns', lk => lk.lookupPickerFields.reverse(), false],
+  ]) {
+    const mock = mk();
+    const update = mock.api.updatePreviewFields.bind(mock.api);
+    mock.api.updatePreviewFields = async (...args) => {
+      const result = await update(...args);
+      transform(mock.st.fields.customer_lookup.lookup);
+      return result;
+    };
+    const change = op('UPDATE_LOOKUP', 'customer_lookup', {addMappings: [{from: 'address', to: 'secret_memo'}]});
+    const prepared = await prep(mock, [change]);
+    const executed = await P.executePreview(prepared, {api: mock.api});
+    assert((executed.status === 'DONE') === shouldPass, 'lookup readback: ' + label);
+    if (shouldPass) {
+      const reverse = await P.prepareRollback(executed, prepared, {api: mock.api});
+      assert(reverse.status === 'PREPARED', 'reordered mappings allow rollback');
+      if (reverse.status === 'PREPARED') {
+        await P.executeRollback(reverse, {api: mock.api, execution: executed});
+        assert(reverse.status === 'ROLLED_BACK_VERIFIED', 'reordered restored mappings pass verification');
+      }
+    }
+  }
+
   // New execution never asks the legacy semantic reviewer to interpret a request.
   for (const [label,operations,extra] of fixtures) {
     const m=mk(), before=await m.current(), p=await prep(m,operations,extra);

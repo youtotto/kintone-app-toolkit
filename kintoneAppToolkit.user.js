@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.12
+// @version      2.3.13
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.12';
+  const SCRIPT_VERSION = '2.3.13';
   // Published build identifier.
-  const KT_BUILD = '2.3.12';
+  const KT_BUILD = '2.3.13';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -8609,6 +8609,10 @@
       }
       return { value: parts.join(',') };
     }
+    // Copy pairs may be returned in a different order by kintone. Picker column order is significant.
+    const lookupMappingKeys = mappings => (mappings || []).map(m => JSON.stringify([m.field, m.relatedField])).sort();
+    const comparableLookup = lookup => lookup && { ...lookup, fieldMappings: lookupMappingKeys(lookup.fieldMappings) };
+    const comparableLookupField = field => field?.lookup ? { ...field, lookup: comparableLookup(field.lookup) } : field;
     /** Review 時点の同一性（diff.target.identity）と現在のフィールド（kintone の raw）のルックアップ設定を比べ、違う属性名を返す（空なら同一） */
     function lookupIdentityMismatch(f, identity) {
       if (!f) return ['missing'];
@@ -8617,7 +8621,7 @@
       if (identity.type && f.type !== identity.type) out.push('type');
       if (String(lk.relatedApp?.app ?? '') !== String(identity.relatedApp?.app ?? '')) out.push('relatedApp');
       if (String(lk.relatedKeyField ?? '') !== String(identity.relatedKeyField ?? '')) out.push('relatedKeyField');
-      if (!same((lk.fieldMappings || []).map(m => `${m.relatedField}→${m.field}`), (identity.mappings || []).map(m => `${m.from}→${m.to}`))) out.push('fieldMappings');
+      if (!same(lookupMappingKeys(lk.fieldMappings), lookupMappingKeys((identity.mappings || []).map(m => ({ field: m.to, relatedField: m.from }))))) out.push('fieldMappings');
       if (!same(lk.lookupPickerFields || [], identity.pickerFields || [])) out.push('lookupPickerFields');
       if (normCondE(lk.filterCond) !== normCondE(identity.filterCond)) out.push('filterCond');
       if (normCondE(lk.sort) !== normCondE(identity.sort)) out.push('sort');
@@ -8677,7 +8681,7 @@
         if (!f.lookup) throw Object.assign(new Error(`「${p.payload.code}」はルックアップフィールドではありません`), { code: 'NOT_A_LOOKUP' });
         const mismatch = lookupIdentityMismatch(f, p.payload.identity);
         if (mismatch.length) throw targetChanged(`ルックアップ「${p.targetLabel}」`, mismatch);
-        const since = changedSincePrepare(`ルックアップ「${p.targetLabel}」`, f, snapshot?.fields?.properties?.[p.payload.code]);
+        const since = changedSincePrepare(`ルックアップ「${p.targetLabel}」`, comparableLookupField(f), comparableLookupField(snapshot?.fields?.properties?.[p.payload.code]));
         if (since) throw since;
         // 現在の lookup ＋ 承認分 = 完全な 4 項目。relatedApp / relatedKeyField は送らない（kintone: 省略した項目は変更されない）
         const nextLookup = clone(p.payload.lookup);
@@ -8700,7 +8704,7 @@
           check('relatedKeyFieldPreserved', String(lk.relatedKeyField ?? '') === String(p.expect.relatedKeyField ?? ''), p.expect.relatedKeyField, lk.relatedKeyField ?? null);
           const mapKey = (m) => `${m.relatedField}→${m.field}`;
           const curMaps = (lk.fieldMappings || []).map(mapKey), expMaps = p.expect.fieldMappings.map(mapKey);
-          check('fieldMappings', same(curMaps, expMaps), expMaps, curMaps);
+          check('fieldMappings', same(lookupMappingKeys(lk.fieldMappings), lookupMappingKeys(p.expect.fieldMappings)), expMaps, curMaps);
           const existing = (p.payload.identity.mappings || []).filter(m => !p.expect.addedMappings.some(x => x.field === m.to)).map(m => `${m.from}→${m.to}`);
           check('existingMappingsPreserved', existing.every(k => curMaps.includes(k)), existing, curMaps.filter(k => existing.includes(k)));
           for (const m of p.expect.addedMappings) { check(`added:${m.field}`, curMaps.includes(mapKey(m)), mapKey(m), curMaps.includes(mapKey(m)) ? mapKey(m) : null); const d = cur?.properties?.[m.field]; check(`destinationExists:${m.field}`, !!d, true, !!d); }
@@ -9509,7 +9513,8 @@
               if (mapped.has(to)) fail('DUPLICATE_MAPPING', '同じフィールドへの取得が複数あります'); mapped.add(to);
               const existing = after.lookup.mappings.find(m => m.to === to);
               if (existing?.from === from) continue;
-              if (existing) existing.from = from; else after.lookup.mappings.push({ from, to });
+              if (existing) fail('LOOKUP_MAPPING_CONFLICT', `「${to}」にはすでに「${existing.from}」をコピーしています。「${from}」の追加先を確認してください。`);
+              after.lookup.mappings.push({ from, to });
               changes.mappings.push({ from, to });
             }
             for (const code of names(s.addPickerFields)) { if (!rel.fields[code] || rel.fields[code].subtable) fail('RELATED_FIELD_NOT_FOUND', '参照元の表示フィールドを確認できません'); if (!after.lookup.pickerFields.includes(code)) { after.lookup.pickerFields.push(code); changes.pickerFields.push(code); } }
@@ -10005,8 +10010,8 @@
           if (!curF) return { ok: false, code: 'FIELD_MISSING', message: `ルックアップ「${code}」が動作テスト環境にありません` };
           if (!snapF || !snapF.lookup) return { ok: false, code: 'SNAPSHOT_MISSING', message: `ルックアップ「${code}」の実行前の設定が反映前の設定の控えにありません` };
           if (curF.lookup === null) return { ok: false, code: 'RELATED_APP_SETTINGS_UNAVAILABLE', message: `ルックアップ「${curF.label || code}」（${code}）の設定を kintone が返しません（参照元アプリへのアクセス権を確認してください）` };
-          if (same(lookupOf(state.fields?.properties?.[code]), lookupOf(snapF))) return { ok: true, alreadyRestored: true };
-          if (expF && !same(lookupOf(curF), lookupOf(expF))) return { ok: false, code: 'FIELD_CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の設定が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'LOOKUP', id: code, change: 'CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の取得項目 / 選択時表示 / 絞り込み / 並び順が反映直後と違います`, before: lookupOf(expF), after: lookupOf(curF) }] };
+          if (same(comparableLookup(lookupOf(state.fields?.properties?.[code])), comparableLookup(lookupOf(snapF)))) return { ok: true, alreadyRestored: true };
+          if (expF && !same(comparableLookup(lookupOf(curF)), comparableLookup(lookupOf(expF)))) return { ok: false, code: 'FIELD_CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の設定が反映後に変更されています（自動では戻しません）`, diffs: [{ kind: 'LOOKUP', id: code, change: 'CHANGED', message: `ルックアップ「${curF.label || code}」（${code}）の取得項目 / 選択時表示 / 絞り込み / 並び順が反映直後と違います`, before: lookupOf(expF), after: lookupOf(curF) }] };
           return { ok: true };
         },
         project(state, snapshot, step) { const code = step.target; const next = { ...state, fields: clone(state.fields) }; const snapLk = lookupOf(snapshot.fields?.properties?.[code]); if (next.fields?.properties?.[code] && snapLk) next.fields.properties[code] = { ...next.fields.properties[code], lookup: { ...clone(next.fields.properties[code].lookup || {}), ...snapLk } }; return next; },
@@ -10026,7 +10031,7 @@
           const check = (name, ok, exp, act) => checks.push({ name, ok, expected: exp, actual: act });
           check('exists', !!f, true, !!f);
           if (f) {
-            check('restored:lookup', same(lookupOf(f), lookupOf(snapF)), lookupOf(snapF), lookupOf(f));
+            check('restored:lookup', same(comparableLookup(lookupOf(f)), comparableLookup(lookupOf(snapF))), lookupOf(snapF), lookupOf(f));
             check('codePreserved', f.code === code, code, f.code); check('typePreserved', f.type === snapF.type, snapF.type, f.type);
             check('relatedAppPreserved', String(f.lookup?.relatedApp?.app ?? '') === String(snapF.lookup?.relatedApp?.app ?? ''), String(snapF.lookup?.relatedApp?.app ?? ''), String(f.lookup?.relatedApp?.app ?? ''));
             const expF = expected.fields?.properties?.[code] || {};
