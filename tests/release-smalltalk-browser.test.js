@@ -12,7 +12,7 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
  try{
  const context=await browser.newContext({viewport:{width:1440,height:900}});await context.route('**/*',route=>{if(route.request().url()==='https://smalltalk.test.invalid/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="ja"><meta charset="utf-8"><body style="margin:0"><div id="app" style="height:100vh"></div><div id="home"></div></body></html>'});unexpected.push(route.request().url());return route.abort();});
  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.exposeFunction('base',loadBase);await page.exposeFunction('api',async(n,a)=>mock.api[n](...a));
- await page.exposeFunction('service',async(n,input)=>{calls.push({n,input});if(n==='getHealth')return structuredClone(health);if(n==='smalltalk'){if(hold){hold=false;await new Promise(r=>held=r);}return{ok:true,version:1,reply:'具体的な変更は、アプリの相談で設定を確認できます。',handoff:true,smalltalkUsage:{monthly:{used:36,limit:1000,remaining:964,resetsAt:'2026-11-01T00:00:00+09:00'}}};}return F.proposal();});
+ await page.exposeFunction('service',async(n,input)=>{calls.push({n,input});if(n==='getHealth')return structuredClone(health);if(n==='smalltalk'){if(hold){hold=false;await new Promise(r=>held=r);}return{ok:true,version:1,reply:'具体的な変更は、アプリの相談で設定を確認できます。',handoff:false,smalltalkUsage:{monthly:{used:36,limit:1000,remaining:964,resetsAt:'2026-11-01T00:00:00+09:00'}}};}return F.proposal();});
  let source=fs.readFileSync(process.env.KT_SRC || path.join(root,'kintoneAppToolkit.user.js'),'utf8').replace('waitReady().then(() => startToolkit());','');const end=source.lastIndexOf('})();');source=source.slice(0,end)+'\nglobalThis.TestSmall={mountReleaseWorkspace,KTAiClient};\n'+source.slice(end);
  const boot=async()=>{
   await page.goto('https://smalltalk.test.invalid/');await page.addScriptTag({content:source});await page.evaluate(({names,prod})=>{
@@ -39,10 +39,13 @@ test('実ブラウザーで無料雑談・手動引き継ぎ・コード保持�
  const reads=mock.calls.length;await page.locator('#kt-smalltalk-input').fill('その案について少し話そう');await action('smalltalk-send').click();await page.waitForFunction(()=>work.smalltalk.getState().turns[0]?.reply);
  assert.equal(await page.locator('#kt-smalltalk-input').evaluate(el=>el===document.activeElement),true);
  assert.ok((await page.locator('[data-release-panel="smalltalk-quota"]').innerText()).includes("今回の契約期間 36/1000回"));assert.equal(await page.evaluate(()=>work.smalltalk.getState().usage.monthly.remaining),964);
- assert.equal(await page.getByText('雑談ではアプリの設定を確認していません。設定に合わせた変更案は、この画面の［アプリの相談］で作れます。',{exact:true}).isVisible(),true);
+ assert.equal(await page.getByRole('button',{name:'アプリの相談へ',exact:true}).count(),1);
  const sent=calls.find(c=>c.n==='smalltalk').input;assert.deepEqual(Object.keys(sent).sort(),['history','requestId','signal','text']);assert.ok(!JSON.stringify(sent).includes('PRIVATE_ADMIN_NOTE'));assert.ok(!JSON.stringify(sent).includes('HAND_EDIT'));assert.equal(mock.calls.length,reads);assert.equal(await page.evaluate(()=>JSON.stringify(work.controller.getState())),fixed);
- await action('smalltalk-handoff').click();assert.equal(await page.evaluate(()=>work.view.getDraft()),'通常相談の未送信文');assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);
- await switchChat();assert.equal(await page.locator('#kt-release-input').inputValue(),'通常相談の未送信文');await page.locator('#kt-release-input').fill('');await switchChat();await action('smalltalk-handoff').click();assert.match(await page.locator('#kt-release-input').inputValue(),/未採用/);assert.equal(calls.filter(c=>c.n==='propose').length,1);
+ await action('smalltalk-handoff').click();
+ const carried = await page.locator('#kt-release-input').inputValue();
+ assert.ok(carried.startsWith('通常相談の未送信文'));assert.match(carried,/その案について少し話そう/);assert.match(carried,/未採用/);
+ await switchChat();await action('smalltalk-handoff').click();assert.equal(await page.locator('#kt-release-input').inputValue(),carried);
+ assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);assert.equal(calls.filter(c=>c.n==='propose').length,1);
  await switchChat();await page.locator('#kt-smalltalk-input').fill('雑談の下書き');await page.evaluate(()=>work.history().flush());
  const saved=await page.evaluate(()=>work.history().exportCurrent());assert.equal(saved.smalltalk.draft,'雑談の下書き');assert.ok(saved.draft.includes('未採用'));await boot();
  assert.equal(await page.locator('#kt-smalltalk-input').inputValue(),'雑談の下書き');assert.equal(await page.locator('[aria-label="雑談の記録"]').getByText('具体的な変更は、アプリの相談で設定を確認できます。').count(),1);assert.equal(calls.filter(c=>c.n==='smalltalk').length,1);assert.equal(await page.evaluate(()=>editorFiles.files[0].text),'HAND_EDIT');

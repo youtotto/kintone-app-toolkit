@@ -437,7 +437,8 @@ const KTReleaseView = (() => {
     const exhausted=quota&&quota.monthly.used>=monthlyLimit;
     const resets=exhausted ? new Date(quota.monthly.resetsAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）から利用できます。' : '';
     return '<p class="ktr-note">アプリの設定は送りません。入力した文章と直近3往復までの雑談をAIへ送ります。</p><details data-release-panel="smalltalk-quota"><summary>無料枠について</summary><p>'+esc(count)+'</p><p>'+esc(resets)+'</p></details>'+
-      '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?'<p class="ktr-note">雑談ではアプリの設定を確認していません。設定に合わせた変更案は、この画面の［アプリの相談］で作れます。</p>'+button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
+      '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
+      (s.turns.some(t => t.reply) ? '<div class="ktr-actions">' + button('smalltalk-handoff', 'アプリの相談へ', {disabled:s.pending}) + '</div><p class="ktr-note">雑談の経緯と条件を下書きに移します。送信は内容を確認してから行えます。</p>' : '') +
       (s.error?'<p class="ktr-error" role="alert">'+esc(s.error)+'</p>':'')+(exhausted?'<p class="ktr-note">'+esc(resets)+'</p>':'')+
       (conn.canSmalltalk!==true?'<p class="ktr-note">雑談には対応したAIサービスと有効なToolkit契約での接続が必要です。</p>':'')+
       '<div class="ktr-composer"><label for="kt-smalltalk-input">雑談（100文字以内）</label><textarea id="kt-smalltalk-input" '+(s.pending?'disabled':'')+' placeholder="ちょっとひと息、話してみましょう">'+esc(s.draft)+'</textarea><div class="ktr-compose-actions"><span>100文字以内・クレジット消費なし</span>'+button(s.pending?'smalltalk-cancel':'smalltalk-send',s.pending?'中断する':'送信',{primary:!s.pending,disabled:!s.pending&&disabled})+'</div></div>';
@@ -696,9 +697,14 @@ const KTReleaseView = (() => {
       if(action==='smalltalk-send')return sendSmalltalk();
       if(action==='smalltalk-handoff'){
         if(sending||busy.has(state.phase))return;
-        if(draft.trim()){notice='元の相談欄の入力は残しています。内容を整理してから移してください。';draw();return;}
-        const text=options.smalltalk?.handoff(id);if(!text)return;
-        options.smalltalk.close();controller.setConsultationTarget(null);controller.setRequestPurpose('consultation');setDraft(text);return;
+        const text = options.smalltalk?.handoff();
+        if (!text) return;
+        const next = !draft.trim() ? text : draft.includes(text) ? draft : draft + '\n\n' + text;
+        if (next.length > 2000) {
+          notice = '既存の下書きと合わせると2,000文字を超えます。アプリの相談で下書きを短くしてから引き継いでください。';
+          draw(); return;
+        }
+        options.smalltalk.close();controller.setConsultationTarget(null);controller.setRequestPurpose('consultation');setDraft(next);return;
       }
       if(options.smalltalk?.getState().open && (draftActions.has(action)||['diagnose','understand-business','documents','send'].includes(action)))return;
       if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;

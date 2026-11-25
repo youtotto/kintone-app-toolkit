@@ -33,7 +33,27 @@ const KTReleaseSmalltalk=(()=>{
    toggle(){if(disposed||state.pending||!canSend())return false;state.open=!state.open;state.error='';emit();return true;},
    close(){if(state.pending)return false;state.open=false;emit();return true;},
    cancel(){abort?.abort();state.error='雑談を中断しました。送信開始後の無料枠は戻りません。';emit();},
-   handoff(id){const t=state.turns.find(t=>t.id===id);return t?.reply&&t.handoff?'次の話題について、このアプリでの対応を相談したいです。雑談の内容は未採用で、現在のアプリでは未確認です。設定を確認してから提案してください。\n\n私の依頼：'+t.user+'\n\n雑談の回答（未確認）：'+t.reply:null;},
+   handoff(){
+    const turns = state.turns.filter(turn => turn.reply);
+    if (!turns.length || state.pending) return null;
+    const intro = 'このアプリで次の困りごとを相談したいです。設定を確認してから提案してください。';
+    const opening = intro + '\n\n最初の相談：' + turns[0].user;
+    const exchange = turns.map((turn, index) =>
+      (index ? '私：' + turn.user + '\n' : '') + '雑談AI（未採用）：' + turn.reply);
+    const full = opening + '\n\n雑談で整理した経緯・条件\n' + exchange.join('\n');
+    // The consultation API accepts 2,000 UTF-16 units. Keep whole user statements
+    // ahead of AI suggestions when the complete conversation would exceed it.
+    if (full.length <= 2000) return full;
+    const header = opening + '\n\n雑談からの抜粋（発言の一部を省略）';
+    let notes = '';
+    for (let i = turns.length - 1; i > 0; i--) {
+      const line = '\n私：' + turns[i].user;
+      if ((header + line + notes).length > 2000) break;
+      notes = line + notes;
+    }
+    const lastReply = '\n雑談AI（未採用）：' + turns[turns.length - 1].reply;
+    return header + notes + (header.length + notes.length + lastReply.length <= 2000 ? lastReply : '');
+   },
    snapshot(){return {version:1,open:state.open,draft:state.draft,turns:clone(state.turns)};},
    restore(saved){if(state.pending||!valid(saved))return false;state={...clone(saved),pending:false,error:saved.turns.some(t=>t.reply==null)?'返答が残っていない送信があります。自動では再送しません。':'',usage:null};emit();return true;},
    reset(){if(state.pending)return false;state={version:1,open:false,draft:'',turns:[],pending:false,error:'',usage:null};emit();return true;},

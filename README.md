@@ -8,7 +8,7 @@
 
 初めて使う方は、[導入から最初の相談までのガイド](docs/getting-started.md)をご覧ください。無料機能の試し方、AI接続、相談文の例を順番に確認できます。
 
-**公開版：2.3.14**（2026年11月25日）。関連レコード一覧を相談すると、参照元アプリと照合項目の候補を提案します。手動設定が必要な場合は最終案に表示します。[今回の変更内容](docs/RELEASE-NOTES-2.3.14.md)
+**公開版：2.3.15**（2026年11月25日）。雑談の返答を受けたあと、好きなタイミングで会話を相談の下書きに移せます。[今回の変更内容](docs/RELEASE-NOTES-2.3.15.md)
 
 ![ToolkitのFields画面。上部のタブで機能を切り替え、項目の使用箇所と変更影響の候補を確認できます。](docs/images/fields.jpg)
 
@@ -67,11 +67,11 @@ PC版のChrome・Edge・Firefoxと、利用できるkintone環境が必要です
 2. **選んだ版だけを導入する。** 拡張機能ZIPは[導入手順](extension/README.md#zipから導入する)へ。Tampermonkey版は[Tampermonkey](https://www.tampermonkey.net/)を追加し、[公開中のToolkit](https://raw.githubusercontent.com/youtotto/kintone-app-toolkit/main/kintoneAppToolkit.user.js)を開いてインストールします。
 3. **kintoneアプリのレコード一覧画面を開き、Toolkitを使う。** ［Fields］で項目を選び、無料の設定確認から始めます。AIを使う場合は［AI Assistant］→［接続］→［接続する］からNest Rec会員で接続します。[接続と最初の相談](docs/getting-started.md#3-aiを使うときにnest-rec会員で接続する)
 
-既存版から更新するときは、必要な会話・コードを保存してから、[使っている版の更新手順](docs/getting-started.md#更新するとき)へ進んでください。更新後はkintoneアプリを再読み込みし、**表示が「Ver 2.3.14」で、Toolkitのパネルが1つだけ**であることを確認します。[2.3.14の変更点](docs/RELEASE-NOTES-2.3.14.md)
+既存版から更新するときは、必要な会話・コードを保存してから、[使っている版の更新手順](docs/getting-started.md#更新するとき)へ進んでください。更新後はkintoneアプリを再読み込みし、**表示が「Ver 2.3.15」で、Toolkitのパネルが1つだけ**であることを確認します。[2.3.15の変更点](docs/RELEASE-NOTES-2.3.15.md)
 
 ### Chrome・Edge用の拡張機能ZIP
 
-同じソースから作った[2.3.14の拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.14/kintone-app-toolkit-2.3.14-chrome-extension.zip)もGitHubで配布しています。ZIPを展開し、ブラウザーの拡張機能管理画面から読み込めます。[導入・更新手順](extension/README.md)を参照してください。Tampermonkey版と拡張機能版は、どちらか一方だけを有効にします。
+同じソースから作った[2.3.15の拡張機能ZIP](https://github.com/youtotto/kintone-app-toolkit/releases/download/v2.3.15/kintone-app-toolkit-2.3.15-chrome-extension.zip)もGitHubで配布しています。ZIPを展開し、ブラウザーの拡張機能管理画面から読み込めます。[導入・更新手順](extension/README.md)を参照してください。Tampermonkey版と拡張機能版は、どちらか一方だけを有効にします。
 
 Chromeウェブストアでの公開は別途審査対象です。GitHubでのZIP配布は、ストア公開済みを意味しません。
 
@@ -89,7 +89,7 @@ Chromeウェブストアでの公開は別途審査対象です。GitHubでのZI
 |---|---|
 | [機能リファレンス](docs/feature-reference.md) | 各タブの使い方、解析範囲、安全性、API一覧、過去の更新履歴 |
 | [AI Assistantのガイド](docs/release-workspace.md) | 相談・資料作成・変更案・反映・会話保存の流れと確認範囲 |
-| [2.3.14の変更内容](docs/RELEASE-NOTES-2.3.14.md) | 関連レコード一覧の提案と手動設定の引き継ぎ |
+| [2.3.15の変更内容](docs/RELEASE-NOTES-2.3.15.md) | 雑談から相談への下書きの引き継ぎ |
 | [2.3.9の変更内容](docs/RELEASE-NOTES-2.3.9.md) | 削除差分の受信、承認ルールの仮案・反映前確認 |
 | [2.3.8の変更内容](docs/RELEASE-NOTES-2.3.8.md) | 不要・重複処理の整理、会話画面の再描画・会話保存の負荷削減 |
 | [2.3.7の変更内容](docs/RELEASE-NOTES-2.3.7.md) | 参照情報のユーザー別保存・未確認範囲の表示、Pluginsの管理者判定・選択操作 |
@@ -105,6 +105,7 @@ Chromeウェブストアでの公開は別途審査対象です。GitHubでのZI
 
 | 版 | 公開日 | 主な変更 |
 |---|---|---|
+| [2.3.15](docs/RELEASE-NOTES-2.3.15.md) | 2026-11-25 | 雑談から相談への下書きの引き継ぎ |
 | [2.3.14](docs/RELEASE-NOTES-2.3.14.md) | 2026-11-25 | 関連レコード一覧の提案と手動設定の引き継ぎ |
 | [2.3.13](docs/RELEASE-NOTES-2.3.13.md) | 2026-11-25 | ルックアップのコピー先競合と反映結果の照合 |
 | [2.3.12](docs/RELEASE-NOTES-2.3.12.md) | 2026-11-23 | 業務工程・相談の訂正・参照計算の検証 |

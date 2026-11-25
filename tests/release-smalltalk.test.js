@@ -61,3 +61,24 @@ test('雑談の失敗で新しい下書きを消さず、内部例外を表示�
  s.setDraft('次に入力した文');reject(Error('PRIVATE_PROVIDER sk-private at /server/private.mjs:1'));await pending;
  assert.equal(s.getState().draft,'次に入力した文');assert.equal(s.getState().turns[0].user,'送信する文');assert.doesNotMatch(s.getState().error,/PRIVATE_PROVIDER|sk-private|private.mjs/);assert.match(s.getState().error,/接続状態を確認/);
 });
+
+test('相談への下書きに、提案フラグに関係なく過去の質問と回答を時系列で残す',()=>{
+ const s=make();
+ const turns=[
+  {id:'1', user:'前に売ったか聞かれる',reply:'どこで調べますか？',handoff:false},
+  {id:'2', user:'受注を商品名で検索',reply:'取引先も必要ですか？',handoff:false},
+  {id:'3', user:'いいえ、直近の日付だけ',reply:'直近の受注日ですね。',handoff:false},
+ ];
+ assert.equal(s.restore({version:1,open:true,draft:'未送信の文',turns}),true);
+ const draft=s.handoff();
+ let offset=0;
+ for(const entry of turns.flatMap(turn=>[turn.user,turn.reply])){
+  const found=draft.indexOf(entry,offset);assert.ok(found>=0);offset=found+entry.length;
+ }
+ assert.ok(!draft.includes('未送信の文'));
+});
+test('長い会話は最初の困りごとと直近の利用者条件を送信上限内に残し、省略を明示する',()=>{
+ const s=make();const turns=Array.from({length:48},(_,i)=>({id:String(i),user:'条件'+i+'あ'.repeat(94),reply:'返答'.repeat(300),handoff:false}));
+ assert.ok(s.restore({version:1,open:true,draft:'',turns}));const draft=s.handoff();
+ assert.ok(draft.length<=2000);assert.ok(draft.includes(turns[0].user)&&draft.includes(turns.at(-1).user));assert.match(draft,/省略/);
+});

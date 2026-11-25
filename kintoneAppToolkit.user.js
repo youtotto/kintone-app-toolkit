@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.14
+// @version      2.3.15
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.14';
+  const SCRIPT_VERSION = '2.3.15';
   // Published build identifier.
-  const KT_BUILD = '2.3.14';
+  const KT_BUILD = '2.3.15';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -17377,7 +17377,27 @@
      toggle(){if(disposed||state.pending||!canSend())return false;state.open=!state.open;state.error='';emit();return true;},
      close(){if(state.pending)return false;state.open=false;emit();return true;},
      cancel(){abort?.abort();state.error='雑談を中断しました。送信開始後の無料枠は戻りません。';emit();},
-     handoff(id){const t=state.turns.find(t=>t.id===id);return t?.reply&&t.handoff?'次の話題について、このアプリでの対応を相談したいです。雑談の内容は未採用で、現在のアプリでは未確認です。設定を確認してから提案してください。\n\n私の依頼：'+t.user+'\n\n雑談の回答（未確認）：'+t.reply:null;},
+     handoff(){
+      const turns = state.turns.filter(turn => turn.reply);
+      if (!turns.length || state.pending) return null;
+      const intro = 'このアプリで次の困りごとを相談したいです。設定を確認してから提案してください。';
+      const opening = intro + '\n\n最初の相談：' + turns[0].user;
+      const exchange = turns.map((turn, index) =>
+        (index ? '私：' + turn.user + '\n' : '') + '雑談AI（未採用）：' + turn.reply);
+      const full = opening + '\n\n雑談で整理した経緯・条件\n' + exchange.join('\n');
+      // The consultation API accepts 2,000 UTF-16 units. Keep whole user statements
+      // ahead of AI suggestions when the complete conversation would exceed it.
+      if (full.length <= 2000) return full;
+      const header = opening + '\n\n雑談からの抜粋（発言の一部を省略）';
+      let notes = '';
+      for (let i = turns.length - 1; i > 0; i--) {
+        const line = '\n私：' + turns[i].user;
+        if ((header + line + notes).length > 2000) break;
+        notes = line + notes;
+      }
+      const lastReply = '\n雑談AI（未採用）：' + turns[turns.length - 1].reply;
+      return header + notes + (header.length + notes.length + lastReply.length <= 2000 ? lastReply : '');
+     },
      snapshot(){return {version:1,open:state.open,draft:state.draft,turns:clone(state.turns)};},
      restore(saved){if(state.pending||!valid(saved))return false;state={...clone(saved),pending:false,error:saved.turns.some(t=>t.reply==null)?'返答が残っていない送信があります。自動では再送しません。':'',usage:null};emit();return true;},
      reset(){if(state.pending)return false;state={version:1,open:false,draft:'',turns:[],pending:false,error:'',usage:null};emit();return true;},
@@ -17826,7 +17846,8 @@
       const exhausted=quota&&quota.monthly.used>=monthlyLimit;
       const resets=exhausted ? new Date(quota.monthly.resetsAt).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）から利用できます。' : '';
       return '<p class="ktr-note">アプリの設定は送りません。入力した文章と直近3往復までの雑談をAIへ送ります。</p><details data-release-panel="smalltalk-quota"><summary>無料枠について</summary><p>'+esc(count)+'</p><p>'+esc(resets)+'</p></details>'+
-        '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+(t.handoff?'<p class="ktr-note">雑談ではアプリの設定を確認していません。設定に合わせた変更案は、この画面の［アプリの相談］で作れます。</p>'+button('smalltalk-handoff','この話をアプリの相談へ',{id:t.id,disabled:s.pending})+'<p class="ktr-note">下書きを入れるだけです。通常の相談で送信すると1クレジットを使います。</p>':'')+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
+        '<div class="ktr-chat-log" aria-label="雑談の記録"><div class="ktr-messages">'+s.turns.map(t=>'<article class="ktr-message ktr-user"><strong>あなた</strong><p style="white-space:pre-wrap">'+esc(t.user)+'</p></article>'+(t.reply?'<article class="ktr-message ktr-assistant"><strong>AI</strong><p style="white-space:pre-wrap">'+esc(t.reply)+'</p>'+'</article>':'')).join('')+(s.pending?'<div class="ktr-chat-pending" role="status">'+activity+'返答を考えています</div>':'')+'</div></div>'+
+        (s.turns.some(t => t.reply) ? '<div class="ktr-actions">' + button('smalltalk-handoff', 'アプリの相談へ', {disabled:s.pending}) + '</div><p class="ktr-note">雑談の経緯と条件を下書きに移します。送信は内容を確認してから行えます。</p>' : '') +
         (s.error?'<p class="ktr-error" role="alert">'+esc(s.error)+'</p>':'')+(exhausted?'<p class="ktr-note">'+esc(resets)+'</p>':'')+
         (conn.canSmalltalk!==true?'<p class="ktr-note">雑談には対応したAIサービスと有効なToolkit契約での接続が必要です。</p>':'')+
         '<div class="ktr-composer"><label for="kt-smalltalk-input">雑談（100文字以内）</label><textarea id="kt-smalltalk-input" '+(s.pending?'disabled':'')+' placeholder="ちょっとひと息、話してみましょう">'+esc(s.draft)+'</textarea><div class="ktr-compose-actions"><span>100文字以内・クレジット消費なし</span>'+button(s.pending?'smalltalk-cancel':'smalltalk-send',s.pending?'中断する':'送信',{primary:!s.pending,disabled:!s.pending&&disabled})+'</div></div>';
@@ -18085,9 +18106,14 @@
         if(action==='smalltalk-send')return sendSmalltalk();
         if(action==='smalltalk-handoff'){
           if(sending||busy.has(state.phase))return;
-          if(draft.trim()){notice='元の相談欄の入力は残しています。内容を整理してから移してください。';draw();return;}
-          const text=options.smalltalk?.handoff(id);if(!text)return;
-          options.smalltalk.close();controller.setConsultationTarget(null);controller.setRequestPurpose('consultation');setDraft(text);return;
+          const text = options.smalltalk?.handoff();
+          if (!text) return;
+          const next = !draft.trim() ? text : draft.includes(text) ? draft : draft + '\n\n' + text;
+          if (next.length > 2000) {
+            notice = '既存の下書きと合わせると2,000文字を超えます。アプリの相談で下書きを短くしてから引き継いでください。';
+            draw(); return;
+          }
+          options.smalltalk.close();controller.setConsultationTarget(null);controller.setRequestPurpose('consultation');setDraft(next);return;
         }
         if(options.smalltalk?.getState().open && (draftActions.has(action)||['diagnose','understand-business','documents','send'].includes(action)))return;
         if (draftActions.has(action) && draftPending({ draft: host.querySelector?.('#kt-release-input')?.value ?? draft, sending })) return;
