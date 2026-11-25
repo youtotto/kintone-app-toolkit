@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.13
+// @version      2.3.14
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.13';
+  const SCRIPT_VERSION = '2.3.14';
   // Published build identifier.
-  const KT_BUILD = '2.3.13';
+  const KT_BUILD = '2.3.14';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -16674,6 +16674,48 @@
         value: summary });
       return { facts, analyzed: summary.status === 'analyzed' };
     }
+    // Discover incoming relations only for requests about showing related records.
+    // A cached scan supplies app IDs, never evidence of a current join by itself.
+    async function withIncomingLookups(input, get, incoming) {
+      const { base, signal } = input;
+      if (!incoming || !base?.ok || base.env !== 'preview' || input.diagnosis || input.environmentComparison ||
+          input.businessSnapshot || input.businessMode === 'understand' || input.customization ||
+          (input.requestPurpose && input.requestPurpose !== 'consultation')) return input;
+      const words = [input.text, input.goal, ...(input.requests || [])].filter(x => typeof x === 'string').join('\n');
+      const grouped = /ごと|毎に|別に|別の|に紐[づ付]く|にひも[づ付]く|に関連する|に対応する|にひも付いた|詳細画面|台帳で|マスタ[ー]?で/.test(words);
+      if (!/関連レコード|被参照|逆引き/.test(words) &&
+          !(grouped && /見たい|見られ|一覧|履歴|表示|確認したい|参照したい/.test(words))) return input;
+      const candidates = [];
+      let partial = false, scannedAt = null;
+      try {
+        signal?.throwIfAborted();
+        const scan = incoming.loadCache(String(base.appId)) || await incoming.run(base.appId, {includeActions:false});
+        scannedAt = scan.scannedAt;
+        const ids = [...new Set(scan.rows.filter(row => row.kind === 'ルックアップ').map(row => String(row.appId)))];
+        partial = Boolean(scan.stats?.truncated || scan.stats?.failedApps || ids.length > 12);
+        for (const appId of ids.slice(0, 12)) {
+          signal?.throwIfAborted();
+          try {
+            const response = await get('/k/v1/app/form/fields.json', {app:appId});
+            const properties = response?.properties;
+            if (!properties) throw new Error('Missing source schema');
+            const app = {appId, name:scan.rows.find(row => String(row.appId) === appId).appName};
+            const fields = Object.values(properties);
+            const viewFields = fields.filter(f => ['DATE','DATETIME','CREATED_TIME','RECORD_NUMBER'].includes(f.type))
+              .slice(0,12).map(({code,label,type}) => ({code,label,type}));
+            for (const row of incoming.analyzeApp(app, base.appId, response, null)) {
+              if (row.kind !== 'ルックアップ') continue;
+              const local = base.data.fields?.[row.targetField], remote = properties[row.sourceField];
+              if (!local || !remote) continue; // Table columns cannot be used as this direct join.
+              if (candidates.length >= 24) { partial = true; break; }
+              candidates.push({appId, appName:app.name, local:{code:local.code,label:local.label},
+                remote:{code:remote.code,label:remote.label}, viewFields});
+            }
+          } catch { signal?.throwIfAborted(); partial = true; }
+        }
+      } catch { signal?.throwIfAborted(); partial = true; }
+      return {...input, base:{...base, lookupEvidence:{candidates,partial,scannedAt}}};
+    }
     const selectedTarget = target => target ? ['field', 'event'].includes(target.type)
       ? { type: target.type, id: target.id, name: target.name, appId: target.appId, environment: target.environment, revision: target.revision }
       : { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
@@ -16716,6 +16758,8 @@
         }
       };
       addFields(data.fields);
+      if (base.lookupEvidence) add('incoming-lookup', '参照元アプリの運用フォームで再確認したルックアップと、現在の動作テスト環境のキーの組。関連レコード一覧の手動設定では、参照するアプリ＝appName、表示条件＝localとremoteの一致。表示列・ソートには確認できた項目を使う。日付の種類を区別し、「最近」の基準は提案として示す。表示件数は1ページの件数（例：5件、続きは次のページ）。総件数を制限する設定ではない。partialが真なら未確認の範囲があり、他に候補がないとは断定できない。目的に合う候補が一つなら具体案を出し、複数なら違いを示して選択を求める。候補がないときは参照先とキーを確認する。関連レコード一覧の新設と既存一覧の変更は管理者がフォームで手動設定する。既存一覧の表示列・ソートと採用内容を照合し、差があれば対象と変更後の値を仮案のapproach.standardに記し、最終計画のREQUIRE_CONFIRMATION手順の詳細にも引き継ぐ。既設の一覧が満たす場合は重複追加しない。', base.lookupEvidence,
+        {provenance:{environment:'production',loadedAt:base.lookupEvidence.scannedAt}});
       const labels = { status: 'プロセス管理', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダーの条件通知', actions: 'アプリアクション', layout: 'フォーム', reports: 'グラフ', settings: 'アプリの設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', appPlugins: 'プラグイン', customize: 'JavaScript / CSS カスタマイズ' };
       for (const [key, value] of Object.entries(data)) {
         if (key === 'relatedApps' && Object.keys(value || {}).length) {
@@ -16829,7 +16873,7 @@
       sizeCheck({ ...ctx, verification: { ...ctx.verification, relatedFiles: relatedFiles.map(f => ({ ...f, text: '' })) } }, 256 * 1024);
       return ctx;
     }
-    return { proposal, plan, generator, factsOf, fieldsOf, dictionaryOf };
+    return { proposal, plan, generator, factsOf, fieldsOf, dictionaryOf, withIncomingLookups };
   })();
 
   /* Coordinates preview-only writes using the same approved operations and real readback. */
@@ -17605,15 +17649,32 @@
     }
     function reviewHtml(state, options) {
       const prep = state.prepared || {};
+      const confirmationSteps = confirmationStepsHtml(state);
       return `<section class="ktr-section"><h2>今回反映する内容</h2>${changesHtml(prep.changes || [])}
         ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
         ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
         ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-        ${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
+        ${confirmationSteps}${confirmationSteps ? adoptedSettingsHtml(state, false) : ''}${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
         ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
         <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
         ${(state.artifacts || []).length ? '<p class="ktr-note">JavaScriptは作成済みです。コードと変更内容を確認して反映してください。</p>' : ''}
         <div class="ktr-actions">${button('apply', '動作テスト環境に反映', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+    }
+    function confirmationStepsHtml(state) {
+      const steps = (state.plan?.steps || []).filter(step => step.actionType === 'REQUIRE_CONFIRMATION');
+      if (!steps.length) return '';
+      const notes = steps.flatMap(step => [step.title, step.details, step.proposal?.summary, ...(step.proposal?.details || [])]);
+      return '<h3>手動で設定・確認する内容</h3>' + list([...new Set(notes.filter(value => typeof value === 'string' && value.trim()))]);
+    }
+    function adoptedSettingsHtml(state, includeNotes = true) {
+      const p = state.adopted;
+      const notes = [...(p?.behaviors || []), ...(p?.approach?.standard || []), ...(includeNotes ? [...(p?.assumptions || []), ...(p?.cannot || [])] : [])];
+      const rows = [...new Set(notes.map(row => row?.text || textOf(row)).filter(Boolean))];
+      return rows.length ? '<h3>採用した設定内容</h3>' + list(rows) : '';
+    }
+    function noWritesHtml(state) {
+      const steps = confirmationStepsHtml(state);
+      return `<section class="ktr-section"><h2>${steps ? '手動での設定・確認が残っています' : '自動で反映する変更はありません'}</h2>${steps}${adoptedSettingsHtml(state)}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
     }
     function provisionalsHtml(rows) {
       const choices = (rows || []).filter(row => row && typeof row.choice === 'string' && row.choice.trim());
@@ -17785,7 +17846,7 @@
       else if (state.phase === 'proposal') body = proposalHtml(state, options);
       else if (state.phase === 'review') body = reviewHtml(state, options);
       else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
-      else if (state.phase === 'unchanged') body = `<section class="ktr-section"><h2>反映する変更はありません</h2><p>確認した範囲は、現在の内容で実現しています。設定やJavaScriptの登録は行いません。</p>${list(state.adopted?.behaviors || [])}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
+      else if (state.phase === 'unchanged') body = noWritesHtml(state);
       else if (state.phase === 'blocked' && state.error?.code === 'PLAN_QUESTION' && state.plan) body = planQuestionsHtml(state);
       else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list([...new Map((state.prepared?.reasons || []).map(r => [textOf(r), r])).values()], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p>${workspace.canReprepare(state) ? reprepareHtml(options) : ''}</section>`;
       else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
@@ -17804,6 +17865,7 @@
         if(state.phase==='blocked' && state.error?.code==='PLAN_QUESTION' && state.plan) body=planQuestionsHtml(state)+body;
         else if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
       }
+      if (state.phase === 'blocked' && state.prepared && !historical && !explanation) body += adoptedSettingsHtml(state);
       if(state.businessPlanContext&&!state.businessContext&&!historical)body='<aside class="ktr-section"><p>業務分析と確認した運用をもとにした仮案です。質問への回答や修正は相談欄へ入力できます。</p>'+button('business-start','業務の確認へ戻る',{id:state.businessPlanContext.analysisId,extra:state.businessPlanContext.selection.ruleId?' data-business-rule="'+esc(state.businessPlanContext.selection.ruleId)+'"':''})+'</aside>'+body;
       const stage = explanation && !busy.has(state.phase) ? 'explanation' : state.businessContext && !historical && !busy.has(state.phase) && stageOf(state.phase, false) === 'empty' ? 'business' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
       if(state.responseRecovery&&!historical&&!['consulting','building','preparing'].includes(state.phase))body='<section class="ktr-section" data-response-recovery><p>回答を受け取れていない可能性があります。保存済みの回答を取り直します。AIの再実行・追加クレジット消費はありません（30日以内）。</p><div class="ktr-actions">'+button('recover-response','回答を取り直す',{primary:true,disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+button('discard-response-recovery','再取得を終了',{disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+'</div></section>'+body;
@@ -18865,6 +18927,12 @@
     const client = session.client;
     const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge, findBrokenRefs: KTDeps.findBrokenRefs, calcChainStats: KTDeps.calcChainStats };
     const proposalContext = input => input.businessMode === 'understand' ? KTBusinessConsultation.context(input.businessContext,input.text) : input.businessSnapshot ? KTBusinessContract.context(input.businessSnapshot,input.text,{workflow:input.businessWorkflow===true}) : KTReleaseContext.proposal(input,dependencyTools);
+    async function requestContext(kind, input) {
+      if (kind === 'generate') return KTReleaseContext.generator(input);
+      const related = await KTReleaseContext.withIncomingLookups(input, (path, params) => kGet(path, params),
+        typeof KTIncoming !== 'undefined' ? KTIncoming : null);
+      return kind === 'plan' ? KTReleaseContext.plan(related, dependencyTools) : proposalContext(related);
+    }
     const recoveryInputHash = (kind,ctx,input) => KTReleaseWorkspace.hash({kind,ctx:{...ctx,generatedAt:null,...(Array.isArray(ctx.facts)?{facts:ctx.facts.map(f=>f.kind==='dependency-coverage'?{...f,value:{...f.value,analyzedAt:null}}:f)}:{})},finalBundleId:kind==='generate'?input.plan?.finalBundle?.id||null:null});
     async function recoveryOptions(kind,ctx,input) {
       const inputHash=await recoveryInputHash(kind,ctx,input);
@@ -18879,7 +18947,7 @@
         return record.kind==='plan'?{plan:r}:record.kind==='generate'?{generated:r,verification:r.verification,artifactOutcome:r.artifactOutcome}:{...r,facts:record.facts||[]};
       },
       async validateRecovery(kind,input,record) {
-        const ctx=kind==='propose'?proposalContext(input):kind==='plan'?KTReleaseContext.plan(input,dependencyTools):KTReleaseContext.generator(input);
+        const ctx=await requestContext(kind,input);
         return record.inputHash===await recoveryInputHash(kind,ctx,input);
       },
       async readBusinessSnapshot(environment,signal) { return KTBusinessSettings.collect({appId:String(d.appId),environment,get:d.getBusinessSettings||((path,params)=>kGet(path,params)),download:d.downloadBusinessFile||((key)=>KTApi.downloadFile(key)),signal}); },
@@ -18889,7 +18957,7 @@
         if (input.diagnosis && !connection().canDiagnose) throw new Error('アプリの診断にはAIサービスの更新が必要です。');
         if (input.businessSnapshot && !connection().canUnderstandBusiness) throw new Error('業務工程の推測にはAIサービスの更新が必要です。');
         if (input.businessContext && !supportsBusinessContext(input.businessContext)) throw new Error('業務理解からの相談にはAIサービスの更新が必要です。');
-        const ctx = proposalContext(input), recovery = await recoveryOptions('propose',ctx,input);
+        const ctx = await requestContext('propose',input), recovery = await recoveryOptions('propose',ctx,input);
         const analysisEncoding = capability.limits?.analysisInput?.encoding === 'shared-json-1';
         if (KTAnalysisInput.analysis(ctx) && !analysisEncoding && KTAnalysisInput.bytes(ctx) > 256 * 1024) throw Object.assign(new Error('大きいアプリの診断・業務工程にはAIサービスの更新が必要です。AIには送信していません。'), {code:'ANALYSIS_SERVICE_UPDATE_REQUIRED'});
         const purpose = input.businessSnapshot ? 'business' : input.diagnosis ? 'diagnosis' : input.requestPurpose === 'document' ? 'document' : 'consultation';
@@ -18901,7 +18969,7 @@
       async plan(input) {
         await requireFeature(KTAiClient.FEATURE_PLANNER);
         if (input.businessContext && !supportsBusinessContext(input.businessContext)) throw new Error('業務理解からの相談にはAIサービスの更新が必要です。');
-        const ctx=KTReleaseContext.plan(input,dependencyTools), recovery=await recoveryOptions('plan',ctx,input);
+        const ctx=await requestContext('plan',input), recovery=await recoveryOptions('plan',ctx,input);
         const r = await requestWithUsage('creation', () => client.plan({ ctx, ...recovery, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] }));
         if (capability.usage?.version === 4 && !usageTools.finalBundleAvailable(r)) throw Object.assign(new Error('最終案の利用記録を受け取れませんでした。接続先を確認してください。'), { code: 'CREDIT_BUNDLE_REQUIRED' });
         return { plan: r };

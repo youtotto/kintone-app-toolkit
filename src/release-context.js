@@ -94,6 +94,48 @@ const KTReleaseContext = (() => {
       value: summary });
     return { facts, analyzed: summary.status === 'analyzed' };
   }
+  // Discover incoming relations only for requests about showing related records.
+  // A cached scan supplies app IDs, never evidence of a current join by itself.
+  async function withIncomingLookups(input, get, incoming) {
+    const { base, signal } = input;
+    if (!incoming || !base?.ok || base.env !== 'preview' || input.diagnosis || input.environmentComparison ||
+        input.businessSnapshot || input.businessMode === 'understand' || input.customization ||
+        (input.requestPurpose && input.requestPurpose !== 'consultation')) return input;
+    const words = [input.text, input.goal, ...(input.requests || [])].filter(x => typeof x === 'string').join('\n');
+    const grouped = /ごと|毎に|別に|別の|に紐[づ付]く|にひも[づ付]く|に関連する|に対応する|にひも付いた|詳細画面|台帳で|マスタ[ー]?で/.test(words);
+    if (!/関連レコード|被参照|逆引き/.test(words) &&
+        !(grouped && /見たい|見られ|一覧|履歴|表示|確認したい|参照したい/.test(words))) return input;
+    const candidates = [];
+    let partial = false, scannedAt = null;
+    try {
+      signal?.throwIfAborted();
+      const scan = incoming.loadCache(String(base.appId)) || await incoming.run(base.appId, {includeActions:false});
+      scannedAt = scan.scannedAt;
+      const ids = [...new Set(scan.rows.filter(row => row.kind === 'ルックアップ').map(row => String(row.appId)))];
+      partial = Boolean(scan.stats?.truncated || scan.stats?.failedApps || ids.length > 12);
+      for (const appId of ids.slice(0, 12)) {
+        signal?.throwIfAborted();
+        try {
+          const response = await get('/k/v1/app/form/fields.json', {app:appId});
+          const properties = response?.properties;
+          if (!properties) throw new Error('Missing source schema');
+          const app = {appId, name:scan.rows.find(row => String(row.appId) === appId).appName};
+          const fields = Object.values(properties);
+          const viewFields = fields.filter(f => ['DATE','DATETIME','CREATED_TIME','RECORD_NUMBER'].includes(f.type))
+            .slice(0,12).map(({code,label,type}) => ({code,label,type}));
+          for (const row of incoming.analyzeApp(app, base.appId, response, null)) {
+            if (row.kind !== 'ルックアップ') continue;
+            const local = base.data.fields?.[row.targetField], remote = properties[row.sourceField];
+            if (!local || !remote) continue; // Table columns cannot be used as this direct join.
+            if (candidates.length >= 24) { partial = true; break; }
+            candidates.push({appId, appName:app.name, local:{code:local.code,label:local.label},
+              remote:{code:remote.code,label:remote.label}, viewFields});
+          }
+        } catch { signal?.throwIfAborted(); partial = true; }
+      }
+    } catch { signal?.throwIfAborted(); partial = true; }
+    return {...input, base:{...base, lookupEvidence:{candidates,partial,scannedAt}}};
+  }
   const selectedTarget = target => target ? ['field', 'event'].includes(target.type)
     ? { type: target.type, id: target.id, name: target.name, appId: target.appId, environment: target.environment, revision: target.revision }
     : { name: target.name, target: target.target, type: 'FILE', environment: 'preview', fileKey: target.fileKey, revision: target.revision } : null;
@@ -136,6 +178,8 @@ const KTReleaseContext = (() => {
       }
     };
     addFields(data.fields);
+    if (base.lookupEvidence) add('incoming-lookup', '参照元アプリの運用フォームで再確認したルックアップと、現在の動作テスト環境のキーの組。関連レコード一覧の手動設定では、参照するアプリ＝appName、表示条件＝localとremoteの一致。表示列・ソートには確認できた項目を使う。日付の種類を区別し、「最近」の基準は提案として示す。表示件数は1ページの件数（例：5件、続きは次のページ）。総件数を制限する設定ではない。partialが真なら未確認の範囲があり、他に候補がないとは断定できない。目的に合う候補が一つなら具体案を出し、複数なら違いを示して選択を求める。候補がないときは参照先とキーを確認する。関連レコード一覧の新設と既存一覧の変更は管理者がフォームで手動設定する。既存一覧の表示列・ソートと採用内容を照合し、差があれば対象と変更後の値を仮案のapproach.standardに記し、最終計画のREQUIRE_CONFIRMATION手順の詳細にも引き継ぐ。既設の一覧が満たす場合は重複追加しない。', base.lookupEvidence,
+      {provenance:{environment:'production',loadedAt:base.lookupEvidence.scannedAt}});
     const labels = { status: 'プロセス管理', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダーの条件通知', actions: 'アプリアクション', layout: 'フォーム', reports: 'グラフ', settings: 'アプリの設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', appPlugins: 'プラグイン', customize: 'JavaScript / CSS カスタマイズ' };
     for (const [key, value] of Object.entries(data)) {
       if (key === 'relatedApps' && Object.keys(value || {}).length) {
@@ -249,6 +293,6 @@ const KTReleaseContext = (() => {
     sizeCheck({ ...ctx, verification: { ...ctx.verification, relatedFiles: relatedFiles.map(f => ({ ...f, text: '' })) } }, 256 * 1024);
     return ctx;
   }
-  return { proposal, plan, generator, factsOf, fieldsOf, dictionaryOf };
+  return { proposal, plan, generator, factsOf, fieldsOf, dictionaryOf, withIncomingLookups };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = { KTReleaseContext };

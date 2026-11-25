@@ -145,6 +145,12 @@ function mountReleaseWorkspace(host, d) {
   const client = session.client;
   const dependencyTools = { analyze: KTDevBase.analyze, factFromEdge: KTContext.factFromEdge, findBrokenRefs: KTDeps.findBrokenRefs, calcChainStats: KTDeps.calcChainStats };
   const proposalContext = input => input.businessMode === 'understand' ? KTBusinessConsultation.context(input.businessContext,input.text) : input.businessSnapshot ? KTBusinessContract.context(input.businessSnapshot,input.text,{workflow:input.businessWorkflow===true}) : KTReleaseContext.proposal(input,dependencyTools);
+  async function requestContext(kind, input) {
+    if (kind === 'generate') return KTReleaseContext.generator(input);
+    const related = await KTReleaseContext.withIncomingLookups(input, (path, params) => kGet(path, params),
+      typeof KTIncoming !== 'undefined' ? KTIncoming : null);
+    return kind === 'plan' ? KTReleaseContext.plan(related, dependencyTools) : proposalContext(related);
+  }
   const recoveryInputHash = (kind,ctx,input) => KTReleaseWorkspace.hash({kind,ctx:{...ctx,generatedAt:null,...(Array.isArray(ctx.facts)?{facts:ctx.facts.map(f=>f.kind==='dependency-coverage'?{...f,value:{...f.value,analyzedAt:null}}:f)}:{})},finalBundleId:kind==='generate'?input.plan?.finalBundle?.id||null:null});
   async function recoveryOptions(kind,ctx,input) {
     const inputHash=await recoveryInputHash(kind,ctx,input);
@@ -159,7 +165,7 @@ function mountReleaseWorkspace(host, d) {
       return record.kind==='plan'?{plan:r}:record.kind==='generate'?{generated:r,verification:r.verification,artifactOutcome:r.artifactOutcome}:{...r,facts:record.facts||[]};
     },
     async validateRecovery(kind,input,record) {
-      const ctx=kind==='propose'?proposalContext(input):kind==='plan'?KTReleaseContext.plan(input,dependencyTools):KTReleaseContext.generator(input);
+      const ctx=await requestContext(kind,input);
       return record.inputHash===await recoveryInputHash(kind,ctx,input);
     },
     async readBusinessSnapshot(environment,signal) { return KTBusinessSettings.collect({appId:String(d.appId),environment,get:d.getBusinessSettings||((path,params)=>kGet(path,params)),download:d.downloadBusinessFile||((key)=>KTApi.downloadFile(key)),signal}); },
@@ -169,7 +175,7 @@ function mountReleaseWorkspace(host, d) {
       if (input.diagnosis && !connection().canDiagnose) throw new Error('アプリの診断にはAIサービスの更新が必要です。');
       if (input.businessSnapshot && !connection().canUnderstandBusiness) throw new Error('業務工程の推測にはAIサービスの更新が必要です。');
       if (input.businessContext && !supportsBusinessContext(input.businessContext)) throw new Error('業務理解からの相談にはAIサービスの更新が必要です。');
-      const ctx = proposalContext(input), recovery = await recoveryOptions('propose',ctx,input);
+      const ctx = await requestContext('propose',input), recovery = await recoveryOptions('propose',ctx,input);
       const analysisEncoding = capability.limits?.analysisInput?.encoding === 'shared-json-1';
       if (KTAnalysisInput.analysis(ctx) && !analysisEncoding && KTAnalysisInput.bytes(ctx) > 256 * 1024) throw Object.assign(new Error('大きいアプリの診断・業務工程にはAIサービスの更新が必要です。AIには送信していません。'), {code:'ANALYSIS_SERVICE_UPDATE_REQUIRED'});
       const purpose = input.businessSnapshot ? 'business' : input.diagnosis ? 'diagnosis' : input.requestPurpose === 'document' ? 'document' : 'consultation';
@@ -181,7 +187,7 @@ function mountReleaseWorkspace(host, d) {
     async plan(input) {
       await requireFeature(KTAiClient.FEATURE_PLANNER);
       if (input.businessContext && !supportsBusinessContext(input.businessContext)) throw new Error('業務理解からの相談にはAIサービスの更新が必要です。');
-      const ctx=KTReleaseContext.plan(input,dependencyTools), recovery=await recoveryOptions('plan',ctx,input);
+      const ctx=await requestContext('plan',input), recovery=await recoveryOptions('plan',ctx,input);
       const r = await requestWithUsage('creation', () => client.plan({ ctx, ...recovery, signal: input.signal, deadlineMs: capability.limits?.deadlineMs?.[KTAiClient.FEATURE_PLANNER] }));
       if (capability.usage?.version === 4 && !usageTools.finalBundleAvailable(r)) throw Object.assign(new Error('最終案の利用記録を受け取れませんでした。接続先を確認してください。'), { code: 'CREDIT_BUNDLE_REQUIRED' });
       return { plan: r };

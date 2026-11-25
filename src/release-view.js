@@ -260,15 +260,32 @@ const KTReleaseView = (() => {
   }
   function reviewHtml(state, options) {
     const prep = state.prepared || {};
+    const confirmationSteps = confirmationStepsHtml(state);
     return `<section class="ktr-section"><h2>今回反映する内容</h2>${changesHtml(prep.changes || [])}
       ${prep.unchanged?.length ? `<h3>変更しない内容</h3>${list(prep.unchanged.map(item => ({ text: [item.title, item.message].filter(Boolean).join('：') })))}` : ''}
       ${state.adopted?.assumptions?.length ? `<h3>この案の前提</h3>${list(state.adopted.assumptions)}` : ''}
       ${state.adopted?.cannot?.length ? `<h3>この案の制約</h3>${list(state.adopted.cannot)}` : ''}
-      ${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
+      ${confirmationSteps}${confirmationSteps ? adoptedSettingsHtml(state, false) : ''}${approvalRulesHtml(state.plan)}${provisionalsHtml(state.plan?.provisionals)}${noticesHtml(state)}
       ${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>反映前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}
       <p>反映先は動作テスト環境です。運用環境は変更しません。</p>
       ${(state.artifacts || []).length ? '<p class="ktr-note">JavaScriptは作成済みです。コードと変更内容を確認して反映してください。</p>' : ''}
       <div class="ktr-actions">${button('apply', '動作テスト環境に反映', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options) })}</div>${draftNotice(options)}</section>`;
+  }
+  function confirmationStepsHtml(state) {
+    const steps = (state.plan?.steps || []).filter(step => step.actionType === 'REQUIRE_CONFIRMATION');
+    if (!steps.length) return '';
+    const notes = steps.flatMap(step => [step.title, step.details, step.proposal?.summary, ...(step.proposal?.details || [])]);
+    return '<h3>手動で設定・確認する内容</h3>' + list([...new Set(notes.filter(value => typeof value === 'string' && value.trim()))]);
+  }
+  function adoptedSettingsHtml(state, includeNotes = true) {
+    const p = state.adopted;
+    const notes = [...(p?.behaviors || []), ...(p?.approach?.standard || []), ...(includeNotes ? [...(p?.assumptions || []), ...(p?.cannot || [])] : [])];
+    const rows = [...new Set(notes.map(row => row?.text || textOf(row)).filter(Boolean))];
+    return rows.length ? '<h3>採用した設定内容</h3>' + list(rows) : '';
+  }
+  function noWritesHtml(state) {
+    const steps = confirmationStepsHtml(state);
+    return `<section class="ktr-section"><h2>${steps ? '手動での設定・確認が残っています' : '自動で反映する変更はありません'}</h2>${steps}${adoptedSettingsHtml(state)}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
   }
   function provisionalsHtml(rows) {
     const choices = (rows || []).filter(row => row && typeof row.choice === 'string' && row.choice.trim());
@@ -440,7 +457,7 @@ const KTReleaseView = (() => {
     else if (state.phase === 'proposal') body = proposalHtml(state, options);
     else if (state.phase === 'review') body = reviewHtml(state, options);
     else if (state.phase === 'incomplete') body = incompleteHtml(state, options);
-    else if (state.phase === 'unchanged') body = `<section class="ktr-section"><h2>反映する変更はありません</h2><p>確認した範囲は、現在の内容で実現しています。設定やJavaScriptの登録は行いません。</p>${list(state.adopted?.behaviors || [])}<div class="ktr-actions">${button('new-task', '別の変更を相談する', { primary: true })}</div></section>`;
+    else if (state.phase === 'unchanged') body = noWritesHtml(state);
     else if (state.phase === 'blocked' && state.error?.code === 'PLAN_QUESTION' && state.plan) body = planQuestionsHtml(state);
     else if (state.phase === 'blocked') body = `<section class="ktr-section"><h2>内容を確認してください</h2>${list([...new Map((state.prepared?.reasons || []).map(r => [textOf(r), r])).values()], 'ktr-reasons')}${state.error?.code === 'PLAN_QUESTION' ? list((state.plan?.questions || []).map(question => ({ text: typeof question === 'string' ? question : question.question || textOf(question) }))) : ''}<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p>${workspace.canReprepare(state) ? reprepareHtml(options) : ''}</section>`;
     else if (state.phase === 'result') body = runHtml((state.runs || []).find(run => run.id === state.resultRunId) || last, options);
@@ -459,6 +476,7 @@ const KTReleaseView = (() => {
       if(state.phase==='blocked' && state.error?.code==='PLAN_QUESTION' && state.plan) body=planQuestionsHtml(state)+body;
       else if(state.phase==='blocked') body='<section class="ktr-section"><h2>内容を確認してください</h2>'+list([...new Map((state.prepared?.reasons||[]).map(r=>[textOf(r),r])).values()],'ktr-reasons')+(state.error?.code==='PLAN_QUESTION'?list((state.plan?.questions||[]).map(question=>({text:typeof question==='string'?question:question.question||textOf(question)}))):'')+'<p>現在の内容は反映していません。変更や回答は相談欄に入力してください。</p></section>'+body;
     }
+    if (state.phase === 'blocked' && state.prepared && !historical && !explanation) body += adoptedSettingsHtml(state);
     if(state.businessPlanContext&&!state.businessContext&&!historical)body='<aside class="ktr-section"><p>業務分析と確認した運用をもとにした仮案です。質問への回答や修正は相談欄へ入力できます。</p>'+button('business-start','業務の確認へ戻る',{id:state.businessPlanContext.analysisId,extra:state.businessPlanContext.selection.ruleId?' data-business-rule="'+esc(state.businessPlanContext.selection.ruleId)+'"':''})+'</aside>'+body;
     const stage = explanation && !busy.has(state.phase) ? 'explanation' : state.businessContext && !historical && !busy.has(state.phase) && stageOf(state.phase, false) === 'empty' ? 'business' : stageOf(state.phase, !!historical), [stageIcon, stageTitle] = stageLabel[stage];
     if(state.responseRecovery&&!historical&&!['consulting','building','preparing'].includes(state.phase))body='<section class="ktr-section" data-response-recovery><p>回答を受け取れていない可能性があります。保存済みの回答を取り直します。AIの再実行・追加クレジット消費はありません（30日以内）。</p><div class="ktr-actions">'+button('recover-response','回答を取り直す',{primary:true,disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+button('discard-response-recovery','再取得を終了',{disabled:['recovering','consulting','building','preparing'].includes(state.phase)})+'</div></section>'+body;
