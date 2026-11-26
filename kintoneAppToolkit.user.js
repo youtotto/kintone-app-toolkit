@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.16
+// @version      2.3.17
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.16';
+  const SCRIPT_VERSION = '2.3.17';
   // Published build identifier.
-  const KT_BUILD = '2.3.16';
+  const KT_BUILD = '2.3.17';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -14337,7 +14337,7 @@
       }
       function exportCurrent() {
         if (initializing || switching) throw failure('HISTORY_LOADING', '会話を読み込み中です。完了してからファイルに保存してください。');
-        return clone(capture());
+        return clone(capture({ includeRollback: false }));
       }
       function dispose() { const snapshot = clone(capture()); disposed = true; clearTimeout(timer); timer = null; return serial(() => saveCurrent({ snapshot })).catch(error => { report(error); }).finally(() => store.close()); }
       return { changed, flush, list, open, beforeNewTask, markComplete, setPinned, remove, dispose, initialize, ready: () => initialization || Promise.resolve(false), isInitializing: () => initializing,
@@ -15731,7 +15731,8 @@
     const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'decisionDrafts', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
     const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
     const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
-    // Saved content is a document, never a credential store or an execution snapshot.
+    // History is scoped to this browser and app. Save only the view rollback data
+    // explicitly selected by the execution service, never full execution snapshots.
     // Nested specs and evidence may use any field code, including token/password.
     // Keep their JSON exactly; transport data is excluded by domain allowlists.
     function historyData(value) {
@@ -15785,10 +15786,12 @@
       if (value.error) result.error = savedError(value.error);
       return result;
     };
-    const savedRun = run => ({
+    const savedRun = (run, includeRollback) => ({
       ...historyData(pick(run, ['id', 'at', 'taskId', 'goal', 'status'])), archived: true,
       prepared: run.prepared ? { changes: historyData(run.prepared.changes || []), confirmations: historyData(run.prepared.confirmations || []), reasons: historyData(run.prepared.reasons || []) } : null,
-      result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {})
+      result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {}),
+      ...(includeRollback && run.viewRollback && !['complete', 'unknown'].includes(run.rollback?.status)
+        ? { viewRollback: historyData(run.viewRollback) } : {})
     });
     const appOf = value => value?.appId ?? value?.data?.appId ?? value?.current?.appId ?? value?.inputs?.data?.appId ?? null;
     const environmentOf = value => value?.env ?? value?.current?.env ?? null;
@@ -15802,7 +15805,7 @@
         files: (value.files || []).map(f => ({ target: f.target, name: f.name, text: f.text ?? null, sourceAvailable: f.sourceAvailable === true })),
         registrations: Object.fromEntries(['desktop', 'mobile'].map(target => [target, (value.customize?.[target]?.js || []).map(f => ({ type: f.type, name: f.file?.name ?? f.name ?? null, url: f.url ?? null }))])) })));
     }
-    function sessionState(state) {
+    function sessionState(state, includeRollback = false) {
       const saved = historyData(pick(state, savedStateKeys));
       saved.proposal = historyData(pick(state.proposal, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
       saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
@@ -15812,7 +15815,7 @@
       saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
       for (const key of ['businessContext','businessArchive','businessMode','businessResult','businessSelectedIds','businessReviewRequired','businessPlanContext','businessInvalid','businessAnswerDrafts','businessPlanRequests','businessPlanSelectedIds']) if (Object.hasOwn(state,key)) saved[key] = historyData(state[key]);
       saved.error = savedError(state.error);
-      saved.runs = state.runs.map(savedRun);
+      saved.runs = state.runs.map(run => savedRun(run, includeRollback));
       return saved;
     }
     function validSession(payload) {
@@ -15953,7 +15956,7 @@
       if (file.sourceAvailable === false || typeof file.text !== 'string' || !file.fileKey) fail('CONSULTATION_SOURCE_UNAVAILABLE', `相談する「${target.name}」の現在の本文を取得できません。`);
       return { name: file.name, target: file.target, type: 'FILE', environment: 'preview', fileKey: String(file.fileKey), revision: String(base.revision?.preview ?? '') };
     }
-    function create({ services, loadBase, execution, scope = null, now = () => Date.now(), onChange = null } = {}) {
+    function create({ services, loadBase, execution, scope = null, saveBeforeHistoryRollback = null, now = () => Date.now(), onChange = null } = {}) {
       if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
       const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
       Object.assign(state, { businessContext: null, businessArchive: [], businessMode: 'understand', businessResult: null, businessSelectedIds: [], businessReviewRequired: false, businessPlanContext: null, businessInvalid: null, businessAnswerDrafts: {}, businessPlanRequests: null, businessPlanSelectedIds: [] });
@@ -16336,6 +16339,10 @@
           try {
             run.result = await execution.apply({ prepared: checked, onProgress: progress => { run.progress = progress; emit(); } });
             run.status = run.result?.status || 'unknown';
+            if (execution.captureViewRollback) {
+              try { run.viewRollback = await execution.captureViewRollback(checked, run.result); }
+              catch (_) { run.viewRollback = null; }
+            }
           } catch (e) { run.status = 'unknown'; run.result = { status: 'unknown', written: null, message: '反映の結果を確認できません。再度反映せず、現在の状態を確認してください。', error: errorOf(e) }; }
           set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
         }, 'blocked');
@@ -16365,18 +16372,20 @@
       const recheckRollback = runId => recheckRun(runId, 'rollback');
       async function requestRollback(runId) {
         const run = state.runs.find(r => r.id === runId);
-        if (!run || run.archived || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
+        if (!run || (run.archived && !run.viewRollback) || run.status === 'unknown' || !run.result?.written ||
+            run.result?.retryable === false || run.rollback?.retryable === false || ['complete', 'unknown'].includes(run.rollback?.status) || !available()) return false;
         return activity('preparing', async (_, live) => {
           const prepared = await execution.prepareRollback(clone(run));
           if (!live()) return;
-          set({ phase: 'rollback-confirm', rollback: { runId, prepared }, progress: '' });
+          set({ phase: 'rollback-confirm', resultRunId: runId, rollback: { runId, prepared }, progress: '' });
         }, 'result');
       }
       async function rollback(runId) {
         if (state.phase !== 'rollback-confirm' || state.rollback?.runId !== runId || !state.rollback.prepared?.ok) return false;
         const run = state.runs.find(r => r.id === runId), prepared = clone(state.rollback.prepared);
-        if (!run || run.archived) return false;
+        if (!run || (run.archived && !run.viewRollback)) return false;
         return activity('rolling-back', async () => {
+          if (run.archived && saveBeforeHistoryRollback) await saveBeforeHistoryRollback();
           try { run.rollback = await execution.rollback({ run: clone(run), prepared, onProgress: p => { run.progress = p; emit(); } }); }
           catch (e) { run.rollback = { status: 'unknown', message: '戻した結果を確認できません。', error: errorOf(e) }; }
           set({ phase: 'result', resultRunId: run.id, rollback: null });
@@ -16480,16 +16489,16 @@
         return completed;
       }
 
-      function exportSession() {
+      function exportSession({ includeRollback = false } = {}) {
         const appId = appOf(base), environment = environmentOf(base);
         const persistent = { ...state, ...(documentPhase && state.phase === 'consulting' ? { phase: documentPhase } : {}) };
         if (['rollback-confirm', 'rolling-back'].includes(persistent.phase) && state.rollback?.runId) persistent.resultRunId = state.rollback.runId;
-        return { version: state.businessContext || state.businessArchive.length || state.explanations.some(e=>e.sourceScope) ? 'release-workspace-session-2' : SESSION_VERSION, state: sessionState(persistent), sequence,
+        return { version: state.businessContext || state.businessArchive.length || state.explanations.some(e=>e.sourceScope) ? 'release-workspace-session-2' : SESSION_VERSION, state: sessionState(persistent, includeRollback), sequence,
           pendingPlanQuestions: historyData(pendingPlanQuestions),
           baseline: base ? { stamp: stampOf(base), appId: appId == null ? null : String(appId), environment,
             verificationFingerprint: restoredBaseline?.verificationFingerprint ?? fingerprints.get(base) ?? null } : null };
       }
-      async function restoreSession(payload, { shouldContinue = () => true } = {}) {
+      async function restoreSession(payload, { shouldContinue = () => true, allowRollback = false } = {}) {
         if (!available() || typeof shouldContinue !== 'function') return false;
         let saved;
         try { saved = clone(payload); if (!validSession(saved)) return false; } catch (_) { return false; }
@@ -16503,7 +16512,7 @@
           if (!shouldContinue()) return false;
           if (baseline && ((baseline.appId !== null && String(appOf(fresh)) !== baseline.appId) ||
               (baseline.environment !== null && environmentOf(fresh) !== baseline.environment))) return false;
-          const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
+          const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state, allowRollback && environmentOf(fresh) === 'preview' && appOf(fresh) != null) };
           if (!Array.isArray(next.businessArchive) || !Array.isArray(next.businessSelectedIds) || !['understand','improve'].includes(next.businessMode)) return false;
           if (next.businessContext) { try { await consultation().verify(next.businessContext,scope);if(next.businessResult&&consultation().validateOutput(next.businessResult,consultation().wire(next.businessContext)).length)throw new Error('保存した相談の根拠参照を確認できません'); } catch(e) { next.businessInvalid=e.message; next.businessReviewRequired=true; next.businessMode='understand'; } }
           for (const artifact of next.artifacts) {
@@ -16515,12 +16524,15 @@
           }
           Object.assign(next, { prepared: null, rollback: null, progress: '' });
           for (const run of next.runs) {
+            if (run.viewRollback && run.viewRollback.appId !== String(appOf(fresh))) delete run.viewRollback;
             if (run.status === 'running') {
               run.status = 'unknown'; run.result = { ...run.result, status: 'unknown', written: null,
                 message: '反映中に画面が閉じられたため、結果を確認できません。同じ変更を再度反映せず、現在の設定を確認してください。' };
             }
-            if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id))
+            if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id)) {
+              delete run.viewRollback;
               run.rollback = { ...run.rollback, status: 'unknown', message: '復元中に画面が閉じられたため、結果を確認できません。現在の設定を確認してください。' };
+            }
           }
           const currentRun = next.runs.find(r => r.id === next.resultRunId) || next.runs.findLast(r => r.taskId === next.taskId);
           if (currentRun && ['result', 'applying', 'rolling-back', 'rollback-confirm', 'checking-result'].includes(next.phase)) {
@@ -16905,6 +16917,49 @@
     const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
     function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
       const toCurrent = b => b.current || currentOf(b);
+      const viewKey = value => JSON.stringify(value, (_, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : entry);
+      const viewHash = views => hash(viewKey(views));
+      async function captureViewRollback(prepared, result) {
+        if (result.status !== 'complete' || prepared.files || prepared.changes?.length !== 1) return null;
+        const [step] = result.settings?.steps || [];
+        if (result.settings?.steps.length !== 1 || step?.status !== 'VERIFIED' || step.actionType !== 'UPDATE_VIEW') return null;
+        const name = prepared.settings.steps[0]?.prepared?.payload?.name;
+        const before = result.settings.snapshot?.views, after = result.settings.actualAfterRaw?.views;
+        if (!name || !Object.hasOwn(before?.views || {}, name) || !Object.hasOwn(after?.views || {}, name) ||
+            !after.revision || String(after.revision) !== String(step.revision) || before.views[name].type !== 'LIST') return null;
+        const edits = prepared.settings.steps[0].prepared.before;
+        const restored = { ...after.views, [name]: { ...after.views[name], ...edits } };
+        // Retain only prior values of the changed attributes and a fingerprint that
+        // includes the other views and their IDs. Never persist the settings snapshot.
+        if (viewKey(restored) !== viewKey(before.views)) return null;
+        return { version: 1, executionId: result.settings.executionId, appId: String(appId), name, stepId: step.stepId,
+          revision: String(after.revision), before: clone(edits), beforeHash: await viewHash(before.views), afterHash: await viewHash(after.views) };
+      }
+      async function openViewRollback(run) {
+        const c = run.viewRollback;
+        const reject = (code, message) => ({ ok: false, changes: [], confirmations: [], reasons: [{ code, message }] });
+        const validValue = ([key, value]) => key === 'fields'
+          ? Array.isArray(value) && value.length > 0 && value.every(field => typeof field === 'string')
+          : ['sort', 'filterCond'].includes(key) && typeof value === 'string';
+        if (c?.version !== 1 || c.appId !== String(appId) || !/^\d+$/.test(c.revision) ||
+            ![c.name, c.stepId, c.executionId, c.beforeHash, c.afterHash].every(v => typeof v === 'string' && v.length) ||
+            !c.before || !Object.keys(c.before).length || !Object.entries(c.before).every(validValue)) {
+          return reject('INVALID_ROLLBACK_HISTORY', '保存した復元情報を確認できません。');
+        }
+        let after;
+        try { after = await api.getPreviewViews(appId); }
+        catch (_) { return reject('PREVIEW_VIEWS_UNAVAILABLE', '動作テスト環境の一覧設定を取得できません。設定を変更する権限と接続を確認してください。'); }
+        if (String(after?.revision) !== c.revision || !Object.hasOwn(after?.views || {}, c.name) || await viewHash(after.views) !== c.afterHash) {
+          return reject('THIRD_PARTY_CHANGE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。');
+        }
+        const views = { ...after.views, [c.name]: { ...after.views[c.name], ...c.before } };
+        if (await viewHash(views) !== c.beforeHash) return reject('INVALID_ROLLBACK_HISTORY', '保存した変更前の一覧設定を確認できません。');
+        const step = { stepId: c.stepId, actionType: 'UPDATE_VIEW' };
+        return { ok: true, run: { ...run, result: { ...run.result, settings: { executionId: c.executionId, appId: c.appId,
+          status: 'DONE', afterRevision: c.revision, steps: [{ ...step, status: 'VERIFIED' }], snapshot: { views: { views } }, actualAfterRaw: { views: after } } },
+          prepared: { ...run.prepared, settings: { executionId: c.executionId, steps: [{ ...step, prepared: { payload: { name: c.name } } }] } } } };
+      }
       async function fileOperations(artifacts, plan, current) {
         const dependencies = {
           fields: (plan.proposedFields || []).map(f => ({ code: f.suggestedCode, stepId: (plan.steps || []).find(s => s.actionType === 'ADD_FIELD' && [s.targetRef, s.spec?.fieldCode, s.spec?.temporaryId].includes(f.temporaryId))?.id })),
@@ -17218,6 +17273,11 @@
           ? [{ code: 'ROLLBACK_STALE', message: 'JavaScriptを戻した後にカスタマイズ設定が変更されたため、残りの復元を止めました。現在の設定を確認してください。' }] : [];
       }
       async function prepareRollback(run) {
+        if (run.archived) {
+          const opened = await openViewRollback(run);
+          if (!opened.ok) return opened;
+          run = opened.run;
+        }
         const r = run.result;
         if (!r || r.status === 'unknown' || r.written == null || run.rollback?.status === 'unknown' || settingUnknown(r.settings) || fileUnknown(r.files)) return { ok: false, files: null, settings: null, changes: [], confirmations: [], reasons: [{ code: 'RESULT_UNKNOWN', message: '反映または復元の結果を確認できないため、自動では元に戻せません。現在の設定を確認してください。' }] };
         const restoredFiles = run.rollback?.files?.status === 'ROLLED_BACK_VERIFIED' ? clone(run.rollback.files) : null;
@@ -17310,6 +17370,12 @@
         }
       }
       async function rollback({ run, prepared, onProgress = () => {} }) {
+        const savedRevision = run.archived ? run.viewRollback?.revision : null;
+        if (run.archived) {
+          const opened = await openViewRollback(run);
+          if (!opened.ok) return { status: 'failed', reasons: opened.reasons, message: opened.reasons[0].message };
+          run = opened.run;
+        }
         let files = clone(prepared.restoredFiles || null), settings = null, writeInFlight = false;
         const transport = rollbackTransport();
         const unknown = () => ({ status: 'unknown', files, settings, recoveryState: 'unknown', retryable: false, message: '復元の結果を確認できません。もう一度戻す前に、現在の設定を確認してください。' });
@@ -17340,7 +17406,12 @@
             if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
             if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
             writeInFlight = true;
-            settings = await planExecutor.executeRollback(checked, { api: transport.api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
+            const rollbackApi = savedRevision ? { ...transport.api, async putPreviewViews(id, views, revision) {
+              if (String(revision) !== savedRevision)
+                throw Object.assign(new Error('反映後に設定が変更されたため、復元を止めました。'), { code: 'GAIA_CO02' });
+              return transport.api.putPreviewViews(id, views, revision);
+            } } : transport.api;
+            settings = await planExecutor.executeRollback(checked, { api: rollbackApi, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
             writeInFlight = false;
             if (transport.state.uncertain) return unknown();
             if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
@@ -17352,7 +17423,7 @@
             error: { code: error?.code, message: error?.message } };
         }
       }
-      return { prepare, apply, prepareRollback, rollback, recheckRollback, recheckApply };
+      return { prepare, apply, captureViewRollback, prepareRollback, rollback, recheckRollback, recheckApply };
     }
     return { create };
   })();
@@ -17784,13 +17855,13 @@
       const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
         (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
         run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-      const canRestore = !run.archived && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+      const canRestore = (!run.archived || run.viewRollback) && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
       const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
       const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
       const checkMobile = platforms.has('mobile');
       const rows = Array.isArray(result.rows) ? result.rows : [...(Array.isArray(result.settings) ? result.settings : []), ...(Array.isArray(result.files) ? result.files : [])];
       return `<section class="ktr-section"><h2>${esc(title)}</h2>${result.message ? `<p class="ktr-lead">${esc(result.message)}</p>` : ''}
-        ${run.archived ? '<p class="ktr-note">保存した反映結果です。現在の状態や、元に戻せることを保証するものではありません。</p>' : ''}${list(result.reasons || [], 'ktr-reasons')}
+        ${run.archived ? '<p class="ktr-note">' + (canRestore ? '保存した反映結果です。元に戻す前に現在の動作テスト環境を確認します。' : '保存した反映結果です。現在の状態や、元に戻せることを保証するものではありません。') + '</p>' : ''}${list(result.reasons || [], 'ktr-reasons')}
         ${status === 'complete' && !run.rollback ? list(run.prepared?.changes || []) : ''}
         ${status !== 'complete' && rows.length ? `<h3>処理ごとの結果</h3>${list(rows.map(row => ({ message: [row.title || row.label || row.stepId || row.targetFile || row.name || '変更', row.message || ({ applied: '反映済み', verified: '確認済み', complete: '完了', failed: '未完了', skipped: '未実施', unknown: '結果を確認できません', PENDING: '未実施', APPLIED: '反映済み', FAILED: '未完了', VERIFIED: '確認済み' }[row.status] || '')].filter(Boolean).join('：') })))}` : ''}
         ${!run.rollback && status === 'complete' && checkDesktop ? '<p>PCの動作は、動作テスト環境を開いて確認してください。</p>' : ''}
@@ -17801,7 +17872,7 @@
     }
     function rollbackHtml(state, options) {
       const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
-      if (run?.archived) return runHtml(run, options);
+      if (run?.archived && !run.viewRollback) return runHtml(run, options);
       return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
     }
     // Error payloads are for control/recovery only. Never render provider details.
@@ -19031,7 +19102,10 @@
     };
     const execution = KTReleaseExecution.create({ appId: String(d.appId), api: d.executor?.api, loadBase, currentOf: KTDevBase.currentOf,
       planExecutor: KTPlanExecutor, jsExecutor: KTJsExecutor, hash: KTReleaseWorkspace.hash });
-    const controller = KTReleaseWorkspace.create({ services, loadBase, execution, scope: {domain:location.hostname,appId:String(d.appId)} });
+    const controller = KTReleaseWorkspace.create({ services, loadBase, execution, scope: {domain:location.hostname,appId:String(d.appId)},
+      saveBeforeHistoryRollback: async () => {
+        if (!history || !await history.flush()) throw new Error('復元の進行状況を保存できません。会話の保存を確認してください。');
+      } });
     const notifiedResults = new Set();
     controller.subscribe(state => {
       const run = state.runs.find(r => r.id === state.resultRunId);
@@ -19288,13 +19362,13 @@
         historyInitError = '';
         const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
         history = KTReleaseHistorySession.create({ store,
-          capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }),
+          capture: ({ includeRollback = true } = {}) => ({ version: 1, session: controller.exportSession({ includeRollback }), draft: view?.getDraft?.() || '', smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }),
           restore: async (payload, { shouldContinue: continueOpening = () => true } = {}) => {
             if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor) || (payload.smalltalk != null && !KTReleaseSmalltalk.valid(payload.smalltalk))) return false;
             if (codePanel?.canRestoreDrafts?.() === false) return false;
             const draftBefore = view.getDraft(), editorBefore = editorContent();
             const shouldContinue = () => continueOpening() && sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === editorContent() && codePanel?.canRestoreDrafts?.() !== false;
-            if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
+            if (!await controller.restoreSession(payload.session, { shouldContinue, allowRollback: true })) return false;
             businessPanel?.dispose();
             pendingEditor = payload.editor || { version: 1, files: [], active: null };
             if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;

@@ -189,7 +189,7 @@ const KTReleaseHistorySession = (() => {
     }
     function exportCurrent() {
       if (initializing || switching) throw failure('HISTORY_LOADING', '会話を読み込み中です。完了してからファイルに保存してください。');
-      return clone(capture());
+      return clone(capture({ includeRollback: false }));
     }
     function dispose() { const snapshot = clone(capture()); disposed = true; clearTimeout(timer); timer = null; return serial(() => saveCurrent({ snapshot })).catch(error => { report(error); }).finally(() => store.close()); }
     return { changed, flush, list, open, beforeNewTask, markComplete, setPinned, remove, dispose, initialize, ready: () => initialization || Promise.resolve(false), isInitializing: () => initializing,

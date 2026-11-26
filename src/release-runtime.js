@@ -208,7 +208,10 @@ function mountReleaseWorkspace(host, d) {
   };
   const execution = KTReleaseExecution.create({ appId: String(d.appId), api: d.executor?.api, loadBase, currentOf: KTDevBase.currentOf,
     planExecutor: KTPlanExecutor, jsExecutor: KTJsExecutor, hash: KTReleaseWorkspace.hash });
-  const controller = KTReleaseWorkspace.create({ services, loadBase, execution, scope: {domain:location.hostname,appId:String(d.appId)} });
+  const controller = KTReleaseWorkspace.create({ services, loadBase, execution, scope: {domain:location.hostname,appId:String(d.appId)},
+    saveBeforeHistoryRollback: async () => {
+      if (!history || !await history.flush()) throw new Error('復元の進行状況を保存できません。会話の保存を確認してください。');
+    } });
   const notifiedResults = new Set();
   controller.subscribe(state => {
     const run = state.runs.find(r => r.id === state.resultRunId);
@@ -465,13 +468,13 @@ function mountReleaseWorkspace(host, d) {
       historyInitError = '';
       const store = KTReleaseHistory.create({ indexedDB: globalThis.indexedDB, scope, ...(d.historyOptions || {}) });
       history = KTReleaseHistorySession.create({ store,
-        capture: () => ({ version: 1, session: controller.exportSession(), draft: view?.getDraft?.() || '', smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }),
+        capture: ({ includeRollback = true } = {}) => ({ version: 1, session: controller.exportSession({ includeRollback }), draft: view?.getDraft?.() || '', smalltalk: smalltalk.snapshot(), editor: editingSnapshot() }),
         restore: async (payload, { shouldContinue: continueOpening = () => true } = {}) => {
           if (!sameScope(scope, historyScope()) || !payload || payload.version !== 1 || typeof payload.draft !== 'string' || !validEditor(payload.editor) || (payload.smalltalk != null && !KTReleaseSmalltalk.valid(payload.smalltalk))) return false;
           if (codePanel?.canRestoreDrafts?.() === false) return false;
           const draftBefore = view.getDraft(), editorBefore = editorContent();
           const shouldContinue = () => continueOpening() && sameScope(scope, historyScope()) && draftBefore === view.getDraft() && editorBefore === editorContent() && codePanel?.canRestoreDrafts?.() !== false;
-          if (!await controller.restoreSession(payload.session, { shouldContinue })) return false;
+          if (!await controller.restoreSession(payload.session, { shouldContinue, allowRollback: true })) return false;
           businessPanel?.dispose();
           pendingEditor = payload.editor || { version: 1, files: [], active: null };
           if (codePanel?.restoreDrafts?.(pendingEditor)) pendingEditor = null;

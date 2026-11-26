@@ -85,7 +85,8 @@ const KTReleaseWorkspace = (() => {
   const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'decisionDrafts', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
   const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
   const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
-  // Saved content is a document, never a credential store or an execution snapshot.
+  // History is scoped to this browser and app. Save only the view rollback data
+  // explicitly selected by the execution service, never full execution snapshots.
   // Nested specs and evidence may use any field code, including token/password.
   // Keep their JSON exactly; transport data is excluded by domain allowlists.
   function historyData(value) {
@@ -139,10 +140,12 @@ const KTReleaseWorkspace = (() => {
     if (value.error) result.error = savedError(value.error);
     return result;
   };
-  const savedRun = run => ({
+  const savedRun = (run, includeRollback) => ({
     ...historyData(pick(run, ['id', 'at', 'taskId', 'goal', 'status'])), archived: true,
     prepared: run.prepared ? { changes: historyData(run.prepared.changes || []), confirmations: historyData(run.prepared.confirmations || []), reasons: historyData(run.prepared.reasons || []) } : null,
-    result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {})
+    result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {}),
+    ...(includeRollback && run.viewRollback && !['complete', 'unknown'].includes(run.rollback?.status)
+      ? { viewRollback: historyData(run.viewRollback) } : {})
   });
   const appOf = value => value?.appId ?? value?.data?.appId ?? value?.current?.appId ?? value?.inputs?.data?.appId ?? null;
   const environmentOf = value => value?.env ?? value?.current?.env ?? null;
@@ -156,7 +159,7 @@ const KTReleaseWorkspace = (() => {
       files: (value.files || []).map(f => ({ target: f.target, name: f.name, text: f.text ?? null, sourceAvailable: f.sourceAvailable === true })),
       registrations: Object.fromEntries(['desktop', 'mobile'].map(target => [target, (value.customize?.[target]?.js || []).map(f => ({ type: f.type, name: f.file?.name ?? f.name ?? null, url: f.url ?? null }))])) })));
   }
-  function sessionState(state) {
+  function sessionState(state, includeRollback = false) {
     const saved = historyData(pick(state, savedStateKeys));
     saved.proposal = historyData(pick(state.proposal, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
@@ -166,7 +169,7 @@ const KTReleaseWorkspace = (() => {
     saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
     for (const key of ['businessContext','businessArchive','businessMode','businessResult','businessSelectedIds','businessReviewRequired','businessPlanContext','businessInvalid','businessAnswerDrafts','businessPlanRequests','businessPlanSelectedIds']) if (Object.hasOwn(state,key)) saved[key] = historyData(state[key]);
     saved.error = savedError(state.error);
-    saved.runs = state.runs.map(savedRun);
+    saved.runs = state.runs.map(run => savedRun(run, includeRollback));
     return saved;
   }
   function validSession(payload) {
@@ -307,7 +310,7 @@ const KTReleaseWorkspace = (() => {
     if (file.sourceAvailable === false || typeof file.text !== 'string' || !file.fileKey) fail('CONSULTATION_SOURCE_UNAVAILABLE', `相談する「${target.name}」の現在の本文を取得できません。`);
     return { name: file.name, target: file.target, type: 'FILE', environment: 'preview', fileKey: String(file.fileKey), revision: String(base.revision?.preview ?? '') };
   }
-  function create({ services, loadBase, execution, scope = null, now = () => Date.now(), onChange = null } = {}) {
+  function create({ services, loadBase, execution, scope = null, saveBeforeHistoryRollback = null, now = () => Date.now(), onChange = null } = {}) {
     if (!services || !loadBase || !execution) throw new Error('作業に必要な部品がありません。');
     const state = { responseRecovery: null, phase: 'idle', taskId: 1, version: 0, goal: '', requestPurpose: 'consultation', consultationTarget: null, proposalTarget: null, adoptedTarget: null, proposal: null, proposalPending: false, selectedSuggestionIds: [], decisionDrafts: {}, questionIdFloor: 0, answers: [], adopted: null, plan: null, artifacts: [], prepared: null, runs: [], resultRunId: null, messages: [], explanations: [], explanationId: null, error: null, progress: '', rollback: null };
     Object.assign(state, { businessContext: null, businessArchive: [], businessMode: 'understand', businessResult: null, businessSelectedIds: [], businessReviewRequired: false, businessPlanContext: null, businessInvalid: null, businessAnswerDrafts: {}, businessPlanRequests: null, businessPlanSelectedIds: [] });
@@ -690,6 +693,10 @@ const KTReleaseWorkspace = (() => {
         try {
           run.result = await execution.apply({ prepared: checked, onProgress: progress => { run.progress = progress; emit(); } });
           run.status = run.result?.status || 'unknown';
+          if (execution.captureViewRollback) {
+            try { run.viewRollback = await execution.captureViewRollback(checked, run.result); }
+            catch (_) { run.viewRollback = null; }
+          }
         } catch (e) { run.status = 'unknown'; run.result = { status: 'unknown', written: null, message: '反映の結果を確認できません。再度反映せず、現在の状態を確認してください。', error: errorOf(e) }; }
         set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
       }, 'blocked');
@@ -719,18 +726,20 @@ const KTReleaseWorkspace = (() => {
     const recheckRollback = runId => recheckRun(runId, 'rollback');
     async function requestRollback(runId) {
       const run = state.runs.find(r => r.id === runId);
-      if (!run || run.archived || run.status === 'unknown' || !run.result?.written || run.result?.retryable === false || run.rollback?.status === 'complete' || !available()) return false;
+      if (!run || (run.archived && !run.viewRollback) || run.status === 'unknown' || !run.result?.written ||
+          run.result?.retryable === false || run.rollback?.retryable === false || ['complete', 'unknown'].includes(run.rollback?.status) || !available()) return false;
       return activity('preparing', async (_, live) => {
         const prepared = await execution.prepareRollback(clone(run));
         if (!live()) return;
-        set({ phase: 'rollback-confirm', rollback: { runId, prepared }, progress: '' });
+        set({ phase: 'rollback-confirm', resultRunId: runId, rollback: { runId, prepared }, progress: '' });
       }, 'result');
     }
     async function rollback(runId) {
       if (state.phase !== 'rollback-confirm' || state.rollback?.runId !== runId || !state.rollback.prepared?.ok) return false;
       const run = state.runs.find(r => r.id === runId), prepared = clone(state.rollback.prepared);
-      if (!run || run.archived) return false;
+      if (!run || (run.archived && !run.viewRollback)) return false;
       return activity('rolling-back', async () => {
+        if (run.archived && saveBeforeHistoryRollback) await saveBeforeHistoryRollback();
         try { run.rollback = await execution.rollback({ run: clone(run), prepared, onProgress: p => { run.progress = p; emit(); } }); }
         catch (e) { run.rollback = { status: 'unknown', message: '戻した結果を確認できません。', error: errorOf(e) }; }
         set({ phase: 'result', resultRunId: run.id, rollback: null });
@@ -834,16 +843,16 @@ const KTReleaseWorkspace = (() => {
       return completed;
     }
 
-    function exportSession() {
+    function exportSession({ includeRollback = false } = {}) {
       const appId = appOf(base), environment = environmentOf(base);
       const persistent = { ...state, ...(documentPhase && state.phase === 'consulting' ? { phase: documentPhase } : {}) };
       if (['rollback-confirm', 'rolling-back'].includes(persistent.phase) && state.rollback?.runId) persistent.resultRunId = state.rollback.runId;
-      return { version: state.businessContext || state.businessArchive.length || state.explanations.some(e=>e.sourceScope) ? 'release-workspace-session-2' : SESSION_VERSION, state: sessionState(persistent), sequence,
+      return { version: state.businessContext || state.businessArchive.length || state.explanations.some(e=>e.sourceScope) ? 'release-workspace-session-2' : SESSION_VERSION, state: sessionState(persistent, includeRollback), sequence,
         pendingPlanQuestions: historyData(pendingPlanQuestions),
         baseline: base ? { stamp: stampOf(base), appId: appId == null ? null : String(appId), environment,
           verificationFingerprint: restoredBaseline?.verificationFingerprint ?? fingerprints.get(base) ?? null } : null };
     }
-    async function restoreSession(payload, { shouldContinue = () => true } = {}) {
+    async function restoreSession(payload, { shouldContinue = () => true, allowRollback = false } = {}) {
       if (!available() || typeof shouldContinue !== 'function') return false;
       let saved;
       try { saved = clone(payload); if (!validSession(saved)) return false; } catch (_) { return false; }
@@ -857,7 +866,7 @@ const KTReleaseWorkspace = (() => {
         if (!shouldContinue()) return false;
         if (baseline && ((baseline.appId !== null && String(appOf(fresh)) !== baseline.appId) ||
             (baseline.environment !== null && environmentOf(fresh) !== baseline.environment))) return false;
-        const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state) };
+        const next = { responseRecovery:null, decisionDrafts:{}, businessContext:null, businessArchive:[], businessMode:'understand', businessResult:null, businessSelectedIds:[], businessReviewRequired:false, businessPlanContext:null, businessInvalid:null, businessAnswerDrafts:{}, businessPlanRequests:null, businessPlanSelectedIds:[], ...sessionState(saved.state, allowRollback && environmentOf(fresh) === 'preview' && appOf(fresh) != null) };
         if (!Array.isArray(next.businessArchive) || !Array.isArray(next.businessSelectedIds) || !['understand','improve'].includes(next.businessMode)) return false;
         if (next.businessContext) { try { await consultation().verify(next.businessContext,scope);if(next.businessResult&&consultation().validateOutput(next.businessResult,consultation().wire(next.businessContext)).length)throw new Error('保存した相談の根拠参照を確認できません'); } catch(e) { next.businessInvalid=e.message; next.businessReviewRequired=true; next.businessMode='understand'; } }
         for (const artifact of next.artifacts) {
@@ -869,12 +878,15 @@ const KTReleaseWorkspace = (() => {
         }
         Object.assign(next, { prepared: null, rollback: null, progress: '' });
         for (const run of next.runs) {
+          if (run.viewRollback && run.viewRollback.appId !== String(appOf(fresh))) delete run.viewRollback;
           if (run.status === 'running') {
             run.status = 'unknown'; run.result = { ...run.result, status: 'unknown', written: null,
               message: '反映中に画面が閉じられたため、結果を確認できません。同じ変更を再度反映せず、現在の設定を確認してください。' };
           }
-          if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id))
+          if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id)) {
+            delete run.viewRollback;
             run.rollback = { ...run.rollback, status: 'unknown', message: '復元中に画面が閉じられたため、結果を確認できません。現在の設定を確認してください。' };
+          }
         }
         const currentRun = next.runs.find(r => r.id === next.resultRunId) || next.runs.findLast(r => r.taskId === next.taskId);
         if (currentRun && ['result', 'applying', 'rolling-back', 'rollback-confirm', 'checking-result'].includes(next.phase)) {
