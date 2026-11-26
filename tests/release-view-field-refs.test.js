@@ -20,6 +20,44 @@ function fixture() {
 }
 const prep = async (m, operations, proposedFields = [proposed()]) => P.prepareOperations({ appId: '310', requireFieldPlacement: true, operations, proposedFields }, { api: m.api, current: await m.current() });
 const payloadSort = p => { const v = p.steps.find(s => s.stepId === 'V1').prepared.payload; return v.view?.sort ?? v.changes?.sort; };
+for (const action of ['ADD_VIEW', 'UPDATE_VIEW']) {
+  for (const [label, requested, returned, ok] of [
+    ['empty sort retained', '', '', true],
+    ['omitted sort', undefined, action === 'UPDATE_VIEW' ? 'case_name desc' : 'レコード番号 desc', true],
+    ['implicit default', '', 'レコード番号 desc', true],
+    ['system ID default', '', '$id desc', true],
+    ['renamed record number', '', '受付番号 desc', true],
+    ['unexpected implicit sort', '', 'amount desc', false],
+    ['wrong default direction', '', 'レコード番号 asc', false],
+    ['explicit sort normalized', 'amount ASC, レコード番号 DESC', 'amount asc, レコード番号 desc', true],
+    ['wrong explicit direction', 'amount asc', 'amount desc', false],
+    ['wrong explicit priority', 'amount asc, レコード番号 desc', 'レコード番号 desc, amount asc', false],
+    ['missing explicit sort', 'amount asc', '', false],
+  ]) test(action + ' readback: ' + label, async () => {
+    const m = fixture();
+    if (label === 'renamed record number') {
+      delete m.st.fields['レコード番号'];
+      m.st.fields['受付番号'] = { type: 'RECORD_NUMBER', code: '受付番号', label: '番号' };
+    }
+    const step = view(action, requested, []);
+    if (requested === undefined) delete step.spec.sort;
+    step.spec.fields = ['確認メモ'];
+    if (action === 'UPDATE_VIEW') m.st.views[step.targetRef] = {
+      name: step.targetRef, type: 'LIST', fields: ['amount'], filterCond: '', sort: 'case_name desc', index: '4', id: '77',
+    };
+    const p = await prep(m, [step], []);
+    assert.equal(p.status, 'PREPARED', JSON.stringify(p.blockers));
+    const put = m.api.putPreviewViews;
+    m.api.putPreviewViews = async (...args) => {
+      const result = await put(...args);
+      m.st.views[step.targetRef].sort = returned;
+      return result;
+    };
+    const result = await P.executePreview(p, { api: m.api });
+    assert.equal(result.status === 'DONE', ok, JSON.stringify(result.steps));
+    if (!ok) assert.match(result.steps[0].message, /sort/);
+  });
+}
 for (const type of ['ADD_VIEW', 'UPDATE_VIEW']) test(type + ': real release preparation, mock write/readback and rollback use the actual field code', async () => {
   const m = fixture();
   if (type === 'UPDATE_VIEW') m.st.views['確認期限一覧'] = { name: '確認期限一覧', type: 'LIST', fields: ['確認メモ'], filterCond: '', sort: 'amount desc', index: '4', id: '77' };

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.15
+// @version      2.3.16
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.15';
+  const SCRIPT_VERSION = '2.3.16';
   // Published build identifier.
-  const KT_BUILD = '2.3.15';
+  const KT_BUILD = '2.3.16';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -8019,7 +8019,7 @@
           check('type', v.type === 'LIST', 'LIST', v.type);
           check('fields', same(v.fields || [], p.expect.fields), p.expect.fields, v.fields || []);
           check('filterCond', String(v.filterCond || '') === p.expect.filterCond, p.expect.filterCond, String(v.filterCond || ''));
-          check('sort', String(v.sort || '') === p.expect.sort, p.expect.sort, String(v.sort || ''));
+          check('sort', viewSortMatches(p.expect.sort, v.sort, snapshot.fields?.properties), p.expect.sort, v.sort || '');
         }
         //   ほかの一覧は、この手順の書き込みの直前に取得した一覧と同じ（id を除く。全体置換なので）。2026-10-21: 反映した後の照合を廃止したので、同じ実行の後の手順の
         //   全体置換が前の手順の一覧を変えたことも、ここで見つける（直前の一覧が無いときは、実行の前の snapshot の一覧が残っているか）
@@ -8595,6 +8595,19 @@
 
     /** 一覧の並び順: 準備済みフィールドの参照を解決し、追加・変更で同じ形式と存在を確かめる。 */
     const SORT_RE = /^[^\s,]+\s+(asc|desc)$/i;
+    function viewSortMatches(expected, actual, fields) {
+      // Preserve field codes and key priority. Only direction casing and whitespace are cosmetic.
+      const normalize = sort => String(sort ?? '').trim().split(',').map(part =>
+        part.trim().replace(/\s+(asc|desc)$/i, (_, direction) => ' ' + direction.toLowerCase())
+      ).join(',');
+      const requested = normalize(expected), observed = normalize(actual);
+      if (requested === observed) return true;
+      if (requested) return false;
+      // kintone may expand an omitted sort to descending record number on readback.
+      if (observed === '$id desc') return true;
+      return Object.values(fields || {}).some(field =>
+        field.type === 'RECORD_NUMBER' && observed === field.code + ' desc');
+    }
     function prepareViewSort(value, fieldsNow, temporaryIdMap) {
       const parts = String(value || '').split(',');
       for (let i = 0; i < parts.length; i++) {
@@ -8963,7 +8976,7 @@
         const { id: _id, ...expectedEntry } = { ...clone(entry), ...p.payload.changes };
         return { revision: String(res?.revision ?? ''), requests: [{ method: 'PUT', path: '/k/v1/preview/app/views.json', name, total: Object.keys(views).length, changedKeys: Object.keys(p.payload.changes) }], before: p.before, after: p.after, existingViews: clone(existing), targetName: name, expectedEntry };
       },
-      async verify({ api, appId }, p, applied) {
+      async verify({ api, appId, snapshot }, p, applied) {
         const cur = await api.getPreviewViews(appId);
         const now = cur?.views && typeof cur.views === 'object' ? cur.views : {};
         const beforeV = applied.existingViews || {};
@@ -8984,8 +8997,10 @@
           const ch = p.payload.changes;
           if (ch.fields) check('changed:fields', same(found.fields || [], ch.fields), ch.fields, found.fields || []);
           if (ch.filterCond != null) check('changed:filterCond', normCondE(found.filterCond) === normCondE(ch.filterCond), ch.filterCond, found.filterCond || '');
-          if (ch.sort != null) check('changed:sort', normCondE(found.sort) === normCondE(ch.sort), ch.sort, found.sort || '');
-          check('unchangedAttributesPreserved', same(stripId(found), applied.expectedEntry), applied.expectedEntry, stripId(found));
+          const { sort: expectedSort, ...expectedAttrs } = applied.expectedEntry;
+          const { sort: actualSort, ...actualAttrs } = stripId(found);
+          check(ch.sort != null ? 'changed:sort' : 'sort', viewSortMatches(expectedSort, actualSort, snapshot.fields?.properties), expectedSort, actualSort);
+          check('unchangedAttributesPreserved', same(actualAttrs, expectedAttrs), expectedAttrs, actualAttrs);
           check('idPreserved', beforeV[name]?.id == null || String(found.id) === String(beforeV[name].id), beforeV[name]?.id ?? null, found.id ?? null);
         }
         return { ok: checks.every(c => c.ok), checks, revision: String(cur?.revision ?? '') };
