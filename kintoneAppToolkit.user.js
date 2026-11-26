@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         kintone App Toolkit
 // @namespace    https://github.com/youtotto/kintone-app-toolkit
-// @version      2.3.17
+// @version      2.3.18
 // @description  kintoneアプリの構造・依存関係・変更影響をブラウザ上で分析。フィールドの利用箇所、JS解析、アプリ間連携、設定の整合性チェックまで対応した開発支援ツールキット。
 // @match        https://*.cybozu.com/k/*/
 // @match        https://*.cybozu.com/k/*/?*view=*
@@ -23,9 +23,9 @@
   // ==========================================
   // 1. 定数・グローバル状態
   // ==========================================
-  const SCRIPT_VERSION = '2.3.17';
+  const SCRIPT_VERSION = '2.3.18';
   // Published build identifier.
-  const KT_BUILD = '2.3.17';
+  const KT_BUILD = '2.3.18';
   const CONTAINER_TYPES = new Set(['GROUP', 'SUBTABLE', 'LABEL', 'CATEGORY']);
   const SYSTEM_TYPES = new Set(['RECORD_NUMBER', 'CREATOR', 'CREATED_TIME', 'MODIFIER', 'UPDATED_TIME', 'STATUS', 'STATUS_ASSIGNEE']);
 
@@ -9746,6 +9746,7 @@
         progress(l); await yieldUi();
       }
       log.afterRevision = revision;
+      log.lastAppliedRevision = revision;
       if (Array.isArray(prepared.crossApp) && prepared.crossApp.length) log.crossApp = clone(prepared.crossApp);
       const verified = log.steps.filter(s => s.status === STEP.VERIFIED).length;
       const bad = log.steps.filter(s => s.status === STEP.FAILED || s.status === STEP.VERIFY_FAILED).length;
@@ -10099,6 +10100,172 @@
     const GENERAL_RESTORE = restoreStrategy('generalNotify', { get: (api, a) => api.getPreviewGeneralNotifications(a), put: putGeneral, equal: eqGeneral, kinds: ['notifications'], label: 'アプリの条件通知' });
     const PER_RECORD_RESTORE = restoreStrategy('perRecordNotify', { get: (api, a) => api.getPreviewPerRecordNotifications(a), put: putPerRecord, equal: eqPerRecord, kinds: ['notifications'], label: 'レコードの条件通知' });
 
+    const historySettingsGetters = {
+      views: 'getPreviewViews', generalNotify: 'getPreviewGeneralNotifications',
+      perRecordNotify: 'getPreviewPerRecordNotifications', reminderNotify: 'getPreviewReminders',
+    };
+    const historySettingsActions = {
+      ADD_VIEW: ['views'], UPDATE_VIEW: ['views'],
+      ADD_NOTIFICATION: ['generalNotify', 'perRecordNotify'], UPDATE_NOTIFICATION: ['generalNotify', 'perRecordNotify'],
+      ADD_REMINDER: ['reminderNotify'], UPDATE_REMINDER: ['reminderNotify'],
+    };
+    const viewHistoryAttributes = ['fields', 'filterCond', 'sort'];
+    const historyObject = value => value != null && typeof value === 'object' && !Array.isArray(value);
+    const historyString = value => typeof value === 'string' && value.length > 0;
+    const historyRevision = value => typeof value === 'string' && /^\d+$/.test(value);
+    const historySettingsKey = value => JSON.stringify(value, (_, entry) => historyObject(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : entry);
+    const sameHistorySettings = (a, b) => historySettingsKey(a) === historySettingsKey(b);
+    const historyViewValues = value => historyObject(value) && Object.keys(value).length > 0 && Object.entries(value).every(([key, v]) =>
+      key === 'fields' ? Array.isArray(v) && v.length > 0 && v.every(historyString) : ['filterCond', 'sort'].includes(key) && typeof v === 'string');
+    const historySettingsStep = step => historyObject(step) && historyString(step.stepId) && historyString(step.target) &&
+      Object.hasOwn(historySettingsActions, step.actionType) && historySettingsActions[step.actionType].includes(step.collection);
+
+    function recoverHistoryCollection(collection, baseline, inverse) {
+      if (!historyObject(baseline) || !historyObject(inverse)) return null;
+      const next = clone(baseline);
+      if (collection === 'views') {
+        if (!historyObject(next.views) || !historyObject(inverse.entries) || !Object.keys(inverse.entries).length) return null;
+        for (const [name, before] of Object.entries(inverse.entries)) {
+          if (!Object.hasOwn(next.views, name) || next.views[name]?.type !== 'LIST') return null;
+          if (before === null) delete next.views[name]; // Added view: remove only the newly added name.
+          else if (historyViewValues(before)) Object.assign(next.views[name], before);
+          else return null;
+        }
+      } else {
+        const { previousCount, entries, unsetTimezone } = inverse;
+        if (!Array.isArray(next.notifications) || !Number.isSafeInteger(previousCount) || previousCount < 0 ||
+            previousCount > next.notifications.length || !historyObject(entries) ||
+            Object.entries(entries).some(([index, entry]) => !/^\d+$/.test(index) || String(Number(index)) !== index || Number(index) >= previousCount || !historyObject(entry))) return null;
+        next.notifications = next.notifications.slice(0, previousCount);
+        for (const [index, entry] of Object.entries(entries)) next.notifications[index] = clone(entry);
+        if (unsetTimezone !== undefined) {
+          if (collection !== 'reminderNotify' || previousCount !== 0) return null;
+          if (unsetTimezone === 'missing') delete next.timezone;
+          else if (unsetTimezone === 'null') next.timezone = null;
+          else return null;
+        }
+      }
+      return next;
+    }
+
+    async function captureHistoryRollback(execution, prepared, { hash } = {}) {
+      const revision = execution?.afterRevision;
+      if (execution?.status !== RUN.DONE || execution.executionId !== prepared?.executionId ||
+          !historyRevision(revision) || execution.lastAppliedRevision !== revision || typeof hash !== 'function') return null;
+      const steps = [], changes = new Map();
+      for (const step of execution.steps || []) {
+        if (['CUSTOMIZATION_REQUIRED', 'CUSTOMIZE_JS'].includes(step.actionType)) continue;
+        const kinds = Object.hasOwn(historySettingsActions, step.actionType) && historySettingsActions[step.actionType];
+        const planStep = prepared.steps.find(p => p.stepId === step.stepId), p = planStep?.prepared;
+        if (!kinds || step.status !== STEP.VERIFIED || !p || !historyRevision(step.revision) || step.verification?.revision !== step.revision) return null;
+        const collection = kinds.length === 1 ? kinds[0] : p.payload?.scope === 'general' ? 'generalNotify' : 'perRecordNotify';
+        const target = collection === 'views'
+          ? p.payload?.name || p.expect?.name
+          : p.targetLabel || p.expect?.title || p.expect?.timing?.code || (collection === 'generalNotify' ? 'アプリの条件通知' : 'レコードの条件通知');
+        const saved = { stepId: step.stepId, actionType: step.actionType, collection, target };
+        if (!historySettingsStep(saved)) return null;
+        steps.push(saved);
+        if (!changes.has(collection)) changes.set(collection, []);
+        changes.get(collection).push({ step: saved, detail: p.payload });
+      }
+      if (!steps.length || new Set(steps.map(s => s.stepId)).size !== steps.length) return null;
+
+      const entries = [];
+      for (const [collection, historySteps] of changes) {
+        const before = execution.snapshot?.[collection], after = execution.actualAfterRaw?.[collection];
+        if (!historyObject(before) || !historyObject(after) || after.revision !== revision) return null;
+        let inverse;
+        if (collection === 'views') {
+          if (!historyObject(before.views) || !historyObject(after.views)) return null;
+          const byName = new Map();
+          for (const { step, detail } of historySteps) {
+            if (byName.has(step.target)) return null;
+            const existed = Object.hasOwn(before.views, step.target);
+            if (step.actionType === 'ADD_VIEW') {
+              if (existed) return null;
+              byName.set(step.target, null);
+            } else {
+              const old = before.views[step.target], keys = Object.keys(detail?.changes || {});
+              if (!existed || old?.type !== 'LIST' || !keys.length || keys.some(key => !viewHistoryAttributes.includes(key) || !Object.hasOwn(old, key))) return null;
+              byName.set(step.target, Object.fromEntries(keys.map(key => [key, old[key]])));
+            }
+          }
+          inverse = { entries: Object.fromEntries(byName) };
+        } else {
+          if (!Array.isArray(before.notifications) || !Array.isArray(after.notifications)) return null;
+          const rows = new Map();
+          let added = 0;
+          for (const { step, detail } of historySteps) {
+            if (step.actionType.startsWith('ADD_')) {
+              if (!Array.isArray(detail?.entries) || !detail.entries.length) return null;
+              added += detail.entries.length;
+            } else {
+              const index = detail?.index;
+              if (!Number.isSafeInteger(index) || index < 0 || index >= before.notifications.length || rows.has(index)) return null;
+              rows.set(index, before.notifications[index]);
+            }
+          }
+          if (after.notifications.length !== before.notifications.length + added) return null;
+          inverse = { previousCount: before.notifications.length, entries: Object.fromEntries(rows) };
+          if (collection === 'reminderNotify' && !before.notifications.length && before.timezone == null && after.timezone != null) {
+            inverse.unsetTimezone = Object.hasOwn(before, 'timezone') ? 'null' : 'missing';
+          }
+        }
+        const reconstructed = recoverHistoryCollection(collection, after, inverse);
+        if (!reconstructed || !sameHistorySettings(stripRevision(before), stripRevision(reconstructed))) return null;
+        entries.push([collection, {
+          inverse, beforeHash: await hash(historySettingsKey(stripRevision(before))),
+          afterHash: await hash(historySettingsKey(stripRevision(after))),
+        }]);
+      }
+      return { version: 2, executionId: execution.executionId, appId: String(execution.appId), revision, steps, collections: Object.fromEntries(entries) };
+    }
+
+    async function openHistoryRollback(capsule, { api, appId, hash, revision = capsule?.revision } = {}) {
+      const reject = (code, message) => ({ ok: false, reasons: [{ code, message }] });
+      const invalid = () => reject('INVALID_ROLLBACK_HISTORY', '保存した復元情報を確認できません。');
+      const stale = () => reject('THIRD_PARTY_CHANGE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。');
+      if (capsule?.version !== 2 || capsule.appId !== String(appId) || !historyString(capsule.executionId) ||
+          !historyRevision(capsule.revision) || !historyRevision(revision) || typeof hash !== 'function' ||
+          !Array.isArray(capsule.steps) || !capsule.steps.length || !capsule.steps.every(historySettingsStep) ||
+          new Set(capsule.steps.map(s => s.stepId)).size !== capsule.steps.length || !historyObject(capsule.collections)) return invalid();
+      const collections = [...new Set(capsule.steps.map(s => s.collection))];
+      if (Object.keys(capsule.collections).length !== collections.length || collections.some(name => !Object.hasOwn(capsule.collections, name))) return invalid();
+      const snapshot = {}, actualAfterRaw = {};
+      for (const collection of collections) {
+        const evidence = capsule.collections[collection];
+        const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+        if (!historyObject(evidence) || !digest(evidence.beforeHash) || !digest(evidence.afterHash)) return invalid();
+        if (collection === 'views') {
+          const viewSteps = capsule.steps.filter(step => step.collection === collection);
+          const entries = evidence.inverse?.entries;
+          if (!historyObject(entries) || Object.keys(entries).length !== viewSteps.length ||
+              new Set(viewSteps.map(step => step.target)).size !== viewSteps.length ||
+              viewSteps.some(step => !Object.hasOwn(entries, step.target) ||
+                (step.actionType === 'ADD_VIEW' ? entries[step.target] !== null : !historyViewValues(entries[step.target])))) return invalid();
+        }
+        let current;
+        try { current = await api[historySettingsGetters[collection]](appId); }
+        catch (_) { return reject('PREVIEW_SETTINGS_UNAVAILABLE', '動作テスト環境の設定を取得できません。設定を変更する権限と接続を確認してください。'); }
+        if (current?.revision !== revision || await hash(historySettingsKey(stripRevision(current))) !== evidence.afterHash) return stale();
+        const before = recoverHistoryCollection(collection, current, evidence.inverse);
+        if (!before || await hash(historySettingsKey(stripRevision(before))) !== evidence.beforeHash) return invalid();
+        snapshot[collection] = before;
+        actualAfterRaw[collection] = current;
+      }
+      const { executionId } = capsule;
+      const steps = capsule.steps.map(({ stepId, actionType }) => ({ stepId, actionType, status: STEP.VERIFIED }));
+      const prepared = { executionId, steps: capsule.steps.map(({ stepId, actionType, collection, target }) => ({
+        stepId, actionType, prepared: {
+          targetLabel: target,
+          payload: collection === 'views' ? { name: target } : { scope: collection === 'generalNotify' ? 'general' : 'perRecord' },
+          expect: { name: target, title: target, timing: {} },
+        },
+      })) };
+      return { ok: true, execution: { executionId, appId: capsule.appId, env: ENV, status: RUN.DONE, afterRevision: revision, steps, snapshot, actualAfterRaw, historySettings: true }, prepared };
+    }
+
     /**
      * 元に戻す準備（書き込みなし）: 対象 step（逆順）を決め、現在の preview を取得して「反映直後」と集合ごとに比べる。
      * 違えば ROLLBACK_STALE で止める（第三者の変更を消さない）。既に戻っている集合は実行時に「追加の変更なし」として通す
@@ -10196,13 +10363,19 @@
       try {
         const cur = await fetchPreviewAll(api, rb.appId);
         rb.afterRollbackRevision = String(cur.fields?.revision ?? '');
-        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders', ...(snapshot.actions ? ['appActions'] : [])], '反映前の設定の控え');
+        const diffs = collectionDiffs(snapshot, cur, ['fields', 'views', 'notifications', 'reminders', ...(snapshot.actions ? ['appActions'] : [])], '反映前の設定の控え')
+          .filter(diff => !execution.historySettings || (Object.hasOwn(snapshot, diff.kind) && !(diff.kind === 'reminderNotify' && eqReminders(snapshot[diff.kind], cur[diff.kind]))));
         rb.verification = { restoredToSnapshot: diffs.length === 0, diffs, snapshotRevision: rb.snapshotRevision, currentRevision: rb.afterRollbackRevision };
       } catch (e) { rb.verification = { restoredToSnapshot: null, diffs: [], error: strErr(e).message }; }
       const okCount = rb.steps.filter(x => x.status === RB.VERIFIED).length, badCount = rb.steps.filter(x => [RB.FAILED, RB.STALE, RB.VERIFY_FAILED].includes(x.status)).length;
-      rb.status = rb.steps.some(x => x.status === RB.FAILED || x.status === RB.STALE) ? RB_RUN.FAILED : rb.steps.some(x => x.status === RB.VERIFY_FAILED) ? RB_RUN.VERIFY_FAILED : RB_RUN.VERIFIED;
+      const verificationFailed = rb.steps.some(x => x.status === RB.VERIFY_FAILED) ||
+        (execution.historySettings && rb.verification.restoredToSnapshot !== true);
+      rb.status = rb.steps.some(x => x.status === RB.FAILED || x.status === RB.STALE) ? RB_RUN.FAILED
+        : verificationFailed ? RB_RUN.VERIFY_FAILED : RB_RUN.VERIFIED;
       rb.partial = okCount > 0 && badCount > 0;
-      rb.message = rb.status === RB_RUN.VERIFIED ? '動作テスト環境を実行前の状態に戻しました。' : rb.partial ? '一部の変更だけ元に戻りました。' : '元に戻せませんでした。';
+      rb.message = rb.status === RB_RUN.VERIFIED ? '動作テスト環境を実行前の状態に戻しました。'
+        : execution.historySettings && rb.status === RB_RUN.VERIFY_FAILED ? '復元後の設定が反映前の状態と一致することを確認できませんでした。'
+        : rb.partial ? '一部の変更だけ元に戻りました。' : '元に戻せませんでした。';
       rb.finishedAt = nowIso(now);
       for (const s of execution.steps || []) { const r = rb.steps.find(x => x.stepId === s.stepId || (Array.isArray(x.stepIds) && x.stepIds.includes(s.stepId) && x.sourceActionType === 'PROCESS_CHANGE')); if (r) s.rollbackStatus = r.status; }
       execution.lifecycle = rb.status;
@@ -10276,7 +10449,7 @@
 
     return {
       EXECUTOR_VERSION, ENV, STEP, RUN, RB, RB_RUN, PREVIEW_FIELD_TYPES, HANDLERS, ROLLBACK_STRATEGIES,
-      prepareOperations, operationFingerprint, executePreview, recheckPreview, buildRollbackPlan, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, layoutHasCode, createKintoneApi,
+      prepareOperations, operationFingerprint, executePreview, recheckPreview, buildRollbackPlan, captureHistoryRollback, openHistoryRollback, prepareRollback, executeRollback, rollbackSection, fieldReferences, buildAudit, layoutHasCode, createKintoneApi,
       recipientEntity, notificationDuplicate, reminderDuplicate, preservationChecks, UPDATABLE_FIELD_KEYS,
       preservationExceptIndex, notificationIdentityMismatch, reminderIdentityMismatch, viewIdentityMismatch,
       PROCESS_GROUP, PROCESS_ACTIONS, processEntity, processIdentityMismatch, formProcessGroups,
@@ -15731,7 +15904,7 @@
     const savedStateKeys = ['responseRecovery', 'phase', 'taskId', 'version', 'goal', 'requestPurpose', 'consultationTarget', 'proposalTarget', 'adoptedTarget', 'proposal', 'proposalPending', 'selectedSuggestionIds', 'decisionDrafts', 'questionIdFloor', 'answers', 'adopted', 'plan', 'artifacts', 'resultRunId', 'messages', 'explanations', 'explanationId', 'error'];
     const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
     const pick = (value, keys) => value == null ? null : Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
-    // History is scoped to this browser and app. Save only the view rollback data
+    // History is scoped to this browser and app. Save only the rollback data
     // explicitly selected by the execution service, never full execution snapshots.
     // Nested specs and evidence may use any field code, including token/password.
     // Keep their JSON exactly; transport data is excluded by domain allowlists.
@@ -15790,8 +15963,9 @@
       ...historyData(pick(run, ['id', 'at', 'taskId', 'goal', 'status'])), archived: true,
       prepared: run.prepared ? { changes: historyData(run.prepared.changes || []), confirmations: historyData(run.prepared.confirmations || []), reasons: historyData(run.prepared.reasons || []) } : null,
       result: savedResult(run.result), ...(run.rollback ? { rollback: savedResult(run.rollback) } : {}),
-      ...(includeRollback && run.viewRollback && !['complete', 'unknown'].includes(run.rollback?.status)
-        ? { viewRollback: historyData(run.viewRollback) } : {})
+      ...(includeRollback && !['complete', 'unknown'].includes(run.rollback?.status)
+        ? { ...(run.historyRollback ? { historyRollback: historyData(run.historyRollback) } : {}),
+            ...(run.viewRollback ? { viewRollback: historyData(run.viewRollback) } : {}) } : {})
     });
     const appOf = value => value?.appId ?? value?.data?.appId ?? value?.current?.appId ?? value?.inputs?.data?.appId ?? null;
     const environmentOf = value => value?.env ?? value?.current?.env ?? null;
@@ -16339,9 +16513,9 @@
           try {
             run.result = await execution.apply({ prepared: checked, onProgress: progress => { run.progress = progress; emit(); } });
             run.status = run.result?.status || 'unknown';
-            if (execution.captureViewRollback) {
-              try { run.viewRollback = await execution.captureViewRollback(checked, run.result); }
-              catch (_) { run.viewRollback = null; }
+            if (execution.captureHistoryRollback) {
+              try { run.historyRollback = await execution.captureHistoryRollback(checked, run.result); }
+              catch (_) { run.historyRollback = null; }
             }
           } catch (e) { run.status = 'unknown'; run.result = { status: 'unknown', written: null, message: '反映の結果を確認できません。再度反映せず、現在の状態を確認してください。', error: errorOf(e) }; }
           set({ phase: 'result', resultRunId: run.id, prepared: null, progress: '' });
@@ -16372,7 +16546,7 @@
       const recheckRollback = runId => recheckRun(runId, 'rollback');
       async function requestRollback(runId) {
         const run = state.runs.find(r => r.id === runId);
-        if (!run || (run.archived && !run.viewRollback) || run.status === 'unknown' || !run.result?.written ||
+        if (!run || (run.archived && !run.historyRollback && !run.viewRollback) || run.status === 'unknown' || !run.result?.written ||
             run.result?.retryable === false || run.rollback?.retryable === false || ['complete', 'unknown'].includes(run.rollback?.status) || !available()) return false;
         return activity('preparing', async (_, live) => {
           const prepared = await execution.prepareRollback(clone(run));
@@ -16383,7 +16557,7 @@
       async function rollback(runId) {
         if (state.phase !== 'rollback-confirm' || state.rollback?.runId !== runId || !state.rollback.prepared?.ok) return false;
         const run = state.runs.find(r => r.id === runId), prepared = clone(state.rollback.prepared);
-        if (!run || (run.archived && !run.viewRollback)) return false;
+        if (!run || (run.archived && !run.historyRollback && !run.viewRollback)) return false;
         return activity('rolling-back', async () => {
           if (run.archived && saveBeforeHistoryRollback) await saveBeforeHistoryRollback();
           try { run.rollback = await execution.rollback({ run: clone(run), prepared, onProgress: p => { run.progress = p; emit(); } }); }
@@ -16524,13 +16698,15 @@
           }
           Object.assign(next, { prepared: null, rollback: null, progress: '' });
           for (const run of next.runs) {
-            if (run.viewRollback && run.viewRollback.appId !== String(appOf(fresh))) delete run.viewRollback;
+            for (const key of ['historyRollback', 'viewRollback']) {
+              if (run[key] && run[key].appId !== String(appOf(fresh))) delete run[key];
+            }
             if (run.status === 'running') {
               run.status = 'unknown'; run.result = { ...run.result, status: 'unknown', written: null,
                 message: '反映中に画面が閉じられたため、結果を確認できません。同じ変更を再度反映せず、現在の設定を確認してください。' };
             }
             if (saved.state.phase === 'rolling-back' && run.id === (saved.state.resultRunId || next.runs.at(-1)?.id)) {
-              delete run.viewRollback;
+              delete run.historyRollback; delete run.viewRollback;
               run.rollback = { ...run.rollback, status: 'unknown', message: '復元中に画面が閉じられたため、結果を確認できません。現在の設定を確認してください。' };
             }
           }
@@ -16915,26 +17091,121 @@
     const settingUnknown = result => !!result?.steps?.filter(s => !isJavaScript(s)).some(s => s.status === 'FAILED' && !s.partial && s.reason === 'API_ERROR' && !/^(GAIA_|CB_)/.test(s.error?.code || '') && !(s.error?.status >= 400 && s.error?.status < 500));
     const fileUnknown = result => !!result?.put && result.put.ok !== true && result.previewUnchanged !== true;
     const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
+    const fileTargets = ['desktop', 'mobile'];
+    const fileRegistryKey = snapshot => JSON.stringify([snapshot.scope, ...fileTargets.flatMap(target =>
+      ['js', 'css'].map(kind => snapshot[target][kind].map(entry => entry.type === 'URL'
+        ? ['URL', entry.url] : ['FILE', entry.fileKey, entry.name, entry.size, entry.contentType])))]);
+    const fileStepValid = step => ['ADD_FILE', 'REPLACE_FILE'].includes(step?.kind) && fileTargets.includes(step.target) &&
+      typeof step.changeId === 'string' && step.changeId.length > 0 && typeof step.name === 'string' &&
+      step.name.trim().length > 0 && !/[\\/\x00-\x1f]/.test(step.name) &&
+      Number.isInteger(step.position) && step.position >= 0;
+    const fileStepKey = step => step.target + ':' + step.position;
+
+    function restoreFileRegistry(after, steps, originals = null) {
+      const before = clone(after);
+      // Reverse additions without shifting the remaining referenced positions.
+      for (const step of [...steps].sort((a, b) => b.position - a.position)) {
+        const list = before[step.target].js, file = list[step.position];
+        if (file?.type !== 'FILE' || file.name !== step.name) return null;
+        if (step.kind === 'ADD_FILE') list.splice(step.position, 1);
+        else if (originals) {
+          const original = originals[step.target].js[step.position];
+          if (original?.type !== 'FILE' || original.name !== step.name || original.fileKey === file.fileKey) return null;
+          list[step.position] = original;
+        } else {
+          // The old registration key cannot be used after a replacement. The
+          // rollback executor uploads the held source before constructing the PUT.
+          list[step.position] = { type: 'FILE', name: step.name, fileKey: '', size: String(step.bytes), contentType: 'text/javascript' };
+        }
+      }
+      return before;
+    }
+
+    const sourceBytes = source => typeof source === 'string' && source.length && !/[\ud800-\udfff\ufffd]/u.test(source)
+      ? new TextEncoder().encode(source).length : null;
+    const heldFileKey = (before, steps) => fileRegistryKey({
+      ...before, ...Object.fromEntries(fileTargets.map(target => [target, {
+        ...before[target], js: before[target].js.map((entry, position) => {
+          const replaced = steps.find(step => step.kind === 'REPLACE_FILE' && step.target === target && step.position === position);
+          return replaced ? { type: 'FILE', name: entry.name, size: String(replaced.bytes), fileKey: replaced.sourceHash } : entry;
+        }),
+      }])),
+    });
+
+    async function captureFileHistory(execution, { hash, jsExecutor }) {
+      const revision = execution?.actualAfterRaw?.revision;
+      if (execution?.status !== 'DONE' || execution.env !== jsExecutor.ENV || execution.put?.ok !== true ||
+          execution.verification?.ok !== true || !/^\d+$/.test(revision || '') ||
+          String(execution.put.revision) !== revision || !execution.snapshot || !execution.steps?.length ||
+          execution.steps.some(step => step.status !== 'VERIFIED' || !fileStepValid(step)) ||
+          new Set(execution.steps.map(fileStepKey)).size !== execution.steps.length) return null;
+      const restored = restoreFileRegistry(execution.actualAfterRaw, execution.steps, execution.snapshot);
+      if (!restored || fileRegistryKey(restored) !== fileRegistryKey(execution.snapshot)) return null;
+
+      const steps = [];
+      for (const { changeId, kind, target, name, position, currentSource, currentHash } of execution.steps) {
+        const step = { changeId, kind, target, name, position };
+        if (kind === 'REPLACE_FILE') {
+          const bytes = sourceBytes(currentSource);
+          const original = execution.snapshot[target].js[position];
+          // The existing download uses response.text(). Only retain source when
+          // encoding it again accounts for every registered byte.
+          if (!bytes || String(bytes) !== original.size || typeof currentHash !== 'string' || !currentHash) return null;
+          Object.assign(step, { source: currentSource, bytes, sourceHash: await hash(currentSource), currentHash });
+        }
+        steps.push(step);
+      }
+      return { version: 1, executionId: execution.executionId, appId: execution.appId, revision,
+        steps, beforeHash: await hash(heldFileKey(execution.snapshot, steps)), afterHash: await hash(fileRegistryKey(execution.actualAfterRaw)) };
+    }
+
+    async function openFileHistory(saved, { api, appId, hash, jsExecutor, revision = saved?.revision }) {
+      const reject = (code, message) => ({ ok: false, reasons: [{ code, message }] });
+      const invalid = () => reject('INVALID_ROLLBACK_HISTORY', '保存したJavaScriptの復元情報を確認できません。');
+      const digest = value => /^[a-f0-9]{64}$/.test(value || '');
+      if (saved?.version !== 1 || saved.appId !== String(appId) || !/^\d+$/.test(revision || '') ||
+          typeof saved.executionId !== 'string' || !saved.executionId || !digest(saved.beforeHash) || !digest(saved.afterHash) ||
+          !Array.isArray(saved.steps) || !saved.steps.length || saved.steps.some(step => !fileStepValid(step)) ||
+          new Set(saved.steps.map(fileStepKey)).size !== saved.steps.length) return invalid();
+
+      let after;
+      try { after = jsExecutor.snapshotOf(await api.getPreviewCustomize(appId)); }
+      catch (_) { return reject('PREVIEW_CUSTOMIZE_UNAVAILABLE', '動作テスト環境のカスタマイズ設定を取得できません。権限と接続を確認してください。'); }
+      if (after.revision !== String(revision) || await hash(fileRegistryKey(after)) !== saved.afterHash)
+        return reject('THIRD_PARTY_CHANGE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。');
+
+      const before = restoreFileRegistry(after, saved.steps);
+      if (!before || await hash(heldFileKey(before, saved.steps)) !== saved.beforeHash) return invalid();
+      const steps = [];
+      for (const step of saved.steps) {
+        const { changeId, kind, target, name, position } = step;
+        const restored = { changeId, kind, target, name, position, status: 'VERIFIED' };
+        if (kind === 'REPLACE_FILE') {
+          if (!digest(step.sourceHash) || !step.bytes || sourceBytes(step.source) !== step.bytes ||
+              typeof step.currentHash !== 'string' || !step.currentHash || await hash(step.source) !== step.sourceHash) return invalid();
+          Object.assign(restored, { currentHash: step.currentHash, currentSource: step.source });
+        }
+        steps.push(restored);
+      }
+      return { ok: true, revision: after.revision, execution: { executionId: saved.executionId, appId: saved.appId, env: jsExecutor.ENV,
+        status: 'DONE', put: { ok: true }, snapshot: before, actualAfterRaw: after, afterRevision: after.revision, steps } };
+    }
+
     function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
       const toCurrent = b => b.current || currentOf(b);
       const viewKey = value => JSON.stringify(value, (_, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
         ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : entry);
       const viewHash = views => hash(viewKey(views));
-      async function captureViewRollback(prepared, result) {
-        if (result.status !== 'complete' || prepared.files || prepared.changes?.length !== 1) return null;
-        const [step] = result.settings?.steps || [];
-        if (result.settings?.steps.length !== 1 || step?.status !== 'VERIFIED' || step.actionType !== 'UPDATE_VIEW') return null;
-        const name = prepared.settings.steps[0]?.prepared?.payload?.name;
-        const before = result.settings.snapshot?.views, after = result.settings.actualAfterRaw?.views;
-        if (!name || !Object.hasOwn(before?.views || {}, name) || !Object.hasOwn(after?.views || {}, name) ||
-            !after.revision || String(after.revision) !== String(step.revision) || before.views[name].type !== 'LIST') return null;
-        const edits = prepared.settings.steps[0].prepared.before;
-        const restored = { ...after.views, [name]: { ...after.views[name], ...edits } };
-        // Retain only prior values of the changed attributes and a fingerprint that
-        // includes the other views and their IDs. Never persist the settings snapshot.
-        if (viewKey(restored) !== viewKey(before.views)) return null;
-        return { version: 1, executionId: result.settings.executionId, appId: String(appId), name, stepId: step.stepId,
-          revision: String(after.revision), before: clone(edits), beforeHash: await viewHash(before.views), afterHash: await viewHash(after.views) };
+      async function captureHistoryRollback(prepared, result) {
+        if (result.status !== 'complete' || !result.written) return null;
+        const hasSettings = settingWritten(result.settings), hasFiles = result.files?.put?.ok === true;
+        const settings = hasSettings ? await planExecutor.captureHistoryRollback?.(result.settings, prepared.settings, { hash }) : null;
+        const files = hasFiles ? await captureFileHistory(result.files, { hash, jsExecutor }) : null;
+        if ((!settings && hasSettings) || (!files && hasFiles) || (!settings && !files)) return null;
+        const revisions = [settings?.revision, files?.revision].filter(Boolean);
+        if (!revisions.length || revisions.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)))) return null;
+        const revision = String(Math.max(...revisions.map(Number)));
+        return { version: 2, appId: String(appId), revision, settings, files };
       }
       async function openViewRollback(run) {
         const c = run.viewRollback;
@@ -16959,6 +17230,23 @@
         return { ok: true, run: { ...run, result: { ...run.result, settings: { executionId: c.executionId, appId: c.appId,
           status: 'DONE', afterRevision: c.revision, steps: [{ ...step, status: 'VERIFIED' }], snapshot: { views: { views } }, actualAfterRaw: { views: after } } },
           prepared: { ...run.prepared, settings: { executionId: c.executionId, steps: [{ ...step, prepared: { payload: { name: c.name } } }] } } } };
+      }
+      async function openHistoryRollback(run) {
+        const saved = run.historyRollback;
+        if (!saved) return openViewRollback(run);
+        const { revision } = saved;
+        if (saved.version !== 2 || saved.appId !== String(appId) || !/^\d+$/.test(revision) || (!saved.settings && !saved.files)) {
+          return { ok: false, reasons: [{ code: 'INVALID_ROLLBACK_HISTORY', message: '保存した復元情報を確認できません。' }] };
+        }
+        const context = { api, appId, hash, revision, jsExecutor };
+        const settings = saved.settings ? await planExecutor.openHistoryRollback(saved.settings, context) : null;
+        if (settings && !settings.ok) return settings;
+        const files = saved.files ? await openFileHistory(saved.files, context) : null;
+        if (files && !files.ok) return files;
+        return { ok: true, run: { ...run,
+          result: { ...run.result, files: files?.execution || null, settings: settings?.execution || null },
+          prepared: { ...run.prepared, settings: settings?.prepared || null }
+        } };
       }
       async function fileOperations(artifacts, plan, current) {
         const dependencies = {
@@ -17274,8 +17562,8 @@
       }
       async function prepareRollback(run) {
         if (run.archived) {
-          const opened = await openViewRollback(run);
-          if (!opened.ok) return opened;
+          const opened = await openHistoryRollback(run);
+          if (!opened.ok) return { changes: [], confirmations: [], ...opened };
           run = opened.run;
         }
         const r = run.result;
@@ -17294,7 +17582,7 @@
           confirmations: [...(files?.warnings || []), ...(settings?.warnings || [])] };
       }
       // Observe transport outcomes even when an existing executor catches the error.
-      function rollbackTransport() {
+      function rollbackTransport(expectedRevision = null) {
         const state = { written: false, uncertain: false };
         const rejected = e => /^(GAIA_|CB_)/.test(e?.code || '') || (e?.status >= 400 && e?.status < 500);
         const tracked = new Proxy(api, { get(target, key) {
@@ -17302,7 +17590,20 @@
           const read = String(key).startsWith('get') || key === 'downloadFile';
           const write = !read && key !== 'uploadFile';
           return async (...args) => {
-            try { const result = await fn.apply(target, args); if (write) state.written = true; return result; }
+            try {
+              if (write && expectedRevision !== null && String(args.at(-1)) !== expectedRevision)
+                throw Object.assign(new Error('反映後に設定が変更されたため、復元を止めました。'), { code: 'GAIA_CO02' });
+              const result = await fn.apply(target, args);
+              if (write) {
+                state.written = true;
+                if (expectedRevision !== null) {
+                  if (!/^\d+$/.test(String(result?.revision)))
+                    throw new Error('復元の書き込み後の設定バージョンを確認できません。');
+                  expectedRevision = String(result.revision);
+                }
+              }
+              return result;
+            }
             catch (error) { if ((write && !rejected(error)) || (read && state.written)) state.uncertain = true; throw error; }
           };
         } });
@@ -17370,14 +17671,14 @@
         }
       }
       async function rollback({ run, prepared, onProgress = () => {} }) {
-        const savedRevision = run.archived ? run.viewRollback?.revision : null;
+        const savedRevision = run.archived ? (run.historyRollback?.revision ?? run.viewRollback?.revision) : null;
         if (run.archived) {
-          const opened = await openViewRollback(run);
+          const opened = await openHistoryRollback(run);
           if (!opened.ok) return { status: 'failed', reasons: opened.reasons, message: opened.reasons[0].message };
           run = opened.run;
         }
         let files = clone(prepared.restoredFiles || null), settings = null, writeInFlight = false;
-        const transport = rollbackTransport();
+        const transport = rollbackTransport(savedRevision);
         const unknown = () => ({ status: 'unknown', files, settings, recoveryState: 'unknown', retryable: false, message: '復元の結果を確認できません。もう一度戻す前に、現在の設定を確認してください。' });
         try {
           if (!prepared.ok || run.result?.written == null || run.result?.status === 'unknown' || run.rollback?.status === 'unknown' ||
@@ -17406,12 +17707,7 @@
             if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
             if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
             writeInFlight = true;
-            const rollbackApi = savedRevision ? { ...transport.api, async putPreviewViews(id, views, revision) {
-              if (String(revision) !== savedRevision)
-                throw Object.assign(new Error('反映後に設定が変更されたため、復元を止めました。'), { code: 'GAIA_CO02' });
-              return transport.api.putPreviewViews(id, views, revision);
-            } } : transport.api;
-            settings = await planExecutor.executeRollback(checked, { api: rollbackApi, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
+            settings = await planExecutor.executeRollback(checked, { api: transport.api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
             writeInFlight = false;
             if (transport.state.uncertain) return unknown();
             if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
@@ -17423,7 +17719,7 @@
             error: { code: error?.code, message: error?.message } };
         }
       }
-      return { prepare, apply, captureViewRollback, prepareRollback, rollback, recheckRollback, recheckApply };
+      return { prepare, apply, captureHistoryRollback, prepareRollback, rollback, recheckRollback, recheckApply };
     }
     return { create };
   })();
@@ -17855,7 +18151,7 @@
       const recoveryLimited = (run.result?.settings?.steps || []).some(s =>
         (['APPLIED', 'VERIFIED', 'VERIFY_FAILED'].includes(s.status) || s.partial) &&
         run.prepared?.settings?.steps?.find(p => p.stepId === s.stepId)?.prepared?.irreversible);
-      const canRestore = (!run.archived || run.viewRollback) && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
+      const canRestore = (!run.archived || run.historyRollback || run.viewRollback) && run.status !== 'unknown' && !!run.result?.written && run.result?.retryable !== false && run.rollback?.retryable !== false && !['complete', 'unknown'].includes(run.rollback?.status) && !recoveryLimited;
       const changes = run.prepared?.changes || [], platforms = new Set(changes.map(change => change.targetPlatform || (change.kind === 'javascript' ? change.target : null)).filter(Boolean));
       const checkDesktop = platforms.has('desktop') || changes.some(change => change.kind === 'setting' || (!change.kind && !change.targetPlatform));
       const checkMobile = platforms.has('mobile');
@@ -17872,7 +18168,7 @@
     }
     function rollbackHtml(state, options) {
       const rollback = state.rollback || {}, run = (state.runs || []).find(r => r.id === rollback.runId), prep = rollback.prepared || {};
-      if (run?.archived && !run.viewRollback) return runHtml(run, options);
+      if (run?.archived && !run.historyRollback && !run.viewRollback) return runHtml(run, options);
       return `<section class="ktr-section"><h2>この反映の変更を戻します</h2><p>対象は動作テスト環境の次の変更です。運用環境は変更しません。</p>${list(prep.changes || run?.prepared?.changes || [])}${prep.restoredChanges?.length ? `<h3>すでに戻した変更</h3>${list(prep.restoredChanges)}<p class="ktr-note">これらは今回の復元に含めません。</p>` : ''}${list(prep.reasons || [], 'ktr-reasons')}${prep.confirmations?.length ? `<div class="ktr-confirmations"><h3>戻す前に確認してください</h3>${list(prep.confirmations)}</div>` : ''}<div class="ktr-actions">${button('rollback', '反映前の状態に戻す', { primary: true, disabled: !prep.ok, blockedByDraft: draftPending(options), id: rollback.runId })}${button('cancel-rollback', '戻さずに閉じる')}</div>${draftNotice(options)}</section>`;
     }
     // Error payloads are for control/recovery only. Never render provider details.

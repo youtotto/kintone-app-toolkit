@@ -10,26 +10,121 @@ const KTReleaseExecution = (() => {
   const settingUnknown = result => !!result?.steps?.filter(s => !isJavaScript(s)).some(s => s.status === 'FAILED' && !s.partial && s.reason === 'API_ERROR' && !/^(GAIA_|CB_)/.test(s.error?.code || '') && !(s.error?.status >= 400 && s.error?.status < 500));
   const fileUnknown = result => !!result?.put && result.put.ok !== true && result.previewUnchanged !== true;
   const requiredWarnings = prepared => (prepared?.warnings || []).filter(w => w.code !== 'OTHER_CHANGES_SINCE_EXECUTION' && w.code !== 'CUSTOMIZE_REVISION_ADVANCED');
+  const fileTargets = ['desktop', 'mobile'];
+  const fileRegistryKey = snapshot => JSON.stringify([snapshot.scope, ...fileTargets.flatMap(target =>
+    ['js', 'css'].map(kind => snapshot[target][kind].map(entry => entry.type === 'URL'
+      ? ['URL', entry.url] : ['FILE', entry.fileKey, entry.name, entry.size, entry.contentType])))]);
+  const fileStepValid = step => ['ADD_FILE', 'REPLACE_FILE'].includes(step?.kind) && fileTargets.includes(step.target) &&
+    typeof step.changeId === 'string' && step.changeId.length > 0 && typeof step.name === 'string' &&
+    step.name.trim().length > 0 && !/[\\/\x00-\x1f]/.test(step.name) &&
+    Number.isInteger(step.position) && step.position >= 0;
+  const fileStepKey = step => step.target + ':' + step.position;
+
+  function restoreFileRegistry(after, steps, originals = null) {
+    const before = clone(after);
+    // Reverse additions without shifting the remaining referenced positions.
+    for (const step of [...steps].sort((a, b) => b.position - a.position)) {
+      const list = before[step.target].js, file = list[step.position];
+      if (file?.type !== 'FILE' || file.name !== step.name) return null;
+      if (step.kind === 'ADD_FILE') list.splice(step.position, 1);
+      else if (originals) {
+        const original = originals[step.target].js[step.position];
+        if (original?.type !== 'FILE' || original.name !== step.name || original.fileKey === file.fileKey) return null;
+        list[step.position] = original;
+      } else {
+        // The old registration key cannot be used after a replacement. The
+        // rollback executor uploads the held source before constructing the PUT.
+        list[step.position] = { type: 'FILE', name: step.name, fileKey: '', size: String(step.bytes), contentType: 'text/javascript' };
+      }
+    }
+    return before;
+  }
+
+  const sourceBytes = source => typeof source === 'string' && source.length && !/[\ud800-\udfff\ufffd]/u.test(source)
+    ? new TextEncoder().encode(source).length : null;
+  const heldFileKey = (before, steps) => fileRegistryKey({
+    ...before, ...Object.fromEntries(fileTargets.map(target => [target, {
+      ...before[target], js: before[target].js.map((entry, position) => {
+        const replaced = steps.find(step => step.kind === 'REPLACE_FILE' && step.target === target && step.position === position);
+        return replaced ? { type: 'FILE', name: entry.name, size: String(replaced.bytes), fileKey: replaced.sourceHash } : entry;
+      }),
+    }])),
+  });
+
+  async function captureFileHistory(execution, { hash, jsExecutor }) {
+    const revision = execution?.actualAfterRaw?.revision;
+    if (execution?.status !== 'DONE' || execution.env !== jsExecutor.ENV || execution.put?.ok !== true ||
+        execution.verification?.ok !== true || !/^\d+$/.test(revision || '') ||
+        String(execution.put.revision) !== revision || !execution.snapshot || !execution.steps?.length ||
+        execution.steps.some(step => step.status !== 'VERIFIED' || !fileStepValid(step)) ||
+        new Set(execution.steps.map(fileStepKey)).size !== execution.steps.length) return null;
+    const restored = restoreFileRegistry(execution.actualAfterRaw, execution.steps, execution.snapshot);
+    if (!restored || fileRegistryKey(restored) !== fileRegistryKey(execution.snapshot)) return null;
+
+    const steps = [];
+    for (const { changeId, kind, target, name, position, currentSource, currentHash } of execution.steps) {
+      const step = { changeId, kind, target, name, position };
+      if (kind === 'REPLACE_FILE') {
+        const bytes = sourceBytes(currentSource);
+        const original = execution.snapshot[target].js[position];
+        // The existing download uses response.text(). Only retain source when
+        // encoding it again accounts for every registered byte.
+        if (!bytes || String(bytes) !== original.size || typeof currentHash !== 'string' || !currentHash) return null;
+        Object.assign(step, { source: currentSource, bytes, sourceHash: await hash(currentSource), currentHash });
+      }
+      steps.push(step);
+    }
+    return { version: 1, executionId: execution.executionId, appId: execution.appId, revision,
+      steps, beforeHash: await hash(heldFileKey(execution.snapshot, steps)), afterHash: await hash(fileRegistryKey(execution.actualAfterRaw)) };
+  }
+
+  async function openFileHistory(saved, { api, appId, hash, jsExecutor, revision = saved?.revision }) {
+    const reject = (code, message) => ({ ok: false, reasons: [{ code, message }] });
+    const invalid = () => reject('INVALID_ROLLBACK_HISTORY', '保存したJavaScriptの復元情報を確認できません。');
+    const digest = value => /^[a-f0-9]{64}$/.test(value || '');
+    if (saved?.version !== 1 || saved.appId !== String(appId) || !/^\d+$/.test(revision || '') ||
+        typeof saved.executionId !== 'string' || !saved.executionId || !digest(saved.beforeHash) || !digest(saved.afterHash) ||
+        !Array.isArray(saved.steps) || !saved.steps.length || saved.steps.some(step => !fileStepValid(step)) ||
+        new Set(saved.steps.map(fileStepKey)).size !== saved.steps.length) return invalid();
+
+    let after;
+    try { after = jsExecutor.snapshotOf(await api.getPreviewCustomize(appId)); }
+    catch (_) { return reject('PREVIEW_CUSTOMIZE_UNAVAILABLE', '動作テスト環境のカスタマイズ設定を取得できません。権限と接続を確認してください。'); }
+    if (after.revision !== String(revision) || await hash(fileRegistryKey(after)) !== saved.afterHash)
+      return reject('THIRD_PARTY_CHANGE', '反映後に動作テスト環境の設定が変更されているため、自動では元に戻せません。');
+
+    const before = restoreFileRegistry(after, saved.steps);
+    if (!before || await hash(heldFileKey(before, saved.steps)) !== saved.beforeHash) return invalid();
+    const steps = [];
+    for (const step of saved.steps) {
+      const { changeId, kind, target, name, position } = step;
+      const restored = { changeId, kind, target, name, position, status: 'VERIFIED' };
+      if (kind === 'REPLACE_FILE') {
+        if (!digest(step.sourceHash) || !step.bytes || sourceBytes(step.source) !== step.bytes ||
+            typeof step.currentHash !== 'string' || !step.currentHash || await hash(step.source) !== step.sourceHash) return invalid();
+        Object.assign(restored, { currentHash: step.currentHash, currentSource: step.source });
+      }
+      steps.push(restored);
+    }
+    return { ok: true, revision: after.revision, execution: { executionId: saved.executionId, appId: saved.appId, env: jsExecutor.ENV,
+      status: 'DONE', put: { ok: true }, snapshot: before, actualAfterRaw: after, afterRevision: after.revision, steps } };
+  }
+
   function create({ appId, api, loadBase, currentOf, planExecutor, jsExecutor, hash }) {
     const toCurrent = b => b.current || currentOf(b);
     const viewKey = value => JSON.stringify(value, (_, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
       ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : entry);
     const viewHash = views => hash(viewKey(views));
-    async function captureViewRollback(prepared, result) {
-      if (result.status !== 'complete' || prepared.files || prepared.changes?.length !== 1) return null;
-      const [step] = result.settings?.steps || [];
-      if (result.settings?.steps.length !== 1 || step?.status !== 'VERIFIED' || step.actionType !== 'UPDATE_VIEW') return null;
-      const name = prepared.settings.steps[0]?.prepared?.payload?.name;
-      const before = result.settings.snapshot?.views, after = result.settings.actualAfterRaw?.views;
-      if (!name || !Object.hasOwn(before?.views || {}, name) || !Object.hasOwn(after?.views || {}, name) ||
-          !after.revision || String(after.revision) !== String(step.revision) || before.views[name].type !== 'LIST') return null;
-      const edits = prepared.settings.steps[0].prepared.before;
-      const restored = { ...after.views, [name]: { ...after.views[name], ...edits } };
-      // Retain only prior values of the changed attributes and a fingerprint that
-      // includes the other views and their IDs. Never persist the settings snapshot.
-      if (viewKey(restored) !== viewKey(before.views)) return null;
-      return { version: 1, executionId: result.settings.executionId, appId: String(appId), name, stepId: step.stepId,
-        revision: String(after.revision), before: clone(edits), beforeHash: await viewHash(before.views), afterHash: await viewHash(after.views) };
+    async function captureHistoryRollback(prepared, result) {
+      if (result.status !== 'complete' || !result.written) return null;
+      const hasSettings = settingWritten(result.settings), hasFiles = result.files?.put?.ok === true;
+      const settings = hasSettings ? await planExecutor.captureHistoryRollback?.(result.settings, prepared.settings, { hash }) : null;
+      const files = hasFiles ? await captureFileHistory(result.files, { hash, jsExecutor }) : null;
+      if ((!settings && hasSettings) || (!files && hasFiles) || (!settings && !files)) return null;
+      const revisions = [settings?.revision, files?.revision].filter(Boolean);
+      if (!revisions.length || revisions.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)))) return null;
+      const revision = String(Math.max(...revisions.map(Number)));
+      return { version: 2, appId: String(appId), revision, settings, files };
     }
     async function openViewRollback(run) {
       const c = run.viewRollback;
@@ -54,6 +149,23 @@ const KTReleaseExecution = (() => {
       return { ok: true, run: { ...run, result: { ...run.result, settings: { executionId: c.executionId, appId: c.appId,
         status: 'DONE', afterRevision: c.revision, steps: [{ ...step, status: 'VERIFIED' }], snapshot: { views: { views } }, actualAfterRaw: { views: after } } },
         prepared: { ...run.prepared, settings: { executionId: c.executionId, steps: [{ ...step, prepared: { payload: { name: c.name } } }] } } } };
+    }
+    async function openHistoryRollback(run) {
+      const saved = run.historyRollback;
+      if (!saved) return openViewRollback(run);
+      const { revision } = saved;
+      if (saved.version !== 2 || saved.appId !== String(appId) || !/^\d+$/.test(revision) || (!saved.settings && !saved.files)) {
+        return { ok: false, reasons: [{ code: 'INVALID_ROLLBACK_HISTORY', message: '保存した復元情報を確認できません。' }] };
+      }
+      const context = { api, appId, hash, revision, jsExecutor };
+      const settings = saved.settings ? await planExecutor.openHistoryRollback(saved.settings, context) : null;
+      if (settings && !settings.ok) return settings;
+      const files = saved.files ? await openFileHistory(saved.files, context) : null;
+      if (files && !files.ok) return files;
+      return { ok: true, run: { ...run,
+        result: { ...run.result, files: files?.execution || null, settings: settings?.execution || null },
+        prepared: { ...run.prepared, settings: settings?.prepared || null }
+      } };
     }
     async function fileOperations(artifacts, plan, current) {
       const dependencies = {
@@ -369,8 +481,8 @@ const KTReleaseExecution = (() => {
     }
     async function prepareRollback(run) {
       if (run.archived) {
-        const opened = await openViewRollback(run);
-        if (!opened.ok) return opened;
+        const opened = await openHistoryRollback(run);
+        if (!opened.ok) return { changes: [], confirmations: [], ...opened };
         run = opened.run;
       }
       const r = run.result;
@@ -389,7 +501,7 @@ const KTReleaseExecution = (() => {
         confirmations: [...(files?.warnings || []), ...(settings?.warnings || [])] };
     }
     // Observe transport outcomes even when an existing executor catches the error.
-    function rollbackTransport() {
+    function rollbackTransport(expectedRevision = null) {
       const state = { written: false, uncertain: false };
       const rejected = e => /^(GAIA_|CB_)/.test(e?.code || '') || (e?.status >= 400 && e?.status < 500);
       const tracked = new Proxy(api, { get(target, key) {
@@ -397,7 +509,20 @@ const KTReleaseExecution = (() => {
         const read = String(key).startsWith('get') || key === 'downloadFile';
         const write = !read && key !== 'uploadFile';
         return async (...args) => {
-          try { const result = await fn.apply(target, args); if (write) state.written = true; return result; }
+          try {
+            if (write && expectedRevision !== null && String(args.at(-1)) !== expectedRevision)
+              throw Object.assign(new Error('反映後に設定が変更されたため、復元を止めました。'), { code: 'GAIA_CO02' });
+            const result = await fn.apply(target, args);
+            if (write) {
+              state.written = true;
+              if (expectedRevision !== null) {
+                if (!/^\d+$/.test(String(result?.revision)))
+                  throw new Error('復元の書き込み後の設定バージョンを確認できません。');
+                expectedRevision = String(result.revision);
+              }
+            }
+            return result;
+          }
           catch (error) { if ((write && !rejected(error)) || (read && state.written)) state.uncertain = true; throw error; }
         };
       } });
@@ -465,14 +590,14 @@ const KTReleaseExecution = (() => {
       }
     }
     async function rollback({ run, prepared, onProgress = () => {} }) {
-      const savedRevision = run.archived ? run.viewRollback?.revision : null;
+      const savedRevision = run.archived ? (run.historyRollback?.revision ?? run.viewRollback?.revision) : null;
       if (run.archived) {
-        const opened = await openViewRollback(run);
+        const opened = await openHistoryRollback(run);
         if (!opened.ok) return { status: 'failed', reasons: opened.reasons, message: opened.reasons[0].message };
         run = opened.run;
       }
       let files = clone(prepared.restoredFiles || null), settings = null, writeInFlight = false;
-      const transport = rollbackTransport();
+      const transport = rollbackTransport(savedRevision);
       const unknown = () => ({ status: 'unknown', files, settings, recoveryState: 'unknown', retryable: false, message: '復元の結果を確認できません。もう一度戻す前に、現在の設定を確認してください。' });
       try {
         if (!prepared.ok || run.result?.written == null || run.result?.status === 'unknown' || run.rollback?.status === 'unknown' ||
@@ -501,12 +626,7 @@ const KTReleaseExecution = (() => {
           if (!good(checked)) return { status: 'partial', files, reasons: checked.blockers, message: '設定が変わったため、設定を戻す処理を止めました。' };
           if (await hash(requiredWarnings(checked)) !== await hash(requiredWarnings(prepared.settings))) return { status: files ? 'partial' : 'failed', files, message: '元に戻す際の確認事項が変わったため、設定を戻す処理を止めました。内容を確認し直してください。' };
           writeInFlight = true;
-          const rollbackApi = savedRevision ? { ...transport.api, async putPreviewViews(id, views, revision) {
-            if (String(revision) !== savedRevision)
-              throw Object.assign(new Error('反映後に設定が変更されたため、復元を止めました。'), { code: 'GAIA_CO02' });
-            return transport.api.putPreviewViews(id, views, revision);
-          } } : transport.api;
-          settings = await planExecutor.executeRollback(checked, { api: rollbackApi, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
+          settings = await planExecutor.executeRollback(checked, { api: transport.api, execution: clone(run.result.settings), onProgress: (step, result) => { settings = result; onProgress(step); } });
           writeInFlight = false;
           if (transport.state.uncertain) return unknown();
           if (settings.status !== 'ROLLED_BACK_VERIFIED') return { status: 'partial', files, settings, message: '設定を戻す処理を完了できませんでした。' };
@@ -518,7 +638,7 @@ const KTReleaseExecution = (() => {
           error: { code: error?.code, message: error?.message } };
       }
     }
-    return { prepare, apply, captureViewRollback, prepareRollback, rollback, recheckRollback, recheckApply };
+    return { prepare, apply, captureHistoryRollback, prepareRollback, rollback, recheckRollback, recheckApply };
   }
   return { create };
 })();

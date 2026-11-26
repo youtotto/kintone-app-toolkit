@@ -215,7 +215,11 @@ test('会話を自動保存・自動復元し、下書き・採用・成果物�
     await autoReload(firstId);
     assert.equal(await page.evaluate(() => work.controller.getState().runs.at(-1).archived), true);
     assert.match(await page.locator('main').innerText(), /保存した反映結果です/);
-    assert.equal(await page.locator('[data-release-action="apply"],[data-release-action="request-rollback"],[data-release-action="rollback"],[data-release-action="recheck-apply"],[data-release-action="recheck-rollback"]').count(), 0);
+    assert.equal(await page.locator('[data-release-action="apply"],[data-release-action="rollback"],[data-release-action="recheck-apply"],[data-release-action="recheck-rollback"]').count(), 0);
+    assert.equal(await action('request-rollback').isVisible(), true);
+    await action('request-rollback').click(); await phase('rollback-confirm');
+    assert.equal(await action('rollback').isEnabled(), true);
+    await action('cancel-rollback').click(); await phase('result');
     assert.equal(paid(), resultPaid); assert.equal(mock.calls.filter(call => !call.startsWith('GET')).length, writes);
     await historyList();
     assert.equal(await page.locator('[data-history-delete="' + firstId + '"]').isDisabled(), true);
