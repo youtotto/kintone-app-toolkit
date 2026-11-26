@@ -98,13 +98,14 @@ const KTReleaseContext = (() => {
   // A cached scan supplies app IDs, never evidence of a current join by itself.
   async function withIncomingLookups(input, get, incoming) {
     const { base, signal } = input;
-    if (!incoming || !base?.ok || base.env !== 'preview' || input.diagnosis || input.environmentComparison ||
+    if (!base?.ok || base.env !== 'preview' || input.diagnosis || input.environmentComparison ||
         input.businessSnapshot || input.businessMode === 'understand' || input.customization ||
         (input.requestPurpose && input.requestPurpose !== 'consultation')) return input;
     const words = [input.text, input.goal, ...(input.requests || [])].filter(x => typeof x === 'string').join('\n');
     const grouped = /ごと|毎に|別に|別の|に紐[づ付]く|にひも[づ付]く|に関連する|に対応する|にひも付いた|詳細画面|台帳で|マスタ[ー]?で/.test(words);
     if (!/関連レコード|被参照|逆引き/.test(words) &&
         !(grouped && /見たい|見られ|一覧|履歴|表示|確認したい|参照したい/.test(words))) return input;
+    if (!incoming) return {...input, base:{...base, lookupEvidence:{candidates:[],partial:true,scannedAt:null}}};
     const candidates = [];
     let partial = false, scannedAt = null;
     try {

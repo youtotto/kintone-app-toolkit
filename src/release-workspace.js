@@ -165,7 +165,7 @@ const KTReleaseWorkspace = (() => {
     saved.proposal = historyData(pick(state.proposal, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.adopted = historyData(pick(state.adopted, ['behaviors', 'assumptions', 'decisions', 'approach', 'cannot']));
     saved.plan = historyData(pick(state.plan, ['goal', 'assessment', 'solution', 'relevantFields', 'proposedFields', 'steps', 'customizations', 'alternatives', 'questions', 'unknowns', 'impact', 'planId', 'finalBundle', 'generationInput']));
-    saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId', 'businessIntent'])));
+    saved.messages = state.messages.map(m => historyData(pick(m, ['id', 'role', 'text', 'facts', 'requestPurpose', 'consultationTarget', 'explanationId', 'businessIntent', 'proposalVersion'])));
     saved.explanations = state.explanations.map(e => historyData(pick(e, ['id', 'title', 'sections', 'unknowns', 'facts', 'createdAt', 'version', 'requestPurpose', 'accepted', 'diagnosisSource', 'kind', 'schemaVersion', 'snapshot', 'businessUnderstanding', 'sourceScope'])));
     saved.artifacts = state.artifacts.map(a => ({ ...historyData(pick(a, ['customizationId', 'title'])), ...(a.result ? { result: savedGenerated(a.result) } : {}), ...(a.error ? { error: savedError(a.error) } : {}) }));
     for (const key of ['businessContext','businessArchive','businessMode','businessResult','businessSelectedIds','businessReviewRequired','businessPlanContext','businessInvalid','businessAnswerDrafts','businessPlanRequests','businessPlanSelectedIds']) if (Object.hasOwn(state,key)) saved[key] = historyData(state[key]);
@@ -628,7 +628,7 @@ const KTReleaseWorkspace = (() => {
         }
         const rejected = new Set((response.turn?.ops || []).filter(o => o.op === 'reject').map(o => o.id));
         state.answers = state.answers.filter(a => !rejected.has(a.id));
-        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; state.selectedSuggestionIds = [];
+        if (response.proposal && !response.proposalUnchanged) { state.proposal = clone(response.proposal); state.proposalTarget = clone(resolvedTarget); state.version++; state.messages.at(-1).proposalVersion = state.version; state.selectedSuggestionIds = [];
           state.decisionDrafts = Object.fromEntries(activeDecisionDrafts(state).map(({id,...draft}) => [id,draft])); }
         // Retired question identifiers are never reused within the same conversation.
         state.questionIdFloor = Math.max(state.questionIdFloor, ...(state.proposal?.decisions || []).concat(state.answers).map(q => /^Q[1-9][0-9]{0,2}$/.test(q.id) ? Number(q.id.slice(1)) : 0));
@@ -836,7 +836,7 @@ const KTReleaseWorkspace = (() => {
             const response=await services.propose({text,requestPurpose:'consultation',businessMode:'improve',businessContext:context,previous:clone(state.proposal),questionIdFloor:state.questionIdFloor,base:current,requests:chosen.map(s=>s.text),answers:[],discussion:[],signal});if(!live())return;
             if(!response?.proposal||response.proposalUnchanged||!['propose','update'].includes(response.intent))throw new Error('変更希望から仮案を作成できませんでした。希望を確認してください。');
             state.proposal=clone(response.proposal);state.proposalTarget=null;state.version++;state.answers=[];state.questionIdFloor=Math.max(state.questionIdFloor,...(state.proposal.decisions||[]).map(q=>/^Q[1-9][0-9]*$/.test(q.id)?Number(q.id.slice(1)):0));state.goal=text;state.businessPlanContext=clone(h);state.businessPlanRequests=chosen.map(s=>s.text);state.businessPlanSelectedIds=chosen.map(s=>s.statementId);state.businessReviewRequired=false;base=current;state.businessArchive.push(clone(h));state.businessContext=null;state.businessMode='understand';state.businessResult=null;
-            const reply=message('assistant',response.reply,response.facts);reply.businessIntent='desired_change';
+            const reply=message('assistant',response.reply,response.facts);reply.businessIntent='desired_change';reply.proposalVersion=state.version;
             completed=true;set({phase:'proposal',proposalPending:false,error:null,explanationId:null});
           }
         }catch(e){if(live())set({phase:mode==='improve'&&state.proposalPending?(state.proposal?'proposal':'idle'):previous.phase,error:errorOf(e),progress:''});}
