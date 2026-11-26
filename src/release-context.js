@@ -179,8 +179,17 @@ const KTReleaseContext = (() => {
       }
     };
     addFields(data.fields);
-    if (base.lookupEvidence) add('incoming-lookup', '参照元アプリの運用フォームで再確認したルックアップと、現在の動作テスト環境のキーの組。関連レコード一覧の手動設定では、参照するアプリ＝appName、表示条件＝localとremoteの一致。表示列・ソートには確認できた項目を使う。日付の種類を区別し、「最近」の基準は提案として示す。表示件数は1ページの件数（例：5件、続きは次のページ）。総件数を制限する設定ではない。partialが真なら未確認の範囲があり、他に候補がないとは断定できない。目的に合う候補が一つなら具体案を出し、複数なら違いを示して選択を求める。候補がないときは参照先とキーを確認する。関連レコード一覧の新設と既存一覧の変更は管理者がフォームで手動設定する。既存一覧の表示列・ソートと採用内容を照合し、差があれば対象と変更後の値を仮案のapproach.standardに記し、最終計画のREQUIRE_CONFIRMATION手順の詳細にも引き継ぐ。既設の一覧が満たす場合は重複追加しない。', base.lookupEvidence,
-      {provenance:{environment:'production',loadedAt:base.lookupEvidence.scannedAt}});
+    const lookupEvidence = base.lookupEvidence;
+    if (lookupEvidence) {
+      const unverified = lookupEvidence.partial && !lookupEvidence.candidates.length;
+      const statement = unverified
+        ? '参照元アプリと照合項目は未確認です。他に候補がないとは判断できません。関連レコード一覧に使う参照先と照合する両側の項目を確認してください。'
+        : '参照元アプリの運用フォームで再確認したルックアップと、現在の動作テスト環境のキーの組。関連レコード一覧の手動設定では、参照するアプリ＝appName、表示条件＝localとremoteの一致。表示列・ソートには確認できた項目を使う。日付の種類を区別し、「最近」の基準は提案として示す。表示件数は1ページの件数（例：5件、続きは次のページ）。総件数を制限する設定ではない。partialが真なら未確認の範囲があり、他に候補がないとは断定できない。目的に合う候補が一つなら具体案を出し、複数なら違いを示して選択を求める。候補がないときは参照先とキーを確認する。関連レコード一覧の新設と既存一覧の変更は管理者がフォームで手動設定する。既存一覧の表示列・ソートと採用内容を照合し、差があれば対象と変更後の値を仮案のapproach.standardに記し、最終計画のREQUIRE_CONFIRMATION手順の詳細にも引き継ぐ。既設の一覧が満たす場合は重複追加しない。';
+      add('incoming-lookup', statement, lookupEvidence, {
+        confidence: unverified ? 'NOT_ANALYZED' : 'CERTAIN',
+        provenance: { environment:'production', loadedAt:lookupEvidence.scannedAt }
+      });
+    }
     const labels = { status: 'プロセス管理', views: '一覧', generalNotify: 'アプリの条件通知', perRecordNotify: 'レコードの条件通知', reminderNotify: 'リマインダーの条件通知', actions: 'アプリアクション', layout: 'フォーム', reports: 'グラフ', settings: 'アプリの設定', appAcl: 'アプリのアクセス権', recordAcl: 'レコードのアクセス権', fieldAcl: 'フィールドのアクセス権', appPlugins: 'プラグイン', customize: 'JavaScript / CSS カスタマイズ' };
     for (const [key, value] of Object.entries(data)) {
       if (key === 'relatedApps' && Object.keys(value || {}).length) {

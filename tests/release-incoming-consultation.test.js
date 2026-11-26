@@ -35,6 +35,31 @@ test('一般相談では走査せず、読めない参照元は未確認とし�
   assert.deepEqual(unavailable.base.lookupEvidence,{candidates:[],partial:true,scannedAt:null});
 });
 
+test('調査機能がない場合と参照元が読めない場合は未調査と伝え、画面に使う事実を保つ', async () => {
+  const noScanner = await C.withIncomingLookups(input,assert.fail,null);
+  const denied = await C.withIncomingLookups(input,async()=>{throw Error('unavailable')},
+    {loadCache:()=>({scannedAt:'2026-11-25',rows:[row('1')]})});
+  for (const enriched of [noScanner,denied]) {
+    const results = [C.proposal(enriched),C.plan({...enriched,proposal:{},version:1,goal:input.text})];
+    for (const payload of results) {
+      const fact = payload.facts.find(f=>f.kind==='incoming-lookup');
+      assert.equal(fact.confidence,'NOT_ANALYZED');
+      assert.match(fact.statement,/未確認/);
+      assert.deepEqual(fact.value.candidates,[]);
+      assert.equal(fact.value.partial,true);
+    }
+  }
+});
+
+test('全範囲を調べて候補が見つからなかった結果を未調査と区別する', async () => {
+  const empty = await C.withIncomingLookups(input,assert.fail,
+    {loadCache:()=>({scannedAt:'2026-11-25',rows:[]})});
+  const fact = C.proposal(empty).facts.find(f=>f.kind==='incoming-lookup');
+  assert.equal(fact.confidence,'CERTAIN');
+  assert.equal(fact.value.partial,false);
+  assert.deepEqual(fact.value.candidates,[]);
+});
+
 const candidate = (appName, appId, code = 'selected', label = '商品選択') => ({
   appId, appName, local:{code:'sku',label:'商品コード'}, remote:{code,label}
 });
